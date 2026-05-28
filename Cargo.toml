@@ -1,0 +1,43 @@
+[package]
+name = "sumzle-solver"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance Sumzle puzzle solver with multi-core and distributed computing support"
+license = "MIT"
+repository = "https://github.com/sumzle-solver/sumzle-solver"
+
+[[bin]]
+name = "sumzle-solver"
+path = "src/main.rs"
+
+[[bench]]
+name = "benchmark"
+harness = false
+path = "benches/benchmark.rs"
+
+[dependencies]
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
