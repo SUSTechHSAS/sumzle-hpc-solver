@@ -130,7 +130,7 @@ fn handle_factorials(expr: &str) -> Option<String> {
             let num_str: String = bs[j..].iter().collect();
             let n: u64 = num_str.parse().ok()?;
 
-            if n > MAX_FACTORIAL as u64 {
+            if n > MAX_FACTORIAL {
                 return None;
             }
 
@@ -201,10 +201,7 @@ fn handle_permutations(expr: &str) -> Option<String> {
             let n_str: String = chars[i + 1..k].iter().collect();
             let n: u64 = n_str.parse().ok()?;
 
-            if m > MAX_PERMUTATION as u64
-                || n > MAX_PERMUTATION as u64
-                || n > m
-            {
+            if m > MAX_PERMUTATION || n > MAX_PERMUTATION || n > m {
                 return None;
             }
 
@@ -260,7 +257,9 @@ fn evaluate_arithmetic(expr: &str) -> Option<f64> {
 
     // Validate: only allowed characters
     for ch in expr.chars() {
-        if !ch.is_ascii_digit() && !matches!(ch, '+'|'-'|'*'|'/'|'%'|'^'|'('|')'|' ') {
+        if !ch.is_ascii_digit()
+            && !matches!(ch, '+' | '-' | '*' | '/' | '%' | '^' | '(' | ')' | ' ')
+        {
             return None;
         }
     }
@@ -364,7 +363,7 @@ impl Parser {
                     if right == 0.0 {
                         return None;
                     }
-                    result = result % right;
+                    result %= right;
                 }
                 _ => break,
             }

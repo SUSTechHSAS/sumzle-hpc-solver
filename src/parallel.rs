@@ -1,7 +1,6 @@
 //! Multi-core parallel solver using Rayon
 
 use crate::solver::Solver;
-use crate::types::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -15,7 +14,10 @@ pub struct ParallelSolver {
 impl ParallelSolver {
     pub fn new(solver: Solver, num_threads: Option<usize>) -> Self {
         let num_threads = num_threads.unwrap_or_else(num_cpus::get);
-        Self { solver, num_threads }
+        Self {
+            solver,
+            num_threads,
+        }
     }
 
     /// Solve using multiple threads via Rayon
@@ -30,17 +32,19 @@ impl ParallelSolver {
         let results_mutex = Mutex::new(Vec::new());
 
         pool.install(|| {
-            branches.par_iter().for_each(|&(first_char, main_op, floor_ctx)| {
-                let (branch_results, branch_searched) =
-                    self.solver.solve_branch(first_char, main_op, floor_ctx);
+            branches
+                .par_iter()
+                .for_each(|&(first_char, main_op, floor_ctx)| {
+                    let (branch_results, branch_searched) =
+                        self.solver.solve_branch(first_char, main_op, floor_ctx);
 
-                total_searched.fetch_add(branch_searched, Ordering::Relaxed);
+                    total_searched.fetch_add(branch_searched, Ordering::Relaxed);
 
-                if !branch_results.is_empty() {
-                    let mut all_results = results_mutex.lock().unwrap();
-                    all_results.extend(branch_results);
-                }
-            });
+                    if !branch_results.is_empty() {
+                        let mut all_results = results_mutex.lock().unwrap();
+                        all_results.extend(branch_results);
+                    }
+                });
         });
 
         let mut results = results_mutex.into_inner().unwrap();

@@ -89,7 +89,10 @@ impl GlobalKnowledge {
                 min_required_overall = min_required_overall.max(min_required_this_row);
 
                 // If any tile with this char has state Empty, we know the exact count
-                if row.iter().any(|t| t.char == ch && t.state == TileState::Empty) {
+                if row
+                    .iter()
+                    .any(|t| t.char == ch && t.state == TileState::Empty)
+                {
                     let exact_this_row = green_in_row + yellow_in_row;
                     match derived_exact_count {
                         None => derived_exact_count = Some(exact_this_row),
@@ -111,7 +114,9 @@ impl GlobalKnowledge {
                 if exact < min_required_overall {
                     return Err(anyhow!(
                         "冲突: 字符 '{}' 的精确数量 ({}) 小于其最小需求数量 ({}).",
-                        ch, exact, min_required_overall
+                        ch,
+                        exact,
+                        min_required_overall
                     ));
                 }
                 gk.must_appear_exact_count.insert(ch, exact);
@@ -127,24 +132,27 @@ impl GlobalKnowledge {
                 if gk.globally_forbidden.contains(&fixed) {
                     return Err(anyhow!(
                         "冲突: 字符 '{}' 在位置 {} 固定但同时被全局禁用.",
-                        fixed, i + 1
+                        fixed,
+                        i + 1
                     ));
                 }
                 if gk.cannot_be_at[i].contains(&fixed) {
                     return Err(anyhow!(
                         "冲突: 字符 '{}' 在位置 {} 固定但又标记为不能在该位置.",
-                        fixed, i + 1
+                        fixed,
+                        i + 1
                     ));
                 }
                 let min_count = gk.must_appear_min_count.get(&fixed).copied().unwrap_or(0);
-                gk.must_appear_min_count
-                    .insert(fixed, min_count.max(1));
+                gk.must_appear_min_count.insert(fixed, min_count.max(1));
                 if let Some(exact) = gk.must_appear_exact_count.get(&fixed) {
                     let min = gk.must_appear_min_count.get(&fixed).copied().unwrap_or(0);
                     if *exact < min {
                         return Err(anyhow!(
                             "冲突: 字符 '{}' 的精确数量 {} 小于其最小固定要求 {}.",
-                            fixed, exact, min
+                            fixed,
+                            exact,
+                            min
                         ));
                     }
                 }
@@ -157,7 +165,9 @@ impl GlobalKnowledge {
             if exact < min {
                 return Err(anyhow!(
                     "冲突: 字符 '{}' 的精确数量 ({}) 小于其最小需求 ({}).",
-                    ch, exact, min
+                    ch,
+                    exact,
+                    min
                 ));
             }
         }
@@ -166,17 +176,11 @@ impl GlobalKnowledge {
         for &ch in &gk.globally_forbidden {
             let min = gk.must_appear_min_count.get(&ch).copied().unwrap_or(0);
             if min > 0 {
-                return Err(anyhow!(
-                    "冲突: 字符 '{}' 被全局禁用但又要求至少出现.",
-                    ch
-                ));
+                return Err(anyhow!("冲突: 字符 '{}' 被全局禁用但又要求至少出现.", ch));
             }
             if let Some(&exact) = gk.must_appear_exact_count.get(&ch) {
                 if exact > 0 {
-                    return Err(anyhow!(
-                        "冲突: 字符 '{}' 被全局禁用但又要求精确出现.",
-                        ch
-                    ));
+                    return Err(anyhow!("冲突: 字符 '{}' 被全局禁用但又要求精确出现.", ch));
                 }
             }
         }

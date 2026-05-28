@@ -1,6 +1,9 @@
 //! Comprehensive test suite for behavioral consistency with the reference JavaScript implementation
 
-use sumzle_solver::evaluator::{check_brackets, evaluate_expression, is_valid_equation, is_simple_number_or_negative, is_integer};
+use sumzle_solver::evaluator::{
+    check_brackets, evaluate_expression, is_integer, is_simple_number_or_negative,
+    is_valid_equation,
+};
 use sumzle_solver::parallel::ParallelSolver;
 use sumzle_solver::solver::Solver;
 use sumzle_solver::types::*;
@@ -202,28 +205,34 @@ fn test_empty_constraints() {
 
 #[test]
 fn test_correct_constraint() {
-    let gk = gk_from_row(6, &[
-        ('1', TileState::Correct),
-        ('+', TileState::Empty),
-        ('2', TileState::Present),
-        ('=', TileState::Empty),
-        ('3', TileState::Empty),
-        ('0', TileState::Empty),
-    ]);
+    let gk = gk_from_row(
+        6,
+        &[
+            ('1', TileState::Correct),
+            ('+', TileState::Empty),
+            ('2', TileState::Present),
+            ('=', TileState::Empty),
+            ('3', TileState::Empty),
+            ('0', TileState::Empty),
+        ],
+    );
     assert_eq!(gk.fixed_chars[0], Some('1'));
     assert!(gk.cannot_be_at[0].contains(&'+'));
 }
 
 #[test]
 fn test_present_constraint() {
-    let gk = gk_from_row(6, &[
-        ('1', TileState::Empty),
-        ('+', TileState::Present),
-        ('2', TileState::Empty),
-        ('=', TileState::Empty),
-        ('3', TileState::Empty),
-        ('0', TileState::Empty),
-    ]);
+    let gk = gk_from_row(
+        6,
+        &[
+            ('1', TileState::Empty),
+            ('+', TileState::Present),
+            ('2', TileState::Empty),
+            ('=', TileState::Empty),
+            ('3', TileState::Empty),
+            ('0', TileState::Empty),
+        ],
+    );
     assert!(gk.cannot_be_at[1].contains(&'+'));
     assert!(gk.must_appear_min_count.contains_key(&'+'));
     assert!(*gk.must_appear_min_count.get(&'+').unwrap() >= 1);
@@ -231,14 +240,17 @@ fn test_present_constraint() {
 
 #[test]
 fn test_absent_constraint() {
-    let gk = gk_from_row(6, &[
-        ('1', TileState::Empty),
-        ('+', TileState::Empty),
-        ('2', TileState::Empty),
-        ('=', TileState::Empty),
-        ('3', TileState::Empty),
-        ('4', TileState::Empty),
-    ]);
+    let gk = gk_from_row(
+        6,
+        &[
+            ('1', TileState::Empty),
+            ('+', TileState::Empty),
+            ('2', TileState::Empty),
+            ('=', TileState::Empty),
+            ('3', TileState::Empty),
+            ('4', TileState::Empty),
+        ],
+    );
     // All chars with state Empty should be at least at their positions excluded
     assert!(gk.cannot_be_at[0].contains(&'1'));
 }
@@ -246,20 +258,56 @@ fn test_absent_constraint() {
 #[test]
 fn test_conflicting_fixed_chars() {
     let row1: GuessRow = vec![
-        Tile { char: '1', state: TileState::Correct },
-        Tile { char: '+', state: TileState::Empty },
-        Tile { char: '2', state: TileState::Empty },
-        Tile { char: '=', state: TileState::Empty },
-        Tile { char: '3', state: TileState::Empty },
-        Tile { char: '0', state: TileState::Empty },
+        Tile {
+            char: '1',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '+',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '2',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        },
     ];
     let row2: GuessRow = vec![
-        Tile { char: '2', state: TileState::Correct },
-        Tile { char: '+', state: TileState::Empty },
-        Tile { char: '3', state: TileState::Empty },
-        Tile { char: '=', state: TileState::Empty },
-        Tile { char: '5', state: TileState::Empty },
-        Tile { char: '0', state: TileState::Empty },
+        Tile {
+            char: '2',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '+',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '5',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        },
     ];
     let result = GlobalKnowledge::from_guess_rows(6, &[row1, row2]);
     assert!(result.is_err());
@@ -279,7 +327,11 @@ fn test_solve_length_6_no_constraints() {
     assert!(searched_count > 0);
 
     for sol in &results {
-        assert!(is_valid_equation(sol), "Solution '{}' should be a valid equation", sol);
+        assert!(
+            is_valid_equation(sol),
+            "Solution '{}' should be a valid equation",
+            sol
+        );
         assert_eq!(sol.len(), 6, "Solution '{}' should have length 6", sol);
     }
 }
@@ -287,32 +339,76 @@ fn test_solve_length_6_no_constraints() {
 #[test]
 fn test_solve_with_correct_constraint() {
     let row: GuessRow = vec![
-        Tile { char: '1', state: TileState::Correct },
-        Tile { char: '+', state: TileState::Empty },
-        Tile { char: '2', state: TileState::Empty },
-        Tile { char: '=', state: TileState::Correct },
-        Tile { char: '3', state: TileState::Empty },
-        Tile { char: '0', state: TileState::Empty },
+        Tile {
+            char: '1',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '+',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '2',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        },
     ];
     let gk = GlobalKnowledge::from_guess_rows(6, &[row]).unwrap();
     let solver = Solver::new(6, gk);
     let (results, _searched) = solver.solve();
 
     for sol in &results {
-        assert!(sol.starts_with('1'), "Solution '{}' should start with '1'", sol);
-        assert!(sol.as_bytes()[3] == b'=', "Solution '{}' should have '=' at position 3", sol);
+        assert!(
+            sol.starts_with('1'),
+            "Solution '{}' should start with '1'",
+            sol
+        );
+        assert!(
+            sol.as_bytes()[3] == b'=',
+            "Solution '{}' should have '=' at position 3",
+            sol
+        );
     }
 }
 
 #[test]
 fn test_solve_with_present_constraint() {
     let row: GuessRow = vec![
-        Tile { char: '1', state: TileState::Empty },
-        Tile { char: '+', state: TileState::Present },
-        Tile { char: '2', state: TileState::Empty },
-        Tile { char: '=', state: TileState::Empty },
-        Tile { char: '3', state: TileState::Empty },
-        Tile { char: '0', state: TileState::Empty },
+        Tile {
+            char: '1',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '+',
+            state: TileState::Present,
+        },
+        Tile {
+            char: '2',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        },
     ];
     let gk = GlobalKnowledge::from_guess_rows(6, &[row]).unwrap();
     let solver = Solver::new(6, gk);
@@ -320,7 +416,12 @@ fn test_solve_with_present_constraint() {
 
     for sol in &results {
         assert!(sol.contains('+'), "Solution '{}' should contain '+'", sol);
-        assert_ne!(sol.as_bytes()[1], b'+', "Solution '{}' should not have '+' at position 1", sol);
+        assert_ne!(
+            sol.as_bytes()[1],
+            b'+',
+            "Solution '{}' should not have '+' at position 1",
+            sol
+        );
     }
 }
 
@@ -330,8 +431,14 @@ fn test_solve_specific_equation() {
     let solver = Solver::new(5, gk);
     let (results, _searched) = solver.solve();
 
-    assert!(results.contains(&"1+2=3".to_string()), "Should find '1+2=3'");
-    assert!(results.contains(&"2*3=6".to_string()), "Should find '2*3=6'");
+    assert!(
+        results.contains(&"1+2=3".to_string()),
+        "Should find '1+2=3'"
+    );
+    assert!(
+        results.contains(&"2*3=6".to_string()),
+        "Should find '2*3=6'"
+    );
 }
 
 #[test]
@@ -343,7 +450,11 @@ fn test_no_duplicate_solutions() {
     let mut sorted = results.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(results.len(), sorted.len(), "No duplicate solutions should exist");
+    assert_eq!(
+        results.len(),
+        sorted.len(),
+        "No duplicate solutions should exist"
+    );
 }
 
 // =========================================================================
@@ -365,18 +476,39 @@ fn test_parallel_matches_sequential() {
     let mut par_sorted = par_results;
     par_sorted.sort();
 
-    assert_eq!(seq_sorted, par_sorted, "Parallel and sequential results should match");
+    assert_eq!(
+        seq_sorted, par_sorted,
+        "Parallel and sequential results should match"
+    );
 }
 
 #[test]
 fn test_parallel_with_constraints() {
     let row: GuessRow = vec![
-        Tile { char: '2', state: TileState::Correct },
-        Tile { char: '*', state: TileState::Present },
-        Tile { char: '3', state: TileState::Correct },
-        Tile { char: '=', state: TileState::Correct },
-        Tile { char: '6', state: TileState::Correct },
-        Tile { char: '0', state: TileState::Empty },
+        Tile {
+            char: '2',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '*',
+            state: TileState::Present,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '6',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        },
     ];
     let gk = GlobalKnowledge::from_guess_rows(6, &[row]).unwrap();
 
@@ -450,18 +582,48 @@ fn test_single_digit_equation() {
 #[test]
 fn test_contradictory_constraints() {
     let row1: GuessRow = vec![
-        Tile { char: '1', state: TileState::Correct },
-        Tile { char: '+', state: TileState::Empty },
-        Tile { char: '2', state: TileState::Empty },
-        Tile { char: '=', state: TileState::Empty },
-        Tile { char: '3', state: TileState::Empty },
+        Tile {
+            char: '1',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '+',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '2',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Empty,
+        },
     ];
     let row2: GuessRow = vec![
-        Tile { char: '5', state: TileState::Correct },
-        Tile { char: '+', state: TileState::Empty },
-        Tile { char: '3', state: TileState::Empty },
-        Tile { char: '=', state: TileState::Empty },
-        Tile { char: '8', state: TileState::Empty },
+        Tile {
+            char: '5',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '+',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '3',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '=',
+            state: TileState::Empty,
+        },
+        Tile {
+            char: '8',
+            state: TileState::Empty,
+        },
     ];
     let result = GlobalKnowledge::from_guess_rows(5, &[row1, row2]);
     assert!(result.is_err());

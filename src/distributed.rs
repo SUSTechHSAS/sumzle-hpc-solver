@@ -16,7 +16,10 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WorkerMessage {
     /// Worker registration
-    Register { worker_id: String, num_threads: usize },
+    Register {
+        worker_id: String,
+        num_threads: usize,
+    },
     /// Worker requesting work
     RequestWork { worker_id: String },
     /// Worker reporting results
@@ -82,26 +85,27 @@ impl Coordinator {
         let length = self.solver.length;
 
         // Spawn a thread for local solving
-        let local_handle = std::thread::spawn(move || {
-            loop {
-                let branch_idx = local_next_branch.fetch_add(1, Ordering::SeqCst) as usize;
-                if branch_idx >= local_branches.len() {
-                    break;
-                }
-                let (first_char, main_op, floor_ctx) = local_branches[branch_idx];
-                let solver = Solver::new(length, GlobalKnowledge {
+        let local_handle = std::thread::spawn(move || loop {
+            let branch_idx = local_next_branch.fetch_add(1, Ordering::SeqCst) as usize;
+            if branch_idx >= local_branches.len() {
+                break;
+            }
+            let (first_char, main_op, floor_ctx) = local_branches[branch_idx];
+            let solver = Solver::new(
+                length,
+                GlobalKnowledge {
                     fixed_chars: vec![None; length],
                     cannot_be_at: vec![std::collections::HashSet::new(); length],
                     must_appear_min_count: HashMap::new(),
                     must_appear_exact_count: HashMap::new(),
                     globally_forbidden: std::collections::HashSet::new(),
-                });
-                let (results, searched) = solver.solve_branch(first_char, main_op, floor_ctx);
-                local_total_searched.fetch_add(searched, Ordering::Relaxed);
-                if !results.is_empty() {
-                    let mut all = local_results.lock().unwrap();
-                    all.extend(results);
-                }
+                },
+            );
+            let (results, searched) = solver.solve_branch(first_char, main_op, floor_ctx);
+            local_total_searched.fetch_add(searched, Ordering::Relaxed);
+            if !results.is_empty() {
+                let mut all = local_results.lock().unwrap();
+                all.extend(results);
             }
         });
 

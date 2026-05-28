@@ -3,11 +3,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use sumzle_solver::evaluator;
-use sumzle_solver::types::GlobalKnowledge;
 use sumzle_solver::distributed::{Coordinator, Worker};
+use sumzle_solver::evaluator;
 use sumzle_solver::parallel::ParallelSolver;
 use sumzle_solver::solver::Solver;
+use sumzle_solver::types::GlobalKnowledge;
 use sumzle_solver::types::*;
 
 #[derive(Parser)]
@@ -123,7 +123,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Solve { input, threads, format } => {
+        Commands::Solve {
+            input,
+            threads,
+            format,
+        } => {
             let input_str = match input {
                 Some(path) => std::fs::read_to_string(path)?,
                 None => {
@@ -144,18 +148,18 @@ fn main() -> Result<()> {
                 solver.solve()
             } else {
                 let solver = Solver::new(length, gk);
-                let num_threads = if threads == 0 { num_cpus::get() } else { threads };
+                let num_threads = if threads == 0 {
+                    num_cpus::get()
+                } else {
+                    threads
+                };
                 let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
                 parallel_solver.solve()
             };
 
             let elapsed = start.elapsed();
             let elapsed_ms = elapsed.as_millis() as u64;
-            let speed = if elapsed_ms > 0 {
-                (searched_count as u64 * 1000) / elapsed_ms
-            } else {
-                0
-            };
+            let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
 
             let found_count = results.len();
             let solver_result = SolverResult {
@@ -174,7 +178,10 @@ fn main() -> Result<()> {
                 }
                 "text" => {
                     println!("Solutions found: {}", solver_result.stats.found_count);
-                    println!("Expressions searched: {}", solver_result.stats.searched_count);
+                    println!(
+                        "Expressions searched: {}",
+                        solver_result.stats.searched_count
+                    );
                     println!("Time: {}ms", solver_result.stats.elapsed_ms);
                     println!("Speed: {} expr/s", solver_result.stats.speed);
                     println!();
@@ -205,8 +212,16 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Worker { coordinator, id, threads } => {
-            let num_threads = if threads == 0 { num_cpus::get() } else { threads };
+        Commands::Worker {
+            coordinator,
+            id,
+            threads,
+        } => {
+            let num_threads = if threads == 0 {
+                num_cpus::get()
+            } else {
+                threads
+            };
             let worker = Worker::new(coordinator, id, num_threads);
             worker.run()?;
         }
@@ -216,12 +231,10 @@ fn main() -> Result<()> {
             println!("{}", valid);
         }
 
-        Commands::Eval { expression } => {
-            match evaluator::evaluate_expression(&expression) {
-                Some(val) => println!("{}", val),
-                None => println!("Invalid expression"),
-            }
-        }
+        Commands::Eval { expression } => match evaluator::evaluate_expression(&expression) {
+            Some(val) => println!("{}", val),
+            None => println!("Invalid expression"),
+        },
 
         Commands::Bench { lengths } => {
             for &len in &lengths {
@@ -240,7 +253,10 @@ fn main() -> Result<()> {
 
                 println!(
                     "Length {}: {} solutions, {} searched, {:?}",
-                    len, results.len(), searched_count, elapsed
+                    len,
+                    results.len(),
+                    searched_count,
+                    elapsed
                 );
             }
         }

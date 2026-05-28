@@ -19,71 +19,69 @@ fn get_optimized_char_order(
 
     let prev_char = if index > 0 { expr[index - 1] } else { None };
 
-    let mut ordered: Vec<char> = Vec::new();
-
-    if floor_ctx.in_floor {
+    let ordered = if floor_ctx.in_floor {
         if floor_ctx.has_slash_in_current_floor {
-            ordered = vec!['0','1','2','3','4','5','6','7','8','9', ']'];
+            vec!['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ']']
         } else {
-            ordered = vec!['0','1','2','3','4','5','6','7','8','9', '/'];
+            vec!['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '/']
         }
     } else if main_op_so_far == Some('=') {
         if prev_char == Some('=') {
-            ordered = vec!['-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+            vec!['-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
         } else {
-            ordered = vec!['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+            vec!['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
         }
     } else if index == 0 {
-        ordered = vec!['1', '2', '3', '4', '5', '6', '7', '8', '9', '(', '['];
+        vec!['1', '2', '3', '4', '5', '6', '7', '8', '9', '(', '[']
     } else if let Some(pc) = prev_char {
         if is_digit(pc) {
-            ordered = vec![
-                '0','1','2','3','4','5','6','7','8','9',
-                '+', '-', '*', '/', '%', '^', 'A', '!',
-                ')', ']', '[',
-                '=', '>',
-            ];
-        } else if is_operator(pc) {
-            ordered = vec!['1','2','3','4','5','6','7','8','9','0', '(', '['];
-        } else if is_open_bracket(pc) {
-            ordered = vec!['1','2','3','4','5','6','7','8','9','0', '(', '['];
+            vec![
+                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '-', '*', '/', '%', '^',
+                'A', '!', ')', ']', '[', '=', '>',
+            ]
+        } else if is_operator(pc) || is_open_bracket(pc) {
+            vec!['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '(', '[']
         } else if is_close_bracket(pc) || is_unary_post_operator(pc) {
-            ordered = vec![
-                '+', '-', '*', '/', '%', '^', 'A', '!',
-                ')', ']', '[',
-                '=', '>',
-            ];
+            vec![
+                '+', '-', '*', '/', '%', '^', 'A', '!', ')', ']', '[', '=', '>',
+            ]
         } else if is_main_operator(pc) {
-            ordered = vec!['1','2','3','4','5','6','7','8','9','0', '(', '['];
+            vec!['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '(', '[']
         } else {
-            ordered = vec![
-                '1','2','3','4','5','6','7','8','9','0',
-                '+','-','*','/', '=',
-                '(','[', ')',']',
-                '%','^','!','A','>',
-            ];
+            vec![
+                '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '+', '-', '*', '/', '=', '(',
+                '[', ')', ']', '%', '^', '!', 'A', '>',
+            ]
         }
     } else {
-        ordered = vec![
-            '1','2','3','4','5','6','7','8','9','0',
-            '+','-','*','/', '=',
-            '(','[', ')',']',
-            '%','^','!','A','>',
-        ];
-    }
+        vec![
+            '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '+', '-', '*', '/', '=', '(', '[',
+            ')', ']', '%', '^', '!', 'A', '>',
+        ]
+    };
 
     // Filter for last position
-    if index == length - 1 && !floor_ctx.in_floor {
-        let end_chars: &[char] = &['0','1','2','3','4','5','6','7','8','9', ')', ']', '!'];
-        let filtered: Vec<char> = ordered.iter().filter(|c| end_chars.contains(c)).copied().collect();
+    let ordered = if index == length - 1 && !floor_ctx.in_floor {
+        let end_chars: &[char] = &[
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ')', ']', '!',
+        ];
+        let filtered: Vec<char> = ordered
+            .iter()
+            .filter(|c| end_chars.contains(c))
+            .copied()
+            .collect();
         if !filtered.is_empty() {
-            ordered = filtered;
+            filtered
         } else if prev_char.is_some() {
-            ordered = end_chars.to_vec();
+            end_chars.to_vec()
         } else if index == 0 && length == 1 {
-            ordered = vec!['0','1','2','3','4','5','6','7','8','9'];
+            vec!['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+        } else {
+            ordered
         }
-    }
+    } else {
+        ordered
+    };
 
     // Deduplicate and filter by constraints
     let mut seen = std::collections::HashSet::new();
@@ -129,29 +127,53 @@ fn can_place_char(
 
     // Floor context constraints
     if floor_ctx.in_floor {
-        if ch == '[' { return false; }
-        if is_operator(ch) && ch != '/' { return false; }
-        if is_main_operator(ch) { return false; }
-        if ch == '(' { return false; }
-        if ch == 'A' || ch == '!' { return false; }
+        if ch == '[' {
+            return false;
+        }
+        if is_operator(ch) && ch != '/' {
+            return false;
+        }
+        if is_main_operator(ch) {
+            return false;
+        }
+        if ch == '(' {
+            return false;
+        }
+        if ch == 'A' || ch == '!' {
+            return false;
+        }
 
         if ch == '/' {
-            if floor_ctx.has_slash_in_current_floor { return false; }
+            if floor_ctx.has_slash_in_current_floor {
+                return false;
+            }
             let prev = if index > 0 { expr[index - 1] } else { None };
-            if !prev.map_or(false, is_digit) || index == 0 { return false; }
+            if !prev.is_some_and(is_digit) || index == 0 {
+                return false;
+            }
         } else if ch == ']' {
             let prev = if index > 0 { expr[index - 1] } else { None };
-            if !prev.map_or(false, is_digit) { return false; }
-            if !floor_ctx.has_slash_in_current_floor { return false; }
+            if !prev.is_some_and(is_digit) {
+                return false;
+            }
+            if !floor_ctx.has_slash_in_current_floor {
+                return false;
+            }
         } else if !is_digit(ch) {
             return false;
         }
     }
 
     // Floor bracket constraints
-    if ch == '[' && floor_ctx.in_floor { return false; }
-    if ch == ']' && !floor_ctx.in_floor { return false; }
-    if ch == '[' && index >= length - 3 { return false; }
+    if ch == '[' && floor_ctx.in_floor {
+        return false;
+    }
+    if ch == ']' && !floor_ctx.in_floor {
+        return false;
+    }
+    if ch == '[' && index >= length - 3 {
+        return false;
+    }
 
     // Leading zero check and operand value check
     if is_digit(ch) && main_op_so_far != Some('=') {
@@ -179,9 +201,9 @@ fn can_place_char(
         // Operand value check
         let char_before = if k >= 0 { expr[k as usize] } else { None };
         if char_before.is_none()
-            || char_before.map_or(false, is_operator)
-            || char_before.map_or(false, is_open_bracket)
-            || char_before.map_or(false, is_main_operator)
+            || char_before.is_some_and(is_operator)
+            || char_before.is_some_and(is_open_bracket)
+            || char_before.is_some_and(is_main_operator)
         {
             if let Ok(val) = temp_num_str.parse::<i64>() {
                 if val > MAX_OPERAND_VALUE {
@@ -192,10 +214,13 @@ fn can_place_char(
     }
 
     // First position rules
-    if index == 0 {
-        if is_binary_operator(ch) || is_close_bracket(ch) || is_main_operator(ch) || is_unary_post_operator(ch) {
-            return false;
-        }
+    if index == 0
+        && (is_binary_operator(ch)
+            || is_close_bracket(ch)
+            || is_main_operator(ch)
+            || is_unary_post_operator(ch))
+    {
+        return false;
     }
 
     // Previous character-based rules
@@ -203,51 +228,77 @@ fn can_place_char(
 
     if let Some(pc) = prev_char {
         if is_digit(pc) {
-            if is_open_bracket(ch) && ch != '[' { return false; }
-            if ch == '[' && floor_ctx.in_floor { return false; }
-        } else if is_operator(pc) {
-            if is_binary_operator(ch) && !(pc == 'A' && (is_open_bracket(ch) || is_digit(ch))) && !is_unary_post_operator(pc) {
+            if is_open_bracket(ch) && ch != '[' {
                 return false;
             }
-            if is_close_bracket(ch) { return false; }
-            if is_main_operator(ch) && !is_unary_post_operator(pc) { return false; }
-            if is_unary_post_operator(pc) && (is_digit(ch) || is_open_bracket(ch)) { return false; }
+            if ch == '[' && floor_ctx.in_floor {
+                return false;
+            }
+        } else if is_operator(pc) {
+            if is_binary_operator(ch)
+                && !(pc == 'A' && (is_open_bracket(ch) || is_digit(ch)))
+                && !is_unary_post_operator(pc)
+            {
+                return false;
+            }
+            if is_close_bracket(ch) {
+                return false;
+            }
+            if is_main_operator(ch) && !is_unary_post_operator(pc) {
+                return false;
+            }
+            if is_unary_post_operator(pc) && (is_digit(ch) || is_open_bracket(ch)) {
+                return false;
+            }
         } else if is_open_bracket(pc) {
-            if pc == '[' && ch == '(' { return false; }
-            if is_binary_operator(ch) { return false; }
-            if is_close_bracket(ch) && get_matching_bracket(pc) != Some(ch) { return false; }
-            if is_main_operator(ch) { return false; }
-            if is_unary_post_operator(ch) { return false; }
+            if pc == '[' && ch == '(' {
+                return false;
+            }
+            if is_binary_operator(ch) {
+                return false;
+            }
+            if is_close_bracket(ch) && get_matching_bracket(pc) != Some(ch) {
+                return false;
+            }
+            if is_main_operator(ch) {
+                return false;
+            }
+            if is_unary_post_operator(ch) {
+                return false;
+            }
         } else if is_close_bracket(pc) {
-            if is_digit(ch) { return false; }
-            if is_open_bracket(ch) { return false; }
+            if is_digit(ch) {
+                return false;
+            }
+            if is_open_bracket(ch) {
+                return false;
+            }
         } else if is_main_operator(pc) {
             if pc == '=' {
-                if !is_digit(ch) && ch != '-' { return false; }
-            } else {
-                if is_main_operator(ch) { return false; }
-                if is_close_bracket(ch) { return false; }
+                if !is_digit(ch) && ch != '-' {
+                    return false;
+                }
+            } else if is_main_operator(ch) || is_close_bracket(ch) {
+                return false;
             }
         }
     }
 
     // After main operator =, only digits and minus
     if main_op_so_far == Some('=') {
-        if !is_digit(ch) && ch != '-' { return false; }
-        if ch == '-' {
-            if prev_char != Some('=') {
-                // standard operator rules apply
-            } else if index >= length - 1 {
-                return false;
-            }
+        if !is_digit(ch) && ch != '-' {
+            return false;
+        }
+        if ch == '-' && prev_char == Some('=') && index >= length - 1 {
+            return false;
         }
     }
 
     // Last position rules
-    if index == length - 1 {
-        if is_binary_operator(ch) || is_open_bracket(ch) || is_main_operator(ch) {
-            return false;
-        }
+    if index == length - 1
+        && (is_binary_operator(ch) || is_open_bracket(ch) || is_main_operator(ch))
+    {
+        return false;
     }
 
     // Bracket balance check
@@ -306,26 +357,21 @@ fn can_place_char(
     }
 
     // Permutation A rules
-    if ch == 'A' {
-        if !prev_char.map_or(false, |pc| is_digit(pc) || is_close_bracket(pc)) {
-            return false;
-        }
+    if ch == 'A' && !prev_char.is_some_and(|pc| is_digit(pc) || is_close_bracket(pc)) {
+        return false;
     }
-    if prev_char == Some('A') {
-        if !is_digit(ch) && !is_open_bracket(ch) {
-            return false;
-        }
+    if prev_char == Some('A') && !is_digit(ch) && !is_open_bracket(ch) {
+        return false;
     }
 
     // Factorial ! rules
     if ch == '!' {
-        if prev_char.is_none() { return false; }
+        if prev_char.is_none() {
+            return false;
+        }
         if let Some(pc) = prev_char {
-            if is_digit(pc) {
-                // Valid: digit followed by !
-            } else if is_close_bracket(pc) {
-                if pc == ']' { return false; }
-            } else {
+            // Only digit or ')' can precede '!'; ']' is not allowed
+            if !is_digit(pc) && pc != ')' {
                 return false;
             }
         }
@@ -384,6 +430,7 @@ impl Solver {
         (results, searched_count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn recursive_search(
         &self,
         index: usize,
@@ -403,9 +450,7 @@ impl Solver {
             }
 
             // Build expression string
-            let expr_str: String = expr.iter()
-                .filter_map(|c| *c)
-                .collect();
+            let expr_str: String = expr.iter().filter_map(|c| *c).collect();
 
             // Check brackets
             if !check_brackets(&expr_str) {
@@ -421,10 +466,10 @@ impl Solver {
 
             // Check min count constraints (only for chars not in exact count)
             for (&ch, &min) in &self.gk.must_appear_min_count {
-                if !self.gk.must_appear_exact_count.contains_key(&ch) {
-                    if char_counts.get(&ch).copied().unwrap_or(0) < min {
-                        return;
-                    }
+                if !self.gk.must_appear_exact_count.contains_key(&ch)
+                    && char_counts.get(&ch).copied().unwrap_or(0) < min
+                {
+                    return;
                 }
             }
 
@@ -437,14 +482,26 @@ impl Solver {
 
         let fixed_char = self.gk.fixed_chars[index];
 
-        if fixed_char.is_some() {
-            let ch = fixed_char.unwrap();
+        if let Some(ch) = fixed_char {
             let next_floor_ctx = update_floor_context(ch, floor_ctx);
 
-            if can_place_char(ch, index, expr, main_op_so_far, char_counts, floor_ctx, &self.gk, self.length) {
+            if can_place_char(
+                ch,
+                index,
+                expr,
+                main_op_so_far,
+                char_counts,
+                floor_ctx,
+                &self.gk,
+                self.length,
+            ) {
                 expr[index] = Some(ch);
                 *char_counts.entry(ch).or_insert(0) += 1;
-                let new_main_op = if is_main_operator(ch) { Some(ch) } else { main_op_so_far };
+                let new_main_op = if is_main_operator(ch) {
+                    Some(ch)
+                } else {
+                    main_op_so_far
+                };
 
                 self.recursive_search(
                     index + 1,
@@ -475,10 +532,23 @@ impl Solver {
             for ch in chars_to_try {
                 let next_floor_ctx = update_floor_context(ch, floor_ctx);
 
-                if can_place_char(ch, index, expr, main_op_so_far, char_counts, floor_ctx, &self.gk, self.length) {
+                if can_place_char(
+                    ch,
+                    index,
+                    expr,
+                    main_op_so_far,
+                    char_counts,
+                    floor_ctx,
+                    &self.gk,
+                    self.length,
+                ) {
                     expr[index] = Some(ch);
                     *char_counts.entry(ch).or_insert(0) += 1;
-                    let new_main_op = if is_main_operator(ch) { Some(ch) } else { main_op_so_far };
+                    let new_main_op = if is_main_operator(ch) {
+                        Some(ch)
+                    } else {
+                        main_op_so_far
+                    };
 
                     self.recursive_search(
                         index + 1,
@@ -507,12 +577,22 @@ impl Solver {
         let expr: Vec<Option<char>> = vec![None; self.length];
         let char_counts: HashMap<char, usize> = HashMap::new();
 
-        let chars = get_optimized_char_order(0, &expr, self.length, None, FloorContext::new(), &self.gk);
+        let chars =
+            get_optimized_char_order(0, &expr, self.length, None, FloorContext::new(), &self.gk);
 
         chars
             .into_iter()
             .filter(|&ch| {
-                can_place_char(ch, 0, &expr, None, &char_counts, FloorContext::new(), &self.gk, self.length)
+                can_place_char(
+                    ch,
+                    0,
+                    &expr,
+                    None,
+                    &char_counts,
+                    FloorContext::new(),
+                    &self.gk,
+                    self.length,
+                )
             })
             .map(|ch| {
                 let main_op = if is_main_operator(ch) { Some(ch) } else { None };
@@ -523,7 +603,12 @@ impl Solver {
     }
 
     /// Solve a single branch starting from a given first character
-    pub fn solve_branch(&self, first_char: char, main_op: Option<char>, floor_ctx: FloorContext) -> (Vec<String>, u64) {
+    pub fn solve_branch(
+        &self,
+        first_char: char,
+        main_op: Option<char>,
+        floor_ctx: FloorContext,
+    ) -> (Vec<String>, u64) {
         let mut results: Vec<String> = Vec::new();
         let mut searched_count: u64 = 0;
         let mut expr: Vec<Option<char>> = vec![None; self.length];
