@@ -1,7 +1,8 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
-import GuessRowComponent, { createBlankRow, cycleState } from './GuessRow';
+import GuessRowComponent from './GuessRow';
+import { createBlankRow, cycleState } from '../utils';
 
 describe('GuessRow', () => {
   const mockOnCharChange = vi.fn();

@@ -182,9 +182,7 @@ pub fn create_router() -> Router {
             .fallback_service(ServeDir::new(&frontend_dir))
             .layer(cors)
     } else {
-        Router::new()
-            .merge(api_routes)
-            .layer(cors)
+        Router::new().merge(api_routes).layer(cors)
     }
 }
 
@@ -354,18 +352,48 @@ mod tests {
         let mut app = test_app();
         // Provide conflicting constraints: position 0 fixed to '1' and '2'
         let row1: GuessRow = vec![
-            Tile { char: '1', state: TileState::Correct },
-            Tile { char: '+', state: TileState::Empty },
-            Tile { char: '2', state: TileState::Empty },
-            Tile { char: '=', state: TileState::Empty },
-            Tile { char: '3', state: TileState::Empty },
+            Tile {
+                char: '1',
+                state: TileState::Correct,
+            },
+            Tile {
+                char: '+',
+                state: TileState::Empty,
+            },
+            Tile {
+                char: '2',
+                state: TileState::Empty,
+            },
+            Tile {
+                char: '=',
+                state: TileState::Empty,
+            },
+            Tile {
+                char: '3',
+                state: TileState::Empty,
+            },
         ];
         let row2: GuessRow = vec![
-            Tile { char: '2', state: TileState::Correct },
-            Tile { char: '+', state: TileState::Empty },
-            Tile { char: '2', state: TileState::Empty },
-            Tile { char: '=', state: TileState::Empty },
-            Tile { char: '4', state: TileState::Empty },
+            Tile {
+                char: '2',
+                state: TileState::Correct,
+            },
+            Tile {
+                char: '+',
+                state: TileState::Empty,
+            },
+            Tile {
+                char: '2',
+                state: TileState::Empty,
+            },
+            Tile {
+                char: '=',
+                state: TileState::Empty,
+            },
+            Tile {
+                char: '4',
+                state: TileState::Empty,
+            },
         ];
         let req_body = SolveRequest {
             length: 5,

@@ -1,7 +1,8 @@
 import { useState, useCallback } from 'react';
 import type { GuessRow, SolveResponse, TileState } from './types';
 import { solvePuzzle } from './api';
-import GuessRowComponent, { createBlankRow, cycleState } from './components/GuessRow';
+import GuessRowComponent from './components/GuessRow';
+import { createBlankRow, cycleState } from './utils';
 import Results from './components/Results';
 import ExpressionEvaluator from './components/ExpressionEvaluator';
 import EquationValidator from './components/EquationValidator';
