@@ -73,5 +73,5 @@ jobs:
       - run: |
           echo "### Benchmark Results" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          ./target/release/sumzle-solver bench -l 5 6 >> $GITHUB_STEP_SUMMARY
+          ./target/release/sumzle-solver bench -l 5 -l 6 >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
