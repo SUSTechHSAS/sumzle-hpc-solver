@@ -15,3 +15,4 @@ pub mod evaluator;
 pub mod parallel;
 pub mod solver;
 pub mod types;
+pub mod server;

@@ -70,6 +70,15 @@ enum Commands {
         #[arg(short, long, default_value = "6")]
         lengths: Vec<usize>,
     },
+    /// Start the web API server
+    Serve {
+        /// Host to bind to
+        #[arg(short, long, default_value = "0.0.0.0")]
+        host: String,
+        /// Port to listen on
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+    },
 }
 
 /// CLI input format
@@ -259,6 +268,13 @@ fn main() -> Result<()> {
                     elapsed
                 );
             }
+        }
+
+        Commands::Serve { host, port } => {
+            let addr = format!("{}:{}", host, port);
+            println!("Starting web server on {}", addr);
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(sumzle_solver::server::run_server(&addr))?;
         }
     }
 

@@ -1,0 +1,75 @@
+.eval-section {
+  padding: 16px;
+  background: #f8f9fa;
+  border-radius: 10px;
+  border: 1px solid #e0e0e0;
+}
+
+.eval-section h3 {
+  margin: 0 0 10px 0;
+  font-size: 1rem;
+  color: #1a1a2e;
+}
+
+.eval-row {
+  display: flex;
+  gap: 8px;
+}
+
+.eval-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-family: 'Courier New', monospace;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.eval-input:focus {
+  border-color: #6aaa64;
+}
+
+.eval-btn {
+  padding: 8px 16px;
+  background: #1a1a2e;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.eval-btn:hover:not(:disabled) {
+  background: #2d2d5e;
+}
+
+.eval-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.eval-result {
+  margin-top: 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 1.1rem;
+  color: #333;
+}
+
+.eval-result strong {
+  color: #6aaa64;
+}
+
+.eval-no-result {
+  color: #999;
+  font-style: italic;
+}
+
+.eval-error {
+  margin-top: 8px;
+  color: #cc0000;
+  font-size: 0.9rem;
+}

@@ -1,0 +1,263 @@
+/* ===== App Layout ===== */
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #f0f2f5;
+}
+
+/* ===== Header ===== */
+.app-header {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  color: #ffffff;
+  padding: 28px 20px 24px;
+  text-align: center;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  position: relative;
+  overflow: hidden;
+}
+
+.app-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #6aaa64, #c9b458, #6aaa64);
+}
+
+.app-title {
+  margin: 0;
+  font-size: 2.2rem;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.app-subtitle {
+  margin: 6px 0 0;
+  font-size: 1rem;
+  font-weight: 400;
+  opacity: 0.8;
+  letter-spacing: 0.5px;
+}
+
+/* ===== Main ===== */
+.app-main {
+  flex: 1;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+/* ===== Puzzle Section ===== */
+.puzzle-section {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  border: 1px solid #e8e8e8;
+  margin-bottom: 20px;
+}
+
+.puzzle-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.length-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.length-control label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.length-input {
+  width: 60px;
+  padding: 6px 10px;
+  border: 2px solid #ddd;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  text-align: center;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.length-input:focus {
+  border-color: #6aaa64;
+}
+
+.row-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ===== Buttons ===== */
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.3px;
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #6aaa64, #5a9a54);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(106, 170, 100, 0.3);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #5a9a54, #4a8a44);
+  box-shadow: 0 4px 12px rgba(106, 170, 100, 0.4);
+}
+
+.btn-secondary {
+  background: #e8eaed;
+  color: #333;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #d0d3d8;
+}
+
+.btn-danger {
+  background: #f8d7da;
+  color: #842029;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #f1aeb5;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-solve {
+  padding: 12px 32px;
+  font-size: 1.1rem;
+  border-radius: 10px;
+}
+
+/* ===== Guess Rows ===== */
+.guess-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 20px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+/* ===== Solve Section ===== */
+.solve-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.solve-hint {
+  font-size: 0.8rem;
+  color: #999;
+  text-align: center;
+  margin: 0;
+  max-width: 500px;
+  line-height: 1.4;
+}
+
+/* ===== Tools Section ===== */
+.tools-section {
+  margin-top: 20px;
+}
+
+.tools-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ===== Footer ===== */
+.app-footer {
+  background: #1a1a2e;
+  color: rgba(255, 255, 255, 0.6);
+  text-align: center;
+  padding: 16px;
+  font-size: 0.85rem;
+  margin-top: auto;
+}
+
+.app-footer p {
+  margin: 0;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 600px) {
+  .app-header {
+    padding: 20px 16px 18px;
+  }
+
+  .app-title {
+    font-size: 1.6rem;
+  }
+
+  .app-subtitle {
+    font-size: 0.85rem;
+  }
+
+  .app-main {
+    padding: 16px 10px;
+  }
+
+  .puzzle-section {
+    padding: 16px 12px;
+  }
+
+  .puzzle-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .length-control {
+    justify-content: center;
+  }
+
+  .row-buttons {
+    justify-content: center;
+  }
+
+  .tools-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .btn-solve {
+    width: 100%;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -1,0 +1,73 @@
+.validator-section {
+  padding: 16px;
+  background: #f8f9fa;
+  border-radius: 10px;
+  border: 1px solid #e0e0e0;
+}
+
+.validator-section h3 {
+  margin: 0 0 10px 0;
+  font-size: 1rem;
+  color: #1a1a2e;
+}
+
+.validator-row {
+  display: flex;
+  gap: 8px;
+}
+
+.validator-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-family: 'Courier New', monospace;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.validator-input:focus {
+  border-color: #6aaa64;
+}
+
+.validator-btn {
+  padding: 8px 16px;
+  background: #1a1a2e;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.validator-btn:hover:not(:disabled) {
+  background: #2d2d5e;
+}
+
+.validator-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.validator-result {
+  margin-top: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.validator-result.valid {
+  color: #6aaa64;
+}
+
+.validator-result.invalid {
+  color: #cc0000;
+}
+
+.validator-error {
+  margin-top: 8px;
+  color: #cc0000;
+  font-size: 0.9rem;
+}
