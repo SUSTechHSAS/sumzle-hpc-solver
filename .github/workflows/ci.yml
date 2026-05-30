@@ -74,52 +74,82 @@ jobs:
           echo "| Platform | \`${{ matrix.os }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Target | \`${{ matrix.target }}\` |" >> $GITHUB_STEP_SUMMARY
 
-          # Build a map of test suite names from "Running ..." lines
-          # cargo test --verbose output looks like:
-          #   Running unittests src/lib.rs (target/debug/deps/...)
-          #   ...test output...
-          #   test result: ok. 12 passed; 0 failed; ...
-          #   Running unittests src/main.rs (target/debug/deps/...)
-          #   ...test output...
-          #   test result: ok. 5 passed; 0 failed; ...
-          #   Running doc-tests (target/debug/doctests/...)
-          #   ...test output...
-          #   test result: ok. 0 passed; 0 failed; ...
+          # Extract suite names from "Running ..." and "Doc-tests" lines in test output.
+          # cargo test --verbose output format (after compilation):
+          #      Running `/path/to/target/debug/deps/sumzle_solver-HASH`   (unit tests - lib)
+          #      Running `/path/to/target/debug/deps/sumzle_solver-HASH`   (unit tests - bin)
+          #      Running `/path/to/target/debug/deps/consistency-HASH`     (integration test)
+          #    Doc-tests sumzle_solver
+          #      Running `/path/to/rustdoc ...`
+          #
+          # We derive suite names from the binary names in the Running lines
+          # and detect Doc-tests from the "Doc-tests" line.
+          SUITE_INDEX=0
+          PREV_LINE=""
           declare -a SUITE_NAMES=()
-          while IFS= read -r RUN_LINE; do
-            # Extract the suite description: "unittests src/lib.rs", "unittests src/main.rs", "doc-tests", etc.
-            SUITE_DESC=$(echo "$RUN_LINE" | sed -n 's/Running \(.*\) (target\/.*/\1/p')
-            if [ -n "$SUITE_DESC" ]; then
-              SUITE_NAMES+=("$SUITE_DESC")
+          while IFS= read -r LINE; do
+            # Check for "Doc-tests" marker line (appears before doc-test Running line)
+            if echo "$LINE" | grep -q 'Doc-tests'; then
+              SUITE_NAMES+=("Doc-tests")
+              SUITE_INDEX=$((SUITE_INDEX + 1))
+              PREV_LINE="$LINE"
+              continue
             fi
-          done < <(grep -E '^Running ' test-output.txt || true)
+            # Check for "Running" lines that execute test binaries (after "Finished")
+            # Format: "     Running `/path/to/target/debug/deps/NAME-HASH`"
+            # or:      "     Running `/path/to/target/debug/deps/NAME-HASH.exe`"
+            if echo "$LINE" | grep -q 'Running.*target.*deps'; then
+              # Extract the binary name from the path (before the hash)
+              BIN_NAME=$(echo "$LINE" | sed 's|.*/deps/||; s|-[^-]*[`]$||; s|\.exe$||')
+              if [ -n "$BIN_NAME" ]; then
+                # Map binary names to friendly suite names
+                case "$BIN_NAME" in
+                  sumzle_solver) SUITE_NAMES+=("unittests (lib + bin)") ;;
+                  consistency) SUITE_NAMES+=("integration tests (consistency)") ;;
+                  *) SUITE_NAMES+=("$BIN_NAME") ;;
+                esac
+                SUITE_INDEX=$((SUITE_INDEX + 1))
+              fi
+            fi
+            PREV_LINE="$LINE"
+          done < test-output.txt
 
           # Aggregate ALL test result lines (unit tests, integration tests, doc tests, etc.)
+          # Use sed/awk instead of grep -oP for macOS (BSD grep) compatibility.
+          # "test result:" lines look like:
+          #   test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
           TOTAL_PASSED=0
           TOTAL_FAILED=0
           TOTAL_IGNORED=0
           TOTAL_MEASURED=0
-          SUITE_INDEX=0
+          RESULT_INDEX=0
 
           while IFS= read -r RESULT_LINE; do
             [ -z "$RESULT_LINE" ] && continue
-            SUITE_INDEX=$((SUITE_INDEX + 1))
+            RESULT_INDEX=$((RESULT_INDEX + 1))
 
-            PASSED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= passed)' || echo "0")
-            FAILED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= failed)' || echo "0")
-            IGNORED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= ignored)' || echo "0")
-            MEASURED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= measured)' || echo "0")
-            DURATION=$(echo "$RESULT_LINE" | grep -oP '[\d.]+s' || echo "N/A")
+            # Extract numbers using awk (POSIX-compatible, works on macOS)
+            PASSED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="passed") print $i}')
+            FAILED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="failed") print $i}')
+            IGNORED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="ignored") print $i}')
+            MEASURED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="measured") print $i}')
+            DURATION=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9.]+s$/) print $i}')
+
+            PASSED=${PASSED:-0}
+            FAILED=${FAILED:-0}
+            IGNORED=${IGNORED:-0}
+            MEASURED=${MEASURED:-0}
+            DURATION=${DURATION:-N/A}
 
             TOTAL_PASSED=$((TOTAL_PASSED + PASSED))
             TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
             TOTAL_IGNORED=$((TOTAL_IGNORED + IGNORED))
             TOTAL_MEASURED=$((TOTAL_MEASURED + MEASURED))
 
-            # Get suite name from the Running lines
-            SUITE_NAME="Suite #$SUITE_INDEX"
-            if [ $SUITE_INDEX -le ${#SUITE_NAMES[@]} ]; then
-              SUITE_NAME="${SUITE_NAMES[$((SUITE_INDEX - 1))]}"
+            # Get suite name from the extracted names
+            SUITE_NAME="Suite #$RESULT_INDEX"
+            if [ $RESULT_INDEX -le ${#SUITE_NAMES[@]} ]; then
+              SUITE_NAME="${SUITE_NAMES[$((RESULT_INDEX - 1))]}"
             fi
 
             if [ "$FAILED" -gt 0 ]; then
@@ -128,7 +158,7 @@ jobs:
               STATUS_ICON="✅"
             fi
             echo "| → $SUITE_NAME | $STATUS_ICON $PASSED passed, $FAILED failed, $IGNORED ignored ($DURATION) |" >> $GITHUB_STEP_SUMMARY
-          done < <(grep -E '^test result:' test-output.txt || true)
+          done < <(grep '^test result:' test-output.txt || true)
 
           TOTAL=$((TOTAL_PASSED + TOTAL_FAILED + TOTAL_IGNORED + TOTAL_MEASURED))
           echo "| **Total tests** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
