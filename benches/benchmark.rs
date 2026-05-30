@@ -1,7 +1,6 @@
 //! Benchmarks for the Sumzle solver
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use sumzle_solver::constraints::GlobalKnowledge;
 use sumzle_solver::parallel::ParallelSolver;
 use sumzle_solver::solver::Solver;
 use sumzle_solver::types::*;

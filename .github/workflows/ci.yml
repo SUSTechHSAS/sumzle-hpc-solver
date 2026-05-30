@@ -11,8 +11,22 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Fast gate: format + clippy + cargo check
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -- --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo check
+
   test:
     name: Test on ${{ matrix.os }}
+    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -45,14 +59,113 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build
-        run: cargo build --verbose
-
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --verbose 2>&1 | tee test-output.txt
+        shell: bash
 
-      - name: Run release build
-        run: cargo build --release --verbose
+      - name: Create test summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## 🧪 Test Results — \`${{ matrix.os }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | \`${{ matrix.os }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | \`${{ matrix.target }}\` |" >> $GITHUB_STEP_SUMMARY
+
+          # Parse test output with a single awk script (fully portable across
+          # Linux, macOS, and Windows Git Bash).  We pipe through sed first to
+          # strip any \r characters that Windows cargo may emit.
+          #
+          # How it works:
+          #   1. Collect suite names from "Running <deps/…>" lines (test
+          #      execution) and "Doc-tests" marker lines.  Compilation lines
+          #      that also mention deps are filtered out by checking that the
+          #      line does NOT contain "--crate-name".
+          #   2. Parse every "test result:" line for passed/failed/ignored/
+          #      measured/duration.
+          #   3. In the END block, emit a per-suite summary table and totals.
+          sed 's/\r$//' test-output.txt | awk '
+            BEGIN { suite_count=0; result_count=0; sumzle_count=0 }
+
+            # ---- suite name extraction ----
+
+            # "Doc-tests" marker (precedes the rustdoc Running line)
+            /^[[:space:]]*Doc-tests[[:space:]]/ {
+              suite_name[suite_count++] = "Doc-tests"
+            }
+
+            # Test-execution "Running" lines.
+            # Match paths that go through target/debug/deps/ (or target\debug\deps\)
+            # but NOT compilation lines (which contain --crate-name).
+            /Running/ && /target[\/\\]debug[\/\\]deps[\/\\]/ && !/--crate-name/ {
+              path = $0
+              sub(/.*target[\/\\]debug[\/\\]deps[\/\\]/, "", path)
+              sub(/[\x27`"].*$/, "", path)   # strip trailing backtick/quote+rest
+              sub(/-[^-]+$/, "", path)       # strip -HASH suffix
+              sub(/\.exe$/, "", path)        # strip .exe on Windows
+
+              sumzle_count++
+              if (path == "sumzle_solver") {
+                if (sumzle_count == 1) suite_name[suite_count++] = "unittests (lib)"
+                else                   suite_name[suite_count++] = "unittests (bin)"
+              } else if (path == "consistency") {
+                suite_name[suite_count++] = "integration tests"
+              } else {
+                suite_name[suite_count++] = path
+              }
+            }
+
+            # ---- test result parsing ----
+
+            /^test result:/ {
+              idx = result_count
+              for (i=1; i<=NF; i++) {
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^passed/)  passed[idx]  = $i+0
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^failed/)  failed[idx]  = $i+0
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^ignored/) ignored[idx] = $i+0
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^measured/) measured[idx] = $i+0
+                if ($i ~ /^[0-9.]+s$/) duration[idx] = $i
+              }
+              result_count++
+            }
+
+            # ---- output ----
+            END {
+              tp=0; tf=0; ti=0; tm=0
+              for (i=0; i<result_count; i++) {
+                p  = passed[i]+0;  f = failed[i]+0
+                ig = ignored[i]+0; d = duration[i]
+                if (d == "") d = "N/A"
+                tp += p; tf += f; ti += ig; tm += measured[i]+0
+                icon = (f > 0) ? "❌" : "✅"
+                name = (i < suite_count) ? suite_name[i] : "Suite #" (i+1)
+                printf "| → %s | %s %d passed, %d failed, %d ignored (%s) |\n", \
+                       name, icon, p, f, ig, d
+              }
+              total = tp + tf + ti + tm
+              printf "| **Total tests** | **%d** |\n", total
+              printf "| **Passed** | **%d** |\n", tp
+              printf "| **Failed** | **%d** |\n", tf
+              printf "| **Ignored** | **%d** |\n", ti
+              printf "| **Measured** | **%d** |\n", tm
+
+              if (tf > 0) printf "\n> ⚠️ **%d test(s) failed!**\n", tf
+              else        printf "\n> ✅ All tests passed!\n"
+            }
+          ' >> $GITHUB_STEP_SUMMARY
+
+          # Add raw output in collapsible section
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw Test Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat test-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
 
   frontend:
     name: Frontend Build & Test
@@ -89,6 +202,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend artifact
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
@@ -116,39 +230,58 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
-      - name: Run benchmarks
-        run: cargo bench --no-run 2>&1 || true
+      - name: Build benchmarks
+        run: cargo bench --no-run
 
       - name: Run CLI benchmarks
         run: |
           cargo build --release
-          echo "=== Benchmark Length 5 ==="
-          ./target/release/sumzle-solver bench -l 5
-          echo "=== Benchmark Length 6 ==="
-          ./target/release/sumzle-solver bench -l 6
 
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
+          echo "## 📊 Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-    steps:
-      - uses: actions/checkout@v4
+          # Run benchmarks and collect output
+          for len in 5 6; do
+            OUTPUT=$(./target/release/sumzle-solver bench -l $len 2>&1 || true)
+            LINE=$(echo "$OUTPUT" | grep "Length $len:" || true)
+            if [ -n "$LINE" ]; then
+              echo "$OUTPUT" >> benchmark-output.txt
+            fi
+          done
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+          # Build summary table
+          echo "| Length | Solutions | Expressions Searched | Time |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----------|---------------------|------|" >> $GITHUB_STEP_SUMMARY
 
-      - name: Check formatting
-        run: cargo fmt -- --check
+          while IFS= read -r LINE; do
+            LEN=$(echo "$LINE" | sed -n 's/.*Length \([0-9]*\):.*/\1/p')
+            SOL=$(echo "$LINE" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
+            SRC=$(echo "$LINE" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
+            TIME=$(echo "$LINE" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
+            echo "| $LEN | $SOL | $SRC | $TIME |" >> $GITHUB_STEP_SUMMARY
+          done < benchmark-output.txt
 
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
+          echo "" >> $GITHUB_STEP_SUMMARY
 
+          # Add raw output in collapsible section
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw Benchmark Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat benchmark-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> ℹ️ Benchmarks run on GitHub Actions \`ubuntu-latest\` runner. Results may vary due to shared hardware." >> $GITHUB_STEP_SUMMARY
+
+  # Release builds only run on push (not PRs)
   build-release:
     name: Build Release ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    needs: [test, lint]
+    needs: [test, check]
+    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
