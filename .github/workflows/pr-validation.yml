@@ -41,8 +41,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run tests
         run: cargo test --verbose 2>&1 | tee test-output.txt
+        shell: bash
       - name: Create test summary
         if: always()
+        shell: bash
         run: |
           echo "## 🧪 Test Results — \`${{ matrix.os }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
