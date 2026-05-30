@@ -34,20 +34,28 @@ pub struct SolveRow {
 /// A single tile in an API request row
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveTile {
-    /// The character at this position
-    pub char: char,
+    /// The character at this position (may be empty string for blank tiles)
+    pub char: String,
     /// The state: "correct", "present", or "empty"
     pub state: String,
 }
 
 impl SolveRow {
-    /// Convert an API request row into an internal GuessRow
+    /// Convert an API request row into an internal GuessRow.
+    /// Tiles with empty `char` fields are treated as having `Empty` state
+    /// since they provide no constraint information.
     fn to_guess_row(&self) -> GuessRow {
         self.tiles
             .iter()
-            .map(|t| Tile {
-                char: t.char,
-                state: parse_tile_state(&t.state),
+            .map(|t| {
+                let ch = t.char.chars().next().unwrap_or('\0');
+                let state = if ch == '\0' {
+                    // Blank tile (empty char) always means no constraint
+                    TileState::Empty
+                } else {
+                    parse_tile_state(&t.state)
+                };
+                Tile { char: ch, state }
             })
             .collect()
     }
@@ -417,23 +425,23 @@ mod tests {
         let row = SolveRow {
             tiles: vec![
                 SolveTile {
-                    char: '1',
+                    char: "1".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '+',
+                    char: "+".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '2',
+                    char: "2".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '=',
+                    char: "=".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '3',
+                    char: "3".to_string(),
                     state: "correct".to_string(),
                 },
             ],
@@ -461,23 +469,23 @@ mod tests {
         let row1 = SolveRow {
             tiles: vec![
                 SolveTile {
-                    char: '1',
+                    char: "1".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '+',
+                    char: "+".to_string(),
                     state: "empty".to_string(),
                 },
                 SolveTile {
-                    char: '2',
+                    char: "2".to_string(),
                     state: "empty".to_string(),
                 },
                 SolveTile {
-                    char: '=',
+                    char: "=".to_string(),
                     state: "empty".to_string(),
                 },
                 SolveTile {
-                    char: '3',
+                    char: "3".to_string(),
                     state: "empty".to_string(),
                 },
             ],
@@ -485,23 +493,23 @@ mod tests {
         let row2 = SolveRow {
             tiles: vec![
                 SolveTile {
-                    char: '2',
+                    char: "2".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '+',
+                    char: "+".to_string(),
                     state: "empty".to_string(),
                 },
                 SolveTile {
-                    char: '2',
+                    char: "2".to_string(),
                     state: "empty".to_string(),
                 },
                 SolveTile {
-                    char: '=',
+                    char: "=".to_string(),
                     state: "empty".to_string(),
                 },
                 SolveTile {
-                    char: '4',
+                    char: "4".to_string(),
                     state: "empty".to_string(),
                 },
             ],
@@ -665,9 +673,9 @@ mod tests {
             r#"{"tiles": [{"char": "1", "state": "correct"}, {"char": "+", "state": "empty"}]}"#;
         let row: SolveRow = serde_json::from_str(json).unwrap();
         assert_eq!(row.tiles.len(), 2);
-        assert_eq!(row.tiles[0].char, '1');
+        assert_eq!(row.tiles[0].char, "1");
         assert_eq!(row.tiles[0].state, "correct");
-        assert_eq!(row.tiles[1].char, '+');
+        assert_eq!(row.tiles[1].char, "+");
         assert_eq!(row.tiles[1].state, "empty");
     }
 
@@ -679,7 +687,7 @@ mod tests {
         assert_eq!(req.length, 5);
         assert_eq!(req.rows.len(), 1);
         assert_eq!(req.rows[0].tiles.len(), 1);
-        assert_eq!(req.rows[0].tiles[0].char, '1');
+        assert_eq!(req.rows[0].tiles[0].char, "1");
     }
 
     /// Test that parse_tile_state handles all frontend state values
@@ -708,15 +716,15 @@ mod tests {
         let solve_row = SolveRow {
             tiles: vec![
                 SolveTile {
-                    char: '1',
+                    char: "1".to_string(),
                     state: "correct".to_string(),
                 },
                 SolveTile {
-                    char: '+',
+                    char: "+".to_string(),
                     state: "present".to_string(),
                 },
                 SolveTile {
-                    char: '2',
+                    char: "2".to_string(),
                     state: "empty".to_string(),
                 },
             ],
@@ -729,5 +737,128 @@ mod tests {
         assert_eq!(guess_row[1].state, TileState::Present);
         assert_eq!(guess_row[2].char, '2');
         assert_eq!(guess_row[2].state, TileState::Empty);
+    }
+
+    /// Regression test: frontend sends empty string for blank tiles.
+    /// Previously caused: "invalid value: string \"\", expected a character"
+    #[tokio::test]
+    async fn test_solve_with_blank_tiles() {
+        let mut app = test_app();
+        // This is exactly what the frontend sends for an empty guess row
+        let json_body = r#"{
+            "length": 5,
+            "rows": [
+                {
+                    "tiles": [
+                        {"char": "", "state": "empty"},
+                        {"char": "", "state": "empty"},
+                        {"char": "", "state": "empty"},
+                        {"char": "", "state": "empty"},
+                        {"char": "", "state": "empty"}
+                    ]
+                }
+            ]
+        }"#;
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            HttpStatusCode::OK,
+            "Expected 200 OK, got body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!resp.solutions.is_empty());
+    }
+
+    /// Test that tiles with mixed filled and blank chars work correctly
+    #[tokio::test]
+    async fn test_solve_with_partial_blank_tiles() {
+        let mut app = test_app();
+        let json_body = r#"{
+            "length": 5,
+            "rows": [
+                {
+                    "tiles": [
+                        {"char": "1", "state": "correct"},
+                        {"char": "+", "state": "correct"},
+                        {"char": "", "state": "empty"},
+                        {"char": "=", "state": "correct"},
+                        {"char": "", "state": "empty"}
+                    ]
+                }
+            ]
+        }"#;
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            HttpStatusCode::OK,
+            "Expected 200 OK, got body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        // All solutions should start with '1+' and have '=' at position 3
+        for sol in &resp.solutions {
+            assert!(
+                sol.starts_with("1+"),
+                "Solution '{}' should start with '1+'",
+                sol
+            );
+            assert_eq!(
+                sol.as_bytes()[3],
+                b'=',
+                "Solution '{}' should have '=' at pos 3",
+                sol
+            );
+        }
+    }
+
+    /// Unit test: SolveTile with empty char deserializes and converts correctly
+    #[test]
+    fn test_solve_tile_empty_char() {
+        let json = r#"{"char": "", "state": "empty"}"#;
+        let tile: SolveTile = serde_json::from_str(json).unwrap();
+        assert_eq!(tile.char, "");
+        assert_eq!(tile.state, "empty");
+    }
+
+    /// Unit test: SolveRow with blank tiles converts to GuessRow with null chars
+    #[test]
+    fn test_solve_row_with_blank_tiles_to_guess_row() {
+        let solve_row = SolveRow {
+            tiles: vec![
+                SolveTile {
+                    char: "1".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "+".to_string(),
+                    state: "present".to_string(),
+                },
+            ],
+        };
+        let guess_row = solve_row.to_guess_row();
+        assert_eq!(guess_row[0].char, '1');
+        assert_eq!(guess_row[0].state, TileState::Correct);
+        // Blank tile should get null char and Empty state
+        assert_eq!(guess_row[1].char, '\0');
+        assert_eq!(guess_row[1].state, TileState::Empty);
+        assert_eq!(guess_row[2].char, '+');
+        assert_eq!(guess_row[2].state, TileState::Present);
     }
 }
