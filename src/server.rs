@@ -24,13 +24,50 @@ use crate::types::*;
 // API request / response types
 // ---------------------------------------------------------------------------
 
+/// A single guess row in the API request, containing tiles
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolveRow {
+    /// The tiles in this guess row
+    pub tiles: Vec<SolveTile>,
+}
+
+/// A single tile in an API request row
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolveTile {
+    /// The character at this position
+    pub char: char,
+    /// The state: "correct", "present", or "empty"
+    pub state: String,
+}
+
+impl SolveRow {
+    /// Convert an API request row into an internal GuessRow
+    fn to_guess_row(&self) -> GuessRow {
+        self.tiles
+            .iter()
+            .map(|t| Tile {
+                char: t.char,
+                state: parse_tile_state(&t.state),
+            })
+            .collect()
+    }
+}
+
+fn parse_tile_state(s: &str) -> TileState {
+    match s.to_lowercase().as_str() {
+        "correct" | "green" | "g" => TileState::Correct,
+        "present" | "yellow" | "y" => TileState::Present,
+        _ => TileState::Empty,
+    }
+}
+
 /// Request body for the solve endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveRequest {
     /// Expression length to solve for
     pub length: usize,
-    /// Guess rows providing constraints
-    pub rows: Vec<GuessRow>,
+    /// Guess rows providing constraints (each row has a `tiles` array)
+    pub rows: Vec<SolveRow>,
 }
 
 /// Query parameters for the solve endpoint
@@ -93,8 +130,11 @@ async fn solve_handler(
     Query(query): Query<SolveQuery>,
     Json(body): Json<SolveRequest>,
 ) -> Response {
+    // Convert API rows to internal GuessRow format
+    let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
+
     // Build global knowledge from guess rows
-    let gk = match GlobalKnowledge::from_guess_rows(body.length, &body.rows) {
+    let gk = match GlobalKnowledge::from_guess_rows(body.length, &guess_rows) {
         Ok(gk) => gk,
         Err(e) => {
             return (
@@ -374,28 +414,15 @@ mod tests {
     async fn test_solve_with_constraints() {
         let mut app = test_app();
         // Provide a guess row: "1+2=3" with all tiles marked as correct
-        let row: GuessRow = vec![
-            Tile {
-                char: '1',
-                state: TileState::Correct,
-            },
-            Tile {
-                char: '+',
-                state: TileState::Correct,
-            },
-            Tile {
-                char: '2',
-                state: TileState::Correct,
-            },
-            Tile {
-                char: '=',
-                state: TileState::Correct,
-            },
-            Tile {
-                char: '3',
-                state: TileState::Correct,
-            },
-        ];
+        let row = SolveRow {
+            tiles: vec![
+                SolveTile { char: '1', state: "correct".to_string() },
+                SolveTile { char: '+', state: "correct".to_string() },
+                SolveTile { char: '2', state: "correct".to_string() },
+                SolveTile { char: '=', state: "correct".to_string() },
+                SolveTile { char: '3', state: "correct".to_string() },
+            ],
+        };
         let req_body = SolveRequest {
             length: 5,
             rows: vec![row],
@@ -416,50 +443,24 @@ mod tests {
     async fn test_solve_conflicting_constraints() {
         let mut app = test_app();
         // Provide conflicting constraints: position 0 fixed to '1' and '2'
-        let row1: GuessRow = vec![
-            Tile {
-                char: '1',
-                state: TileState::Correct,
-            },
-            Tile {
-                char: '+',
-                state: TileState::Empty,
-            },
-            Tile {
-                char: '2',
-                state: TileState::Empty,
-            },
-            Tile {
-                char: '=',
-                state: TileState::Empty,
-            },
-            Tile {
-                char: '3',
-                state: TileState::Empty,
-            },
-        ];
-        let row2: GuessRow = vec![
-            Tile {
-                char: '2',
-                state: TileState::Correct,
-            },
-            Tile {
-                char: '+',
-                state: TileState::Empty,
-            },
-            Tile {
-                char: '2',
-                state: TileState::Empty,
-            },
-            Tile {
-                char: '=',
-                state: TileState::Empty,
-            },
-            Tile {
-                char: '4',
-                state: TileState::Empty,
-            },
-        ];
+        let row1 = SolveRow {
+            tiles: vec![
+                SolveTile { char: '1', state: "correct".to_string() },
+                SolveTile { char: '+', state: "empty".to_string() },
+                SolveTile { char: '2', state: "empty".to_string() },
+                SolveTile { char: '=', state: "empty".to_string() },
+                SolveTile { char: '3', state: "empty".to_string() },
+            ],
+        };
+        let row2 = SolveRow {
+            tiles: vec![
+                SolveTile { char: '2', state: "correct".to_string() },
+                SolveTile { char: '+', state: "empty".to_string() },
+                SolveTile { char: '2', state: "empty".to_string() },
+                SolveTile { char: '=', state: "empty".to_string() },
+                SolveTile { char: '4', state: "empty".to_string() },
+            ],
+        };
         let req_body = SolveRequest {
             length: 5,
             rows: vec![row1, row2],
@@ -492,5 +493,172 @@ mod tests {
         assert_eq!(status, HttpStatusCode::OK);
         let resp: EvalResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(resp.result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON deserialization tests: these send raw JSON strings (exactly as
+    // the frontend would) instead of constructing Rust structs, so that
+    // serde deserialization mismatches are caught at test time.
+    // -----------------------------------------------------------------------
+
+    /// Regression test: the frontend sends rows as `[{tiles: [...]}]`,
+    /// not as `[[...]]`. This test sends raw JSON matching the frontend
+    /// format to ensure the backend can deserialize it correctly.
+    #[tokio::test]
+    async fn test_solve_frontend_json_format() {
+        let mut app = test_app();
+        // This is the exact JSON format the frontend sends
+        let json_body = r#"{
+            "length": 5,
+            "rows": [
+                {
+                    "tiles": [
+                        {"char": "1", "state": "correct"},
+                        {"char": "+", "state": "correct"},
+                        {"char": "2", "state": "correct"},
+                        {"char": "=", "state": "correct"},
+                        {"char": "3", "state": "correct"}
+                    ]
+                }
+            ]
+        }"#;
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK, "Expected 200 OK, got body: {}", String::from_utf8_lossy(&body));
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.solutions.contains(&"1+2=3".to_string()));
+    }
+
+    /// Test that the frontend JSON format with multiple rows works correctly
+    #[tokio::test]
+    async fn test_solve_frontend_json_multiple_rows() {
+        let mut app = test_app();
+        // Two non-conflicting rows providing incremental information:
+        // Row 1: position 0 = '1' (correct), position 3 = '=' (correct)
+        // Row 2: position 1 = '+' (present), other chars absent
+        let json_body = r#"{
+            "length": 6,
+            "rows": [
+                {
+                    "tiles": [
+                        {"char": "1", "state": "correct"},
+                        {"char": "+", "state": "present"},
+                        {"char": "2", "state": "empty"},
+                        {"char": "=", "state": "correct"},
+                        {"char": "3", "state": "empty"},
+                        {"char": "0", "state": "empty"}
+                    ]
+                },
+                {
+                    "tiles": [
+                        {"char": "1", "state": "correct"},
+                        {"char": "-", "state": "empty"},
+                        {"char": "*", "state": "empty"},
+                        {"char": "=", "state": "correct"},
+                        {"char": "5", "state": "empty"},
+                        {"char": "6", "state": "empty"}
+                    ]
+                }
+            ]
+        }"#;
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK, "Expected 200 OK, got body: {}", String::from_utf8_lossy(&body));
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        // Verify all solutions contain '1' at position 0 (from correct constraint)
+        for sol in &resp.solutions {
+            assert!(sol.starts_with('1'), "Solution '{}' should start with '1'", sol);
+        }
+    }
+
+    /// Test that the frontend JSON format with empty rows works
+    #[tokio::test]
+    async fn test_solve_frontend_json_empty_rows() {
+        let mut app = test_app();
+        let json_body = r#"{"length": 5, "rows": []}"#;
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!resp.solutions.is_empty());
+    }
+
+    /// Unit test for SolveRow deserialization: ensures the {tiles: [...]}
+    /// format is accepted (this was the root cause of the bug)
+    #[test]
+    fn test_solve_row_deserialization_frontend_format() {
+        let json = r#"{"tiles": [{"char": "1", "state": "correct"}, {"char": "+", "state": "empty"}]}"#;
+        let row: SolveRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.tiles.len(), 2);
+        assert_eq!(row.tiles[0].char, '1');
+        assert_eq!(row.tiles[0].state, "correct");
+        assert_eq!(row.tiles[1].char, '+');
+        assert_eq!(row.tiles[1].state, "empty");
+    }
+
+    /// Unit test for SolveRequest deserialization with frontend format
+    #[test]
+    fn test_solve_request_deserialization_frontend_format() {
+        let json = r#"{"length": 5, "rows": [{"tiles": [{"char": "1", "state": "correct"}]}]}"#;
+        let req: SolveRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.length, 5);
+        assert_eq!(req.rows.len(), 1);
+        assert_eq!(req.rows[0].tiles.len(), 1);
+        assert_eq!(req.rows[0].tiles[0].char, '1');
+    }
+
+    /// Test that parse_tile_state handles all frontend state values
+    #[test]
+    fn test_parse_tile_state_all_variants() {
+        assert_eq!(parse_tile_state("correct"), TileState::Correct);
+        assert_eq!(parse_tile_state("present"), TileState::Present);
+        assert_eq!(parse_tile_state("empty"), TileState::Empty);
+        // Also support shorthand/color variants
+        assert_eq!(parse_tile_state("green"), TileState::Correct);
+        assert_eq!(parse_tile_state("yellow"), TileState::Present);
+        assert_eq!(parse_tile_state("g"), TileState::Correct);
+        assert_eq!(parse_tile_state("y"), TileState::Present);
+        // Case insensitive
+        assert_eq!(parse_tile_state("Correct"), TileState::Correct);
+        assert_eq!(parse_tile_state("PRESENT"), TileState::Present);
+        assert_eq!(parse_tile_state("Empty"), TileState::Empty);
+        // Unknown defaults to Empty
+        assert_eq!(parse_tile_state("unknown"), TileState::Empty);
+        assert_eq!(parse_tile_state("absent"), TileState::Empty);
+    }
+
+    /// Test that SolveRow::to_guess_row converts correctly
+    #[test]
+    fn test_solve_row_to_guess_row() {
+        let solve_row = SolveRow {
+            tiles: vec![
+                SolveTile { char: '1', state: "correct".to_string() },
+                SolveTile { char: '+', state: "present".to_string() },
+                SolveTile { char: '2', state: "empty".to_string() },
+            ],
+        };
+        let guess_row = solve_row.to_guess_row();
+        assert_eq!(guess_row.len(), 3);
+        assert_eq!(guess_row[0].char, '1');
+        assert_eq!(guess_row[0].state, TileState::Correct);
+        assert_eq!(guess_row[1].char, '+');
+        assert_eq!(guess_row[1].state, TileState::Present);
+        assert_eq!(guess_row[2].char, '2');
+        assert_eq!(guess_row[2].state, TileState::Empty);
     }
 }
