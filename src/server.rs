@@ -416,11 +416,26 @@ mod tests {
         // Provide a guess row: "1+2=3" with all tiles marked as correct
         let row = SolveRow {
             tiles: vec![
-                SolveTile { char: '1', state: "correct".to_string() },
-                SolveTile { char: '+', state: "correct".to_string() },
-                SolveTile { char: '2', state: "correct".to_string() },
-                SolveTile { char: '=', state: "correct".to_string() },
-                SolveTile { char: '3', state: "correct".to_string() },
+                SolveTile {
+                    char: '1',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '+',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '2',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '=',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '3',
+                    state: "correct".to_string(),
+                },
             ],
         };
         let req_body = SolveRequest {
@@ -445,20 +460,50 @@ mod tests {
         // Provide conflicting constraints: position 0 fixed to '1' and '2'
         let row1 = SolveRow {
             tiles: vec![
-                SolveTile { char: '1', state: "correct".to_string() },
-                SolveTile { char: '+', state: "empty".to_string() },
-                SolveTile { char: '2', state: "empty".to_string() },
-                SolveTile { char: '=', state: "empty".to_string() },
-                SolveTile { char: '3', state: "empty".to_string() },
+                SolveTile {
+                    char: '1',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '+',
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: '2',
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: '=',
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: '3',
+                    state: "empty".to_string(),
+                },
             ],
         };
         let row2 = SolveRow {
             tiles: vec![
-                SolveTile { char: '2', state: "correct".to_string() },
-                SolveTile { char: '+', state: "empty".to_string() },
-                SolveTile { char: '2', state: "empty".to_string() },
-                SolveTile { char: '=', state: "empty".to_string() },
-                SolveTile { char: '4', state: "empty".to_string() },
+                SolveTile {
+                    char: '2',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '+',
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: '2',
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: '=',
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: '4',
+                    state: "empty".to_string(),
+                },
             ],
         };
         let req_body = SolveRequest {
@@ -529,7 +574,12 @@ mod tests {
             json_body.to_string(),
         )
         .await;
-        assert_eq!(status, HttpStatusCode::OK, "Expected 200 OK, got body: {}", String::from_utf8_lossy(&body));
+        assert_eq!(
+            status,
+            HttpStatusCode::OK,
+            "Expected 200 OK, got body: {}",
+            String::from_utf8_lossy(&body)
+        );
         let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
         assert!(resp.solutions.contains(&"1+2=3".to_string()));
     }
@@ -573,11 +623,20 @@ mod tests {
             json_body.to_string(),
         )
         .await;
-        assert_eq!(status, HttpStatusCode::OK, "Expected 200 OK, got body: {}", String::from_utf8_lossy(&body));
+        assert_eq!(
+            status,
+            HttpStatusCode::OK,
+            "Expected 200 OK, got body: {}",
+            String::from_utf8_lossy(&body)
+        );
         let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
         // Verify all solutions contain '1' at position 0 (from correct constraint)
         for sol in &resp.solutions {
-            assert!(sol.starts_with('1'), "Solution '{}' should start with '1'", sol);
+            assert!(
+                sol.starts_with('1'),
+                "Solution '{}' should start with '1'",
+                sol
+            );
         }
     }
 
@@ -602,7 +661,8 @@ mod tests {
     /// format is accepted (this was the root cause of the bug)
     #[test]
     fn test_solve_row_deserialization_frontend_format() {
-        let json = r#"{"tiles": [{"char": "1", "state": "correct"}, {"char": "+", "state": "empty"}]}"#;
+        let json =
+            r#"{"tiles": [{"char": "1", "state": "correct"}, {"char": "+", "state": "empty"}]}"#;
         let row: SolveRow = serde_json::from_str(json).unwrap();
         assert_eq!(row.tiles.len(), 2);
         assert_eq!(row.tiles[0].char, '1');
@@ -647,9 +707,18 @@ mod tests {
     fn test_solve_row_to_guess_row() {
         let solve_row = SolveRow {
             tiles: vec![
-                SolveTile { char: '1', state: "correct".to_string() },
-                SolveTile { char: '+', state: "present".to_string() },
-                SolveTile { char: '2', state: "empty".to_string() },
+                SolveTile {
+                    char: '1',
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: '+',
+                    state: "present".to_string(),
+                },
+                SolveTile {
+                    char: '2',
+                    state: "empty".to_string(),
+                },
             ],
         };
         let guess_row = solve_row.to_guess_row();
