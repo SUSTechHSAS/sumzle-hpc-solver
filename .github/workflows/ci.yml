@@ -64,31 +64,87 @@ jobs:
           echo "| Platform | \`${{ matrix.os }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Target | \`${{ matrix.target }}\` |" >> $GITHUB_STEP_SUMMARY
 
-          # Parse test result summary line
-          RESULT_LINE=$(grep -E '^test result:' test-output.txt | tail -1 || true)
-          if [ -n "$RESULT_LINE" ]; then
+          # Build a map of test suite names from "Running ..." lines
+          # cargo test --verbose output looks like:
+          #   Running unittests src/lib.rs (target/debug/deps/...)
+          #   ...test output...
+          #   test result: ok. 12 passed; 0 failed; ...
+          #   Running unittests src/main.rs (target/debug/deps/...)
+          #   ...test output...
+          #   test result: ok. 5 passed; 0 failed; ...
+          #   Running doc-tests (target/debug/doctests/...)
+          #   ...test output...
+          #   test result: ok. 0 passed; 0 failed; ...
+          declare -a SUITE_NAMES=()
+          while IFS= read -r RUN_LINE; do
+            # Extract the suite description: "unittests src/lib.rs", "unittests src/main.rs", "doc-tests", etc.
+            SUITE_DESC=$(echo "$RUN_LINE" | sed -n 's/Running \(.*\) (target\/.*/\1/p')
+            if [ -n "$SUITE_DESC" ]; then
+              SUITE_NAMES+=("$SUITE_DESC")
+            fi
+          done < <(grep -E '^Running ' test-output.txt || true)
+
+          # Aggregate ALL test result lines (unit tests, integration tests, doc tests, etc.)
+          TOTAL_PASSED=0
+          TOTAL_FAILED=0
+          TOTAL_IGNORED=0
+          TOTAL_MEASURED=0
+          SUITE_INDEX=0
+
+          while IFS= read -r RESULT_LINE; do
+            [ -z "$RESULT_LINE" ] && continue
+            SUITE_INDEX=$((SUITE_INDEX + 1))
+
             PASSED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= passed)' || echo "0")
             FAILED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= failed)' || echo "0")
             IGNORED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= ignored)' || echo "0")
             MEASURED=$(echo "$RESULT_LINE" | grep -oP '\d+(?= measured)' || echo "0")
             DURATION=$(echo "$RESULT_LINE" | grep -oP '[\d.]+s' || echo "N/A")
-            TOTAL=$((PASSED + FAILED + IGNORED + MEASURED))
-            echo "| Total tests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-            echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
-            echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
-            echo "| Ignored | $IGNORED |" >> $GITHUB_STEP_SUMMARY
-            echo "| Measured | $MEASURED |" >> $GITHUB_STEP_SUMMARY
-            echo "| Duration | $DURATION |" >> $GITHUB_STEP_SUMMARY
-            if [ "$FAILED" -gt 0 ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "> ⚠️ **$FAILED test(s) failed!**" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "> ✅ All tests passed!" >> $GITHUB_STEP_SUMMARY
+
+            TOTAL_PASSED=$((TOTAL_PASSED + PASSED))
+            TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
+            TOTAL_IGNORED=$((TOTAL_IGNORED + IGNORED))
+            TOTAL_MEASURED=$((TOTAL_MEASURED + MEASURED))
+
+            # Get suite name from the Running lines
+            SUITE_NAME="Suite #$SUITE_INDEX"
+            if [ $SUITE_INDEX -le ${#SUITE_NAMES[@]} ]; then
+              SUITE_NAME="${SUITE_NAMES[$((SUITE_INDEX - 1))]}"
             fi
+
+            if [ "$FAILED" -gt 0 ]; then
+              STATUS_ICON="❌"
+            else
+              STATUS_ICON="✅"
+            fi
+            echo "| → $SUITE_NAME | $STATUS_ICON $PASSED passed, $FAILED failed, $IGNORED ignored ($DURATION) |" >> $GITHUB_STEP_SUMMARY
+          done < <(grep -E '^test result:' test-output.txt || true)
+
+          TOTAL=$((TOTAL_PASSED + TOTAL_FAILED + TOTAL_IGNORED + TOTAL_MEASURED))
+          echo "| **Total tests** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Passed** | **$TOTAL_PASSED** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Failed** | **$TOTAL_FAILED** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Ignored** | **$TOTAL_IGNORED** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Measured** | **$TOTAL_MEASURED** |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$TOTAL_FAILED" -gt 0 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> ⚠️ **$TOTAL_FAILED test(s) failed!**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| Status | Could not parse test output |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> ✅ All tests passed!" >> $GITHUB_STEP_SUMMARY
           fi
+
+          # Add raw output in collapsible section
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw Test Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat test-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
 
       - name: Run release build
         run: cargo build --release --verbose
