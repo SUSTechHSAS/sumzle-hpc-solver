@@ -1,0 +1,109 @@
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 72px;
+  border-radius: 6px;
+  transition: background-color 0.3s ease, transform 0.15s ease;
+  user-select: none;
+  position: relative;
+}
+
+.tile-correct {
+  background-color: #6aaa64;
+}
+
+.tile-present {
+  background-color: #c9b458;
+}
+
+.tile-empty {
+  background-color: #787c7e;
+}
+
+.tile-empty .tile-input {
+  border: 2px dashed rgba(255, 255, 255, 0.3);
+}
+
+.tile-input {
+  width: 44px;
+  height: 44px;
+  text-align: center;
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #ffffff;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  outline: none;
+  caret-color: rgba(255, 255, 255, 0.6);
+  text-transform: none;
+  padding: 0;
+  line-height: 44px;
+}
+
+.tile-input::placeholder {
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.tile-input:focus {
+  border-color: rgba(255, 255, 255, 0.7);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.tile-state-btn {
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 3px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s ease, opacity 0.2s ease;
+  opacity: 0.7;
+  color: #fff;
+}
+
+.tile-state-btn:hover {
+  opacity: 1;
+}
+
+.tile-state-correct {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+.tile-state-present {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+.tile-state-empty {
+  background-color: rgba(0, 0, 0, 0.3);
+}
+
+@media (max-width: 600px) {
+  .tile {
+    width: 44px;
+    height: 56px;
+  }
+
+  .tile-input {
+    width: 32px;
+    height: 32px;
+    font-size: 1.2rem;
+    line-height: 32px;
+  }
+
+  .tile-state-btn {
+    width: 14px;
+    height: 14px;
+    font-size: 0.45rem;
+  }
+}

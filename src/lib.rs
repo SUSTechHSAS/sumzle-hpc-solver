@@ -13,5 +13,6 @@ pub mod constraints;
 pub mod distributed;
 pub mod evaluator;
 pub mod parallel;
+pub mod server;
 pub mod solver;
 pub mod types;

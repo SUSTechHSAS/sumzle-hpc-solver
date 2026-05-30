@@ -41,6 +41,27 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo test --verbose
 
+  frontend:
+    name: Frontend Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: npm ci
+      - working-directory: frontend
+        run: npm run lint
+      - working-directory: frontend
+        run: npx tsc -b --noEmit
+      - working-directory: frontend
+        run: npm test
+      - working-directory: frontend
+        run: npm run build
+
   benchmark:
     name: Performance Check
     runs-on: ubuntu-latest
@@ -52,5 +73,5 @@ jobs:
       - run: |
           echo "### Benchmark Results" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          ./target/release/sumzle-solver bench -l 5 6 >> $GITHUB_STEP_SUMMARY
+          ./target/release/sumzle-solver bench -l 5 -l 6 >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
