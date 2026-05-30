@@ -74,116 +74,87 @@ jobs:
           echo "| Platform | \`${{ matrix.os }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Target | \`${{ matrix.target }}\` |" >> $GITHUB_STEP_SUMMARY
 
-          # Extract suite names from "Running ..." and "Doc-tests" lines in test output.
-          # cargo test --verbose output format (after compilation):
-          #      Running `/path/to/target/debug/deps/sumzle_solver-HASH`   (unit tests - lib)
-          #      Running `/path/to/target/debug/deps/sumzle_solver-HASH`   (unit tests - bin)
-          #      Running `/path/to/target/debug/deps/consistency-HASH`     (integration test)
-          #    Doc-tests sumzle_solver
-          #      Running `/path/to/rustdoc ...`
+          # Parse test output with a single awk script (fully portable across
+          # Linux, macOS, and Windows Git Bash).  We pipe through sed first to
+          # strip any \r characters that Windows cargo may emit.
           #
-          # We derive suite names from the binary names in the Running lines
-          # and detect Doc-tests from the "Doc-tests" line.
-          SUITE_INDEX=0
-          SUMZLE_COUNT=0
-          PREV_LINE=""
-          declare -a SUITE_NAMES=()
-          while IFS= read -r LINE; do
-            # Check for "Doc-tests" marker line (appears before doc-test Running line)
-            if echo "$LINE" | grep -q 'Doc-tests'; then
-              SUITE_NAMES+=("Doc-tests")
-              SUITE_INDEX=$((SUITE_INDEX + 1))
-              PREV_LINE="$LINE"
-              continue
-            fi
-            # Check for "Running" lines that execute test binaries (after "Finished")
-            # Format: "     Running `/path/to/target/debug/deps/NAME-HASH`"
-            # or:      "     Running `/path/to/target/debug/deps/NAME-HASH.exe`"
-            if echo "$LINE" | grep -q 'Running.*target.*deps'; then
-              # Extract the binary name from the path (before the hash)
-              BIN_NAME=$(echo "$LINE" | sed 's|.*/deps/||; s|-[^-]*[`]$||; s|\.exe$||')
-              if [ -n "$BIN_NAME" ]; then
-                # Map binary names to friendly suite names
-                case "$BIN_NAME" in
-                  sumzle_solver)
-                    SUMZLE_COUNT=$((SUMZLE_COUNT + 1))
-                    if [ $SUMZLE_COUNT -eq 1 ]; then
-                      SUITE_NAMES+=("unittests (lib)")
-                    else
-                      SUITE_NAMES+=("unittests (bin)")
-                    fi
-                    ;;
-                  consistency) SUITE_NAMES+=("integration tests (consistency)") ;;
-                  *) SUITE_NAMES+=("$BIN_NAME") ;;
-                esac
-                SUITE_INDEX=$((SUITE_INDEX + 1))
-              fi
-            fi
-            PREV_LINE="$LINE"
-          done < test-output.txt
+          # How it works:
+          #   1. Collect suite names from "Running <deps/…>" lines (test
+          #      execution) and "Doc-tests" marker lines.  Compilation lines
+          #      that also mention deps are filtered out by checking that the
+          #      line does NOT contain "--crate-name".
+          #   2. Parse every "test result:" line for passed/failed/ignored/
+          #      measured/duration.
+          #   3. In the END block, emit a per-suite summary table and totals.
+          sed 's/\r$//' test-output.txt | awk '
+            BEGIN { suite_count=0; result_count=0; sumzle_count=0 }
 
-          # Aggregate ALL test result lines (unit tests, integration tests, doc tests, etc.)
-          # Use sed/awk instead of grep -oP for macOS (BSD grep) compatibility.
-          # "test result:" lines look like:
-          #   test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
-          TOTAL_PASSED=0
-          TOTAL_FAILED=0
-          TOTAL_IGNORED=0
-          TOTAL_MEASURED=0
-          RESULT_INDEX=0
+            # ---- suite name extraction ----
 
-          while IFS= read -r RESULT_LINE; do
-            [ -z "$RESULT_LINE" ] && continue
-            RESULT_INDEX=$((RESULT_INDEX + 1))
+            # "Doc-tests" marker (precedes the rustdoc Running line)
+            /^[[:space:]]*Doc-tests[[:space:]]/ {
+              suite_name[suite_count++] = "Doc-tests"
+            }
 
-            # Extract numbers using awk (POSIX-compatible, works on macOS BSD grep)
-            # Note: $(i+1) uses regex match (^passed) instead of exact string match
-            # because the format is "37 passed;" with a trailing semicolon
-            PASSED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^passed/) print $i}')
-            FAILED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^failed/) print $i}')
-            IGNORED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^ignored/) print $i}')
-            MEASURED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^measured/) print $i}')
-            DURATION=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9.]+s$/) print $i}')
+            # Test-execution "Running" lines.
+            # Match paths that go through target/debug/deps/ (or target\debug\deps\)
+            # but NOT compilation lines (which contain --crate-name).
+            /Running/ && /target[\/\\]debug[\/\\]deps[\/\\]/ && !/--crate-name/ {
+              path = $0
+              sub(/.*target[\/\\]debug[\/\\]deps[\/\\]/, "", path)
+              sub(/[\x27`"].*$/, "", path)   # strip trailing backtick/quote+rest
+              sub(/-[^-]+$/, "", path)       # strip -HASH suffix
+              sub(/\.exe$/, "", path)        # strip .exe on Windows
 
-            PASSED=${PASSED:-0}
-            FAILED=${FAILED:-0}
-            IGNORED=${IGNORED:-0}
-            MEASURED=${MEASURED:-0}
-            DURATION=${DURATION:-N/A}
+              sumzle_count++
+              if (path == "sumzle_solver") {
+                if (sumzle_count == 1) suite_name[suite_count++] = "unittests (lib)"
+                else                   suite_name[suite_count++] = "unittests (bin)"
+              } else if (path == "consistency") {
+                suite_name[suite_count++] = "integration tests"
+              } else {
+                suite_name[suite_count++] = path
+              }
+            }
 
-            TOTAL_PASSED=$((TOTAL_PASSED + PASSED))
-            TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
-            TOTAL_IGNORED=$((TOTAL_IGNORED + IGNORED))
-            TOTAL_MEASURED=$((TOTAL_MEASURED + MEASURED))
+            # ---- test result parsing ----
 
-            # Get suite name from the extracted names
-            SUITE_NAME="Suite #$RESULT_INDEX"
-            if [ $RESULT_INDEX -le ${#SUITE_NAMES[@]} ]; then
-              SUITE_NAME="${SUITE_NAMES[$((RESULT_INDEX - 1))]}"
-            fi
+            /^test result:/ {
+              idx = result_count
+              for (i=1; i<=NF; i++) {
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^passed/)  passed[idx]  = $i+0
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^failed/)  failed[idx]  = $i+0
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^ignored/) ignored[idx] = $i+0
+                if ($i ~ /^[0-9]+$/ && $(i+1) ~ /^measured/) measured[idx] = $i+0
+                if ($i ~ /^[0-9.]+s$/) duration[idx] = $i
+              }
+              result_count++
+            }
 
-            if [ "$FAILED" -gt 0 ]; then
-              STATUS_ICON="❌"
-            else
-              STATUS_ICON="✅"
-            fi
-            echo "| → $SUITE_NAME | $STATUS_ICON $PASSED passed, $FAILED failed, $IGNORED ignored ($DURATION) |" >> $GITHUB_STEP_SUMMARY
-          done < <(grep '^test result:' test-output.txt || true)
+            # ---- output ----
+            END {
+              tp=0; tf=0; ti=0; tm=0
+              for (i=0; i<result_count; i++) {
+                p  = passed[i]+0;  f = failed[i]+0
+                ig = ignored[i]+0; d = duration[i]
+                if (d == "") d = "N/A"
+                tp += p; tf += f; ti += ig; tm += measured[i]+0
+                icon = (f > 0) ? "❌" : "✅"
+                name = (i < suite_count) ? suite_name[i] : "Suite #" (i+1)
+                printf "| → %s | %s %d passed, %d failed, %d ignored (%s) |\n", \
+                       name, icon, p, f, ig, d
+              }
+              total = tp + tf + ti + tm
+              printf "| **Total tests** | **%d** |\n", total
+              printf "| **Passed** | **%d** |\n", tp
+              printf "| **Failed** | **%d** |\n", tf
+              printf "| **Ignored** | **%d** |\n", ti
+              printf "| **Measured** | **%d** |\n", tm
 
-          TOTAL=$((TOTAL_PASSED + TOTAL_FAILED + TOTAL_IGNORED + TOTAL_MEASURED))
-          echo "| **Total tests** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Passed** | **$TOTAL_PASSED** |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Failed** | **$TOTAL_FAILED** |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Ignored** | **$TOTAL_IGNORED** |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Measured** | **$TOTAL_MEASURED** |" >> $GITHUB_STEP_SUMMARY
-
-          if [ "$TOTAL_FAILED" -gt 0 ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> ⚠️ **$TOTAL_FAILED test(s) failed!**" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> ✅ All tests passed!" >> $GITHUB_STEP_SUMMARY
-          fi
+              if (tf > 0) printf "\n> ⚠️ **%d test(s) failed!**\n", tf
+              else        printf "\n> ✅ All tests passed!\n"
+            }
+          ' >> $GITHUB_STEP_SUMMARY
 
           # Add raw output in collapsible section
           echo "" >> $GITHUB_STEP_SUMMARY
