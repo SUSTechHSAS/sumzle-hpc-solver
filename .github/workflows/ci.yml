@@ -116,8 +116,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
-      - name: Run benchmarks
-        run: cargo bench --no-run 2>&1 || true
+      - name: Build benchmarks
+        run: cargo bench --no-run
 
       - name: Run CLI benchmarks
         run: |
