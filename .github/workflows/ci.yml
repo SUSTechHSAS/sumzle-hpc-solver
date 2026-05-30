@@ -85,6 +85,7 @@ jobs:
           # We derive suite names from the binary names in the Running lines
           # and detect Doc-tests from the "Doc-tests" line.
           SUITE_INDEX=0
+          SUMZLE_COUNT=0
           PREV_LINE=""
           declare -a SUITE_NAMES=()
           while IFS= read -r LINE; do
@@ -104,7 +105,14 @@ jobs:
               if [ -n "$BIN_NAME" ]; then
                 # Map binary names to friendly suite names
                 case "$BIN_NAME" in
-                  sumzle_solver) SUITE_NAMES+=("unittests (lib + bin)") ;;
+                  sumzle_solver)
+                    SUMZLE_COUNT=$((SUMZLE_COUNT + 1))
+                    if [ $SUMZLE_COUNT -eq 1 ]; then
+                      SUITE_NAMES+=("unittests (lib)")
+                    else
+                      SUITE_NAMES+=("unittests (bin)")
+                    fi
+                    ;;
                   consistency) SUITE_NAMES+=("integration tests (consistency)") ;;
                   *) SUITE_NAMES+=("$BIN_NAME") ;;
                 esac
