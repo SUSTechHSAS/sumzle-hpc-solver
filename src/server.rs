@@ -902,7 +902,7 @@ mod tests {
     async fn test_solve_zero_length_rejected() {
         let mut app = test_app();
         let json_body = r#"{"length": 0, "rows": []}"#;
-        let (status, _body) = send_request(
+        let (status, body) = send_request(
             &mut app,
             http::Method::POST,
             "/api/solve?threads=1",
@@ -919,7 +919,7 @@ mod tests {
     async fn test_solve_length_too_small_rejected() {
         let mut app = test_app();
         let json_body = r#"{"length": 2, "rows": []}"#;
-        let (status, _body) = send_request(
+        let (status, body) = send_request(
             &mut app,
             http::Method::POST,
             "/api/solve?threads=1",
@@ -934,7 +934,7 @@ mod tests {
     async fn test_solve_length_too_large_rejected() {
         let mut app = test_app();
         let json_body = r#"{"length": 20, "rows": []}"#;
-        let (status, _body) = send_request(
+        let (status, body) = send_request(
             &mut app,
             http::Method::POST,
             "/api/solve?threads=1",
@@ -950,7 +950,7 @@ mod tests {
         let mut app = test_app();
         let json_body = r#"{"length": 5, "rows": []}"#;
         // threads=1000000 would panic without clamping
-        let (status, _body) = send_request(
+        let (status, body) = send_request(
             &mut app,
             http::Method::POST,
             "/api/solve?threads=999999",
