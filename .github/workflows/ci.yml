@@ -11,8 +11,22 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Fast gate: format + clippy + cargo check
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -- --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo check
+
   test:
     name: Test on ${{ matrix.os }}
+    needs: check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -45,12 +59,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build
-        run: cargo build --verbose
-
       - name: Run tests
-        run: |
-          cargo test --verbose 2>&1 | tee test-output.txt
+        run: cargo test --verbose 2>&1 | tee test-output.txt
         shell: bash
 
       - name: Create test summary
@@ -146,9 +156,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
-      - name: Run release build
-        run: cargo build --release --verbose
-
   frontend:
     name: Frontend Build & Test
     runs-on: ubuntu-latest
@@ -184,6 +191,7 @@ jobs:
         run: npm run build
 
       - name: Upload frontend artifact
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
@@ -257,28 +265,12 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> ℹ️ Benchmarks run on GitHub Actions \`ubuntu-latest\` runner. Results may vary due to shared hardware." >> $GITHUB_STEP_SUMMARY
 
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-
+  # Release builds only run on push (not PRs)
   build-release:
     name: Build Release ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    needs: [test, lint]
+    needs: [test, check]
+    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
