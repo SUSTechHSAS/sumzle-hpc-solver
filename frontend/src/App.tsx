@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import type { GuessRow, SolveResponse, TileState } from './types';
 import { solvePuzzle } from './api';
 import GuessRowComponent from './components/GuessRow';
@@ -76,17 +76,28 @@ export default function App() {
     setError(null);
   }, [length]);
 
+  // Track the latest solve request to discard stale responses
+  const solveGenerationRef = useRef(0);
+
   const handleSolve = useCallback(async () => {
+    const generation = ++solveGenerationRef.current;
     setLoading(true);
     setError(null);
     setSolutions(null);
     try {
       const res = await solvePuzzle(length, rows);
-      setSolutions(res);
+      // Only update if this is still the latest request
+      if (generation === solveGenerationRef.current) {
+        setSolutions(res);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'An error occurred');
+      if (generation === solveGenerationRef.current) {
+        setError(e instanceof Error ? e.message : 'An error occurred');
+      }
     } finally {
-      setLoading(false);
+      if (generation === solveGenerationRef.current) {
+        setLoading(false);
+      }
     }
   }, [length, rows]);
 

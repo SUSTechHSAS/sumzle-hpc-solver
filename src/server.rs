@@ -133,11 +133,39 @@ pub struct ErrorResponse {
 // API handlers
 // ---------------------------------------------------------------------------
 
+/// Minimum expression length supported by the solver
+const MIN_SOLVE_LENGTH: usize = 3;
+/// Maximum expression length supported by the solver
+const MAX_SOLVE_LENGTH: usize = 8;
+/// Maximum number of threads allowed for a single solve request
+const MAX_THREADS: usize = 256;
+
 /// POST /api/solve
 async fn solve_handler(
     Query(query): Query<SolveQuery>,
     Json(body): Json<SolveRequest>,
 ) -> Response {
+    // Validate length bounds
+    if body.length < MIN_SOLVE_LENGTH || body.length > MAX_SOLVE_LENGTH {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Length must be between {} and {}, got {}",
+                    MIN_SOLVE_LENGTH, MAX_SOLVE_LENGTH, body.length
+                ),
+            }),
+        )
+            .into_response();
+    }
+
+    // Clamp thread count to a reasonable maximum
+    let threads = if query.threads > MAX_THREADS {
+        MAX_THREADS
+    } else {
+        query.threads
+    };
+
     // Convert API rows to internal GuessRow format
     let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
 
@@ -159,13 +187,13 @@ async fn solve_handler(
 
     let start = std::time::Instant::now();
 
-    let (results, searched_count) = if query.threads == 1 {
+    let (results, searched_count) = if threads == 1 {
         solver.solve()
     } else {
-        let num_threads = if query.threads == 0 {
+        let num_threads = if threads == 0 {
             num_cpus::get()
         } else {
-            query.threads
+            threads
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
         parallel_solver.solve()
@@ -198,8 +226,15 @@ async fn validate_handler(Json(body): Json<ValidateRequest>) -> Response {
 /// POST /api/eval
 async fn eval_handler(Json(body): Json<EvalRequest>) -> Response {
     let result = evaluator::evaluate_expression(&body.expression).map(|v| {
-        if v == v.floor() {
-            (v as i64).to_string()
+        if v == v.floor() && v.is_finite() {
+            // Format integral floats without narrowing through i64.
+            // For values within i64 range, format as integer; otherwise use
+            // float formatting to avoid truncation/saturation.
+            if v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+                (v as i64).to_string()
+            } else {
+                format!("{:.0}", v)
+            }
         } else {
             format!("{}", v)
         }
@@ -860,5 +895,94 @@ mod tests {
         assert_eq!(guess_row[1].state, TileState::Empty);
         assert_eq!(guess_row[2].char, '+');
         assert_eq!(guess_row[2].state, TileState::Present);
+    }
+
+    /// Test that zero-length solve is rejected with 400
+    #[tokio::test]
+    async fn test_solve_zero_length_rejected() {
+        let mut app = test_app();
+        let json_body = r#"{"length": 0, "rows": []}"#;
+        let (status, _body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
+        let resp: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.error.contains("Length must be between"));
+    }
+
+    /// Test that length below minimum is rejected
+    #[tokio::test]
+    async fn test_solve_length_too_small_rejected() {
+        let mut app = test_app();
+        let json_body = r#"{"length": 2, "rows": []}"#;
+        let (status, _body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
+    }
+
+    /// Test that length above maximum is rejected
+    #[tokio::test]
+    async fn test_solve_length_too_large_rejected() {
+        let mut app = test_app();
+        let json_body = r#"{"length": 20, "rows": []}"#;
+        let (status, _body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
+    }
+
+    /// Test that large thread count is clamped, not rejected
+    #[tokio::test]
+    async fn test_solve_large_thread_count_clamped() {
+        let mut app = test_app();
+        let json_body = r#"{"length": 5, "rows": []}"#;
+        // threads=1000000 would panic without clamping
+        let (status, _body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=999999",
+            json_body.to_string(),
+        )
+        .await;
+        // Should succeed (clamped), not panic
+        assert_eq!(status, HttpStatusCode::OK);
+    }
+
+    /// Test eval with large integer result
+    #[tokio::test]
+    async fn test_eval_large_integer() {
+        let mut app = test_app();
+        let req_body = EvalRequest {
+            expression: "10^19".to_string(),
+        };
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/eval",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: EvalResponse = serde_json::from_slice(&body).unwrap();
+        // Should not be a truncated i64 saturated value
+        assert!(resp.result.is_some());
+        let val = resp.result.unwrap();
+        assert!(
+            !val.contains("-9223372036854775808"),
+            "Should not saturate to i64::MIN"
+        );
     }
 }
