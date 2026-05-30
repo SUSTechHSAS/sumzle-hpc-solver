@@ -128,11 +128,13 @@ jobs:
             [ -z "$RESULT_LINE" ] && continue
             RESULT_INDEX=$((RESULT_INDEX + 1))
 
-            # Extract numbers using awk (POSIX-compatible, works on macOS)
-            PASSED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="passed") print $i}')
-            FAILED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="failed") print $i}')
-            IGNORED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="ignored") print $i}')
-            MEASURED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="measured") print $i}')
+            # Extract numbers using awk (POSIX-compatible, works on macOS BSD grep)
+            # Note: $(i+1) uses regex match (^passed) instead of exact string match
+            # because the format is "37 passed;" with a trailing semicolon
+            PASSED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^passed/) print $i}')
+            FAILED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^failed/) print $i}')
+            IGNORED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^ignored/) print $i}')
+            MEASURED=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1) ~ /^measured/) print $i}')
             DURATION=$(echo "$RESULT_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9.]+s$/) print $i}')
 
             PASSED=${PASSED:-0}
