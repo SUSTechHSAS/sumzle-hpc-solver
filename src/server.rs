@@ -1,13 +1,14 @@
 //! Web API server for the Sumzle solver
 //!
 //! Provides HTTP endpoints for solving puzzles, validating equations,
-//! and evaluating expressions using axum.
+//! and evaluating expressions using axum. Also serves the frontend
+//! static files with SPA fallback support.
 
 use axum::{
     extract::Query,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,67 @@ async fn eval_handler(Json(body): Json<EvalRequest>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// SPA fallback handler
+// ---------------------------------------------------------------------------
+
+/// SPA fallback: for any non-API GET request that doesn't match a static file,
+/// serve index.html so that client-side routing works correctly.
+async fn spa_fallback() -> Response {
+    let frontend_dir = get_frontend_dir();
+    let index_path = frontend_dir.join("index.html");
+
+    match tokio::fs::read_to_string(&index_path).await {
+        Ok(content) => (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frontend directory resolution
+// ---------------------------------------------------------------------------
+
+/// Determine the frontend static files directory.
+///
+/// Resolution order:
+/// 1. `STATIC_DIR` environment variable (for custom deployments)
+/// 2. `<cwd>/frontend/dist` (for local development)
+/// 3. `<exe_dir>/frontend/dist` (for packaged binary next to executable)
+fn get_frontend_dir() -> std::path::PathBuf {
+    // 1. Check STATIC_DIR env var
+    if let Ok(dir) = std::env::var("STATIC_DIR") {
+        let path = std::path::PathBuf::from(&dir);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // 2. Check cwd/frontend/dist
+    if let Ok(cwd) = std::env::current_dir() {
+        let path = cwd.join("frontend").join("dist");
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // 3. Check exe_dir/frontend/dist (for packaged deployments)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let path = exe_dir.join("frontend").join("dist");
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+
+    std::path::PathBuf::from("frontend/dist")
+}
+
+// ---------------------------------------------------------------------------
 // Router & server
 // ---------------------------------------------------------------------------
 
@@ -171,17 +233,20 @@ pub fn create_router() -> Router {
         .route("/api/validate", post(validate_handler))
         .route("/api/eval", post(eval_handler));
 
-    // Try to serve frontend static files from frontend/dist directory
-    let frontend_dir = std::env::current_dir()
-        .map(|p| p.join("frontend").join("dist"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("frontend/dist"));
+    let frontend_dir = get_frontend_dir();
+    let has_frontend = frontend_dir.join("index.html").exists();
 
-    if frontend_dir.exists() {
+    if has_frontend {
+        log::info!("Serving frontend from: {}", frontend_dir.display());
+        println!("Serving frontend from: {}", frontend_dir.display());
+
         Router::new()
             .merge(api_routes)
-            .fallback_service(ServeDir::new(&frontend_dir))
+            .fallback_service(ServeDir::new(&frontend_dir).fallback(get(spa_fallback)))
             .layer(cors)
     } else {
+        log::warn!("No frontend found. API-only mode.");
+        println!("No frontend found. Running in API-only mode.");
         Router::new().merge(api_routes).layer(cors)
     }
 }
