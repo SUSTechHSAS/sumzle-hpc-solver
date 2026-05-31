@@ -211,26 +211,25 @@ fn bench_char_probability(c: &mut Criterion) {
         let solutions: Vec<String> = (1..=54)
             .map(|i| format!("{}+{}={}", i % 5 + 1, i % 3, (i % 5 + 1) + (i % 3)))
             .collect();
-        b.iter(|| {
-            sumzle_solver::server::compute_char_probabilities(black_box(&solutions))
-        });
+        b.iter(|| sumzle_solver::server::compute_char_probabilities(black_box(&solutions)));
     });
 
     group.bench_function("large_solution_set", |b| {
         // Simulate a large solution set (e.g., length 6 with ~37k solutions)
         let solutions: Vec<String> = (1..=37730)
-            .map(|i| format!("{}{}{}{}{}{}", 
-                (i % 9) + 1,
-                ['+', '-', '*'][i % 3],
-                (i % 9) + 1,
-                ['='][0],
-                ((i % 9) + 1) + ((i % 9) + 1),
-                ['0', '1', '2'][i % 3]
-            ))
+            .map(|i| {
+                format!(
+                    "{}{}{}{}{}{}",
+                    (i % 9) + 1,
+                    ['+', '-', '*'][i % 3],
+                    (i % 9) + 1,
+                    ['='][0],
+                    ((i % 9) + 1) + ((i % 9) + 1),
+                    ['0', '1', '2'][i % 3]
+                )
+            })
             .collect();
-        b.iter(|| {
-            sumzle_solver::server::compute_char_probabilities(black_box(&solutions))
-        });
+        b.iter(|| sumzle_solver::server::compute_char_probabilities(black_box(&solutions)));
     });
 
     group.finish();

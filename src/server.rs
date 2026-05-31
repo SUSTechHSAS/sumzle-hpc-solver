@@ -7,7 +7,7 @@
 
 use axum::{
     extract::Query,
-    http::{HeaderValue, StatusCode, header},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -440,8 +440,8 @@ async fn download_handler(
         }
         "txt" => {
             let mut txt = String::new();
-            txt.push_str(&format!("Sumzle Solver Results\n"));
-            txt.push_str(&format!("=====================\n"));
+            txt.push_str("Sumzle Solver Results\n");
+            txt.push_str("=====================\n");
             txt.push_str(&format!("Solutions found: {}\n", found_count));
             txt.push_str(&format!("Expressions searched: {}\n", searched_count));
             txt.push_str(&format!("Time elapsed: {}ms\n", elapsed_ms));
@@ -449,7 +449,7 @@ async fn download_handler(
             if let Some(ref rec) = recommended {
                 txt.push_str(&format!("Recommended: {}\n", rec));
             }
-            txt.push_str(&format!("\n--- Solutions ---\n"));
+            txt.push_str("\n--- Solutions ---\n");
             for (i, sol) in results.iter().enumerate() {
                 txt.push_str(&format!("{}. {}\n", i + 1, sol));
             }
@@ -893,11 +893,26 @@ mod tests {
         let mut app = test_app();
         let row = SolveRow {
             tiles: vec![
-                SolveTile { char: "1".to_string(), state: "correct".to_string() },
-                SolveTile { char: "+".to_string(), state: "correct".to_string() },
-                SolveTile { char: "2".to_string(), state: "correct".to_string() },
-                SolveTile { char: "=".to_string(), state: "correct".to_string() },
-                SolveTile { char: "3".to_string(), state: "correct".to_string() },
+                SolveTile {
+                    char: "1".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "+".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "2".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "=".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "3".to_string(),
+                    state: "correct".to_string(),
+                },
             ],
         };
         let req_body = SolveRequest {
@@ -921,20 +936,50 @@ mod tests {
         let mut app = test_app();
         let row1 = SolveRow {
             tiles: vec![
-                SolveTile { char: "1".to_string(), state: "correct".to_string() },
-                SolveTile { char: "+".to_string(), state: "empty".to_string() },
-                SolveTile { char: "2".to_string(), state: "empty".to_string() },
-                SolveTile { char: "=".to_string(), state: "empty".to_string() },
-                SolveTile { char: "3".to_string(), state: "empty".to_string() },
+                SolveTile {
+                    char: "1".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "+".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "2".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "=".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "3".to_string(),
+                    state: "empty".to_string(),
+                },
             ],
         };
         let row2 = SolveRow {
             tiles: vec![
-                SolveTile { char: "2".to_string(), state: "correct".to_string() },
-                SolveTile { char: "+".to_string(), state: "empty".to_string() },
-                SolveTile { char: "2".to_string(), state: "empty".to_string() },
-                SolveTile { char: "=".to_string(), state: "empty".to_string() },
-                SolveTile { char: "4".to_string(), state: "empty".to_string() },
+                SolveTile {
+                    char: "2".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "+".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "2".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "=".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "4".to_string(),
+                    state: "empty".to_string(),
+                },
             ],
         };
         let req_body = SolveRequest {
@@ -1118,9 +1163,18 @@ mod tests {
     fn test_solve_row_to_guess_row() {
         let solve_row = SolveRow {
             tiles: vec![
-                SolveTile { char: "1".to_string(), state: "correct".to_string() },
-                SolveTile { char: "+".to_string(), state: "present".to_string() },
-                SolveTile { char: "2".to_string(), state: "empty".to_string() },
+                SolveTile {
+                    char: "1".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "+".to_string(),
+                    state: "present".to_string(),
+                },
+                SolveTile {
+                    char: "2".to_string(),
+                    state: "empty".to_string(),
+                },
             ],
         };
         let guess_row = solve_row.to_guess_row();
@@ -1225,9 +1279,18 @@ mod tests {
     fn test_solve_row_with_blank_tiles_to_guess_row() {
         let solve_row = SolveRow {
             tiles: vec![
-                SolveTile { char: "1".to_string(), state: "correct".to_string() },
-                SolveTile { char: "".to_string(), state: "empty".to_string() },
-                SolveTile { char: "+".to_string(), state: "present".to_string() },
+                SolveTile {
+                    char: "1".to_string(),
+                    state: "correct".to_string(),
+                },
+                SolveTile {
+                    char: "".to_string(),
+                    state: "empty".to_string(),
+                },
+                SolveTile {
+                    char: "+".to_string(),
+                    state: "present".to_string(),
+                },
             ],
         };
         let guess_row = solve_row.to_guess_row();
