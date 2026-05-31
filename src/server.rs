@@ -126,6 +126,24 @@ fn default_format() -> String {
     "json".to_string()
 }
 
+/// Request body for the download endpoint.
+///
+/// Accepts pre-computed solve results, avoiding the need to re-run the solver.
+/// The client should send the same `SolveResponse` it received from `/api/solve`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadRequest {
+    /// All valid solutions found
+    pub solutions: Vec<String>,
+    /// Solver statistics
+    pub stats: SolverStats,
+    /// Character probabilities
+    #[serde(default)]
+    pub char_probabilities: Vec<CharProbability>,
+    /// Recommended solution
+    #[serde(default)]
+    pub recommended: Option<String>,
+}
+
 /// Request body for the validate endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidateRequest {
@@ -366,56 +384,17 @@ async fn solve_handler(
 }
 
 /// POST /api/download
+///
+/// Accepts pre-computed solve results and returns them in the requested format
+/// (json, csv, or txt). This avoids re-running the solver on the server.
 async fn download_handler(
     Query(query): Query<DownloadQuery>,
-    Json(body): Json<SolveRequest>,
+    Json(body): Json<DownloadRequest>,
 ) -> Response {
-    // Validate length bounds
-    if body.length < MIN_SOLVE_LENGTH || body.length > MAX_SOLVE_LENGTH {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Length must be between {} and {}, got {}",
-                    MIN_SOLVE_LENGTH, MAX_SOLVE_LENGTH, body.length
-                ),
-            }),
-        )
-            .into_response();
-    }
-
-    let threads = num_cpus::get();
-
-    // Convert API rows to internal GuessRow format
-    let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
-
-    // Build global knowledge from guess rows
-    let gk = match GlobalKnowledge::from_guess_rows(body.length, &guess_rows) {
-        Ok(gk) => gk,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid constraints: {}", e),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let solver = Solver::new(body.length, gk);
-    let parallel_solver = ParallelSolver::new(solver, Some(threads));
-
-    let start = std::time::Instant::now();
-    let (results, searched_count) = parallel_solver.solve();
-    let elapsed = start.elapsed();
-    let elapsed_ms = elapsed.as_millis() as u64;
-    let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
-    let found_count = results.len();
-
-    // Compute probabilities and recommendation
-    let char_probabilities = compute_char_probabilities(&results);
-    let recommended = compute_recommended(&results, &char_probabilities);
+    let found_count = body.solutions.len();
+    let searched_count = body.stats.searched_count;
+    let elapsed_ms = body.stats.elapsed_ms;
+    let speed = body.stats.speed;
 
     let format = query.format.to_lowercase();
     let timestamp = chrono_now_string();
@@ -424,7 +403,7 @@ async fn download_handler(
         "csv" => {
             use std::fmt::Write;
             let mut csv = String::from("index,expression\n");
-            for (i, sol) in results.iter().enumerate() {
+            for (i, sol) in body.solutions.iter().enumerate() {
                 let _ = writeln!(csv, "{},{}", i + 1, sol);
             }
             let filename = format!("sumzle_solutions_{}.csv", timestamp);
@@ -450,11 +429,11 @@ async fn download_handler(
             let _ = writeln!(txt, "Expressions searched: {}", searched_count);
             let _ = writeln!(txt, "Time elapsed: {}ms", elapsed_ms);
             let _ = writeln!(txt, "Search speed: {} expr/s", speed);
-            if let Some(ref rec) = recommended {
+            if let Some(ref rec) = body.recommended {
                 let _ = writeln!(txt, "Recommended: {}", rec);
             }
             let _ = writeln!(txt, "\n--- Solutions ---");
-            for (i, sol) in results.iter().enumerate() {
+            for (i, sol) in body.solutions.iter().enumerate() {
                 let _ = writeln!(txt, "{}. {}", i + 1, sol);
             }
             let filename = format!("sumzle_solutions_{}.txt", timestamp);
@@ -475,17 +454,12 @@ async fn download_handler(
                 .into_response()
         }
         _ => {
-            // Default: JSON format
+            // Default: JSON format — return the full SolveResponse
             let response = SolveResponse {
-                solutions: results,
-                stats: SolverStats {
-                    searched_count,
-                    found_count,
-                    elapsed_ms,
-                    speed,
-                },
-                char_probabilities,
-                recommended,
+                solutions: body.solutions,
+                stats: body.stats,
+                char_probabilities: body.char_probabilities,
+                recommended: body.recommended,
             };
             let json_bytes = serde_json::to_string_pretty(&response).unwrap_or_default();
             let filename = format!("sumzle_solutions_{}.json", timestamp);
@@ -783,11 +757,18 @@ mod tests {
     #[tokio::test]
     async fn test_download_json() {
         let mut app = test_app();
-        let req_body = SolveRequest {
-            length: 5,
-            rows: vec![],
+        let req_body = DownloadRequest {
+            solutions: vec!["1+2=3".to_string(), "2+1=3".to_string()],
+            stats: SolverStats {
+                searched_count: 100,
+                found_count: 2,
+                elapsed_ms: 5,
+                speed: 20000,
+            },
+            char_probabilities: vec![],
+            recommended: Some("1+2=3".to_string()),
         };
-        let (status, _body) = send_request(
+        let (status, body) = send_request(
             &mut app,
             http::Method::POST,
             "/api/download?format=json",
@@ -795,14 +776,23 @@ mod tests {
         )
         .await;
         assert_eq!(status, HttpStatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["solutions"].is_array());
     }
 
     #[tokio::test]
     async fn test_download_csv() {
         let mut app = test_app();
-        let req_body = SolveRequest {
-            length: 3,
-            rows: vec![],
+        let req_body = DownloadRequest {
+            solutions: vec!["1+2=3".to_string(), "2+1=3".to_string()],
+            stats: SolverStats {
+                searched_count: 100,
+                found_count: 2,
+                elapsed_ms: 5,
+                speed: 20000,
+            },
+            char_probabilities: vec![],
+            recommended: None,
         };
         let (status, body) = send_request(
             &mut app,
@@ -814,16 +804,22 @@ mod tests {
         assert_eq!(status, HttpStatusCode::OK);
         let csv = String::from_utf8(body).unwrap();
         assert!(csv.starts_with("index,expression\n"));
-        // Should have at least 2 lines (header + 1 solution)
-        assert!(csv.lines().count() > 1);
+        assert_eq!(csv.lines().count(), 3); // header + 2 solutions
     }
 
     #[tokio::test]
     async fn test_download_txt() {
         let mut app = test_app();
-        let req_body = SolveRequest {
-            length: 3,
-            rows: vec![],
+        let req_body = DownloadRequest {
+            solutions: vec!["1+2=3".to_string()],
+            stats: SolverStats {
+                searched_count: 50,
+                found_count: 1,
+                elapsed_ms: 2,
+                speed: 25000,
+            },
+            char_probabilities: vec![],
+            recommended: Some("1+2=3".to_string()),
         };
         let (status, body) = send_request(
             &mut app,
@@ -835,7 +831,8 @@ mod tests {
         assert_eq!(status, HttpStatusCode::OK);
         let txt = String::from_utf8(body).unwrap();
         assert!(txt.contains("Sumzle Solver Results"));
-        assert!(txt.contains("Solutions found:"));
+        assert!(txt.contains("Solutions found: 1"));
+        assert!(txt.contains("Recommended: 1+2=3"));
     }
 
     #[tokio::test]

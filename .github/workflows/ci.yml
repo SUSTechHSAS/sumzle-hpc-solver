@@ -276,8 +276,10 @@ jobs:
           echo "## 📈 Criterion Micro-Benchmarks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Run all criterion benchmarks with minimal sample count for CI speed
-          cargo bench -- --quick 2>&1 | tee criterion-output.txt || true
+          # Run all criterion benchmarks with minimal sample count for CI speed.
+          # Use --bench benchmark to only run the Criterion benchmark target,
+          # avoiding the lib unit-test harness which doesn't understand --quick.
+          cargo bench --bench benchmark -- --quick 2>&1 | tee criterion-output.txt || true
 
           # Parse criterion output and build summary table
           echo "| Benchmark Group | Benchmark | Mean Time |" >> $GITHUB_STEP_SUMMARY
