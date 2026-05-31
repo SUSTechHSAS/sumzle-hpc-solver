@@ -9,7 +9,7 @@ interface ImportGameStateProps {
 
 interface SumzleRow {
   length?: number;
-  rows?: { char: string; state: string }[][];
+  rows?: unknown[];
 }
 
 export default function ImportGameState({ length, onImport }: ImportGameStateProps) {
@@ -55,11 +55,20 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
     }
 
     const importedLength = data.length || length;
-    const rows: GuessRow[] = data.rows.map((row: { char: string; state: string }[]) => {
-      const tiles = row.map((tile: { char: string; state: string }) => ({
-        char: tile.char || '',
-        state: normalizeState(tile.state),
-      }));
+    const rows: GuessRow[] = data.rows.map((row: unknown, rowIndex: number) => {
+      if (!Array.isArray(row)) {
+        throw new Error(`JSON格式错误: rows中的第${rowIndex + 1}行必须是数组`);
+      }
+      const tiles = row.map((tile: unknown, tileIndex: number) => {
+        if (!tile || typeof tile !== 'object') {
+          throw new Error(`JSON格式错误: 第${rowIndex + 1}行第${tileIndex + 1}个tile必须是对象`);
+        }
+        const t = tile as { char?: string; state?: string };
+        return {
+          char: t.char || '',
+          state: normalizeState(t.state || ''),
+        };
+      });
       return { tiles };
     });
 

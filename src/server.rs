@@ -232,14 +232,14 @@ pub fn compute_recommended(solutions: &[String], probs: &[CharProbability]) -> O
     // Build a map from char to probability for quick lookup
     let prob_map: HashMap<char, f64> = probs
         .iter()
-        .map(|p| (p.char.chars().next().unwrap(), p.probability))
+        .filter_map(|p| p.char.chars().next().map(|c| (c, p.probability)))
         .collect();
 
     // Get top 5 characters by probability
     let top_chars: std::collections::HashSet<char> = probs
         .iter()
         .take(5)
-        .map(|p| p.char.chars().next().unwrap())
+        .filter_map(|p| p.char.chars().next())
         .collect();
 
     let mut best_solution: Option<String> = None;

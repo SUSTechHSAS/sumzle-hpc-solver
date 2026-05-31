@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import type { GuessRow, TileState, DownloadFormat } from './types';
+import type { GuessRow, TileState, DownloadFormat, SolveResponse } from './types';
 import { solvePuzzle, downloadResults } from './api';
 import GuessRowComponent from './components/GuessRow';
 import VirtualKeyboard from './components/VirtualKeyboard';
@@ -16,7 +16,7 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [length, setLength] = useState(DEFAULT_LENGTH);
   const [rows, setRows] = useState<GuessRow[]>([createBlankRow(DEFAULT_LENGTH)]);
-  const [solutions, setSolutions] = useState<import('./types').SolveResponse | null>(null);
+  const [solutions, setSolutions] = useState<SolveResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
