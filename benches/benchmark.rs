@@ -203,6 +203,64 @@ fn bench_parallel_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_char_probability(c: &mut Criterion) {
+    let mut group = c.benchmark_group("char_probability");
+
+    group.bench_function("small_solution_set", |b| {
+        // Simulate a small solution set (e.g., length 3)
+        let solutions: Vec<String> = (1..=54)
+            .map(|i| format!("{}+{}={}", i % 5 + 1, i % 3, (i % 5 + 1) + (i % 3)))
+            .collect();
+        b.iter(|| sumzle_solver::server::compute_char_probabilities(black_box(&solutions)));
+    });
+
+    group.bench_function("large_solution_set", |b| {
+        // Simulate a large solution set (e.g., length 6 with ~37k solutions)
+        let solutions: Vec<String> = (1..=37730)
+            .map(|i| {
+                format!(
+                    "{}{}{}{}{}{}",
+                    (i % 9) + 1,
+                    ['+', '-', '*'][i % 3],
+                    (i % 9) + 1,
+                    ['='][0],
+                    ((i % 9) + 1) + ((i % 9) + 1),
+                    ['0', '1', '2'][i % 3]
+                )
+            })
+            .collect();
+        b.iter(|| sumzle_solver::server::compute_char_probabilities(black_box(&solutions)));
+    });
+
+    group.finish();
+}
+
+fn bench_recommended_solution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("recommended_solution");
+
+    group.bench_function("small_set", |b| {
+        let gk = empty_gk(3);
+        let solver = Solver::new(3, gk);
+        let (results, _) = solver.solve();
+        let probs = sumzle_solver::server::compute_char_probabilities(&results);
+        b.iter(|| {
+            sumzle_solver::server::compute_recommended(black_box(&results), black_box(&probs))
+        });
+    });
+
+    group.bench_function("large_set", |b| {
+        let gk = empty_gk(5);
+        let solver = Solver::new(5, gk);
+        let (results, _) = solver.solve();
+        let probs = sumzle_solver::server::compute_char_probabilities(&results);
+        b.iter(|| {
+            sumzle_solver::server::compute_recommended(black_box(&results), black_box(&probs))
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sequential_solve,
@@ -211,6 +269,8 @@ criterion_group!(
     bench_equation_validation,
     bench_constraint_processing,
     bench_parallel_scaling,
+    bench_char_probability,
+    bench_recommended_solution,
 );
 
 criterion_main!(benches);

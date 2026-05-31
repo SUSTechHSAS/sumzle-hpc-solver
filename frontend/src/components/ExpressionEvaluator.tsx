@@ -29,12 +29,12 @@ export default function ExpressionEvaluator() {
 
   return (
     <div className="eval-section" data-testid="expression-evaluator">
-      <h3>Expression Evaluator</h3>
+      <h3 className="section-title">🔢 表达式求值</h3>
       <div className="eval-row">
         <input
           type="text"
           className="eval-input"
-          placeholder="e.g. 5! or 3+4*2"
+          placeholder="例如 5! 或 3+4*2"
           value={expression}
           onChange={(e) => setExpression(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -49,7 +49,7 @@ export default function ExpressionEvaluator() {
         </div>
       )}
       {result === null && error === null && !loading && expression && (
-        <div className="eval-result eval-no-result">No result</div>
+        <div className="eval-result eval-no-result">无结果</div>
       )}
       {error && <div className="eval-error">{error}</div>}
     </div>

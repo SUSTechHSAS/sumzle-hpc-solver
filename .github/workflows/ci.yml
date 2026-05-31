@@ -230,23 +230,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
-      - name: Build benchmarks
-        run: cargo bench --no-run
+      - name: Build release binary
+        run: cargo build --release
 
       - name: Run CLI benchmarks
         run: |
-          cargo build --release
-
-          echo "## 📊 Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 CLI Solver Benchmarks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Run benchmarks and collect output
-          for len in 5 6; do
+          # Run CLI benchmarks for all supported lengths
+          for len in 3 4 5 6; do
+            echo "Running CLI benchmark for length $len..."
             OUTPUT=$(./target/release/sumzle-solver bench -l $len 2>&1 || true)
-            LINE=$(echo "$OUTPUT" | grep "Length $len:" || true)
-            if [ -n "$LINE" ]; then
-              echo "$OUTPUT" >> benchmark-output.txt
-            fi
+            echo "$OUTPUT" >> cli-benchmark-output.txt
           done
 
           # Build summary table
@@ -258,21 +254,64 @@ jobs:
             SOL=$(echo "$LINE" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
             SRC=$(echo "$LINE" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
             TIME=$(echo "$LINE" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
-            echo "| $LEN | $SOL | $SRC | $TIME |" >> $GITHUB_STEP_SUMMARY
-          done < benchmark-output.txt
+            if [ -n "$LEN" ]; then
+              echo "| $LEN | $SOL | $SRC | $TIME |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done < cli-benchmark-output.txt
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Add raw output in collapsible section
           echo "<details>" >> $GITHUB_STEP_SUMMARY
-          echo "<summary>📝 Raw Benchmark Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw CLI Benchmark Output</summary>" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          cat benchmark-output.txt >> $GITHUB_STEP_SUMMARY
+          cat cli-benchmark-output.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
+      - name: Run Criterion benchmarks
+        run: |
+          echo "## 📈 Criterion Micro-Benchmarks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Run all criterion benchmarks with minimal sample count for CI speed.
+          # Use --bench benchmark to only run the Criterion benchmark target,
+          # avoiding the lib unit-test harness which doesn't understand --quick.
+          cargo bench --bench benchmark -- --quick 2>&1 | tee criterion-output.txt || true
+
+          # Parse criterion output and build summary table
+          echo "| Benchmark Group | Benchmark | Mean Time |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------------|-----------|-----------|" >> $GITHUB_STEP_SUMMARY
+
+          # Extract benchmark results from criterion output
+          # Criterion outputs lines like: "benchmark_name          time:   [X ns Y ns Z ns]"
+          grep -E '^\S+.*time:\s+\[' criterion-output.txt | while IFS= read -r LINE; do
+            # Extract benchmark name and mean time
+            BENCH_NAME=$(echo "$LINE" | sed -E 's/\s+time:.*//')
+            MEAN_TIME=$(echo "$LINE" | sed -E 's/.*time:\s+\[\s*([^]]+)\].*/\1/' | awk '{print $1, $2}')
+            # Try to extract group/bench split
+            GROUP=$(echo "$BENCH_NAME" | cut -d'/' -f1)
+            BENCH=$(echo "$BENCH_NAME" | cut -d'/' -f2-)
+            echo "| $GROUP | $BENCH | $MEAN_TIME |" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Add raw output in collapsible section
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw Criterion Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat criterion-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+      - name: Finalize benchmark summary
+        if: always()
+        run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> ℹ️ Benchmarks run on GitHub Actions \`ubuntu-latest\` runner. Results may vary due to shared hardware." >> $GITHUB_STEP_SUMMARY
 

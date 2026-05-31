@@ -1,0 +1,71 @@
+.char-prob-section {
+  margin-bottom: 16px;
+}
+
+.char-prob-container {
+  max-height: 250px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.char-prob-container::-webkit-scrollbar {
+  width: 4px;
+}
+
+.char-prob-container::-webkit-scrollbar-track {
+  background: var(--color-border);
+  border-radius: 2px;
+}
+
+.char-prob-container::-webkit-scrollbar-thumb {
+  background: var(--color-absent);
+  border-radius: 2px;
+}
+
+.prob-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.prob-char-display {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+  font-family: 'Courier New', monospace;
+  border: 2px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  flex-shrink: 0;
+}
+
+.prob-bar-container {
+  flex: 1;
+  height: 18px;
+  background: var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.prob-bar {
+  height: 100%;
+  background: var(--fluent-blue);
+  border-radius: 4px;
+  transition: width 0.5s ease-out;
+  min-width: 2px;
+}
+
+.prob-value {
+  min-width: 52px;
+  text-align: right;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}

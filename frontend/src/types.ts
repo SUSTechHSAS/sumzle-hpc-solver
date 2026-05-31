@@ -21,6 +21,14 @@ export interface SolveRequest {
   rows: GuessRow[];
 }
 
+/** Character probability entry */
+export interface CharProbability {
+  char: string;
+  display: string;
+  count: number;
+  probability: number;
+}
+
 /** Solver statistics */
 export interface SolverStats {
   searched_count: number;
@@ -33,6 +41,8 @@ export interface SolverStats {
 export interface SolveResponse {
   solutions: string[];
   stats: SolverStats;
+  char_probabilities: CharProbability[];
+  recommended: string | null;
 }
 
 /** Request body for POST /api/validate */
@@ -53,4 +63,25 @@ export interface EvalRequest {
 /** Response from POST /api/eval */
 export interface EvalResponse {
   result: string | null;
+}
+
+/** Download format options */
+export type DownloadFormat = 'json' | 'csv' | 'txt';
+
+/** Valid characters for the virtual keyboard */
+export const VALID_CHARS = [
+  ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+  ['+', '-', '*', '/', '%', '^', '=', '>', '!'],
+  ['A', '(', ')', '[', ']', '⌫'],
+];
+
+/** Display character mappings for solver output */
+export const CHAR_DISPLAY: Record<string, string> = {
+  '*': '×',
+  '/': '÷',
+};
+
+/** Convert a raw solver character to its display form */
+export function displayChar(ch: string): string {
+  return CHAR_DISPLAY[ch] || ch;
 }

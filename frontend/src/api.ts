@@ -5,6 +5,7 @@ import type {
   ValidateResponse,
   EvalRequest,
   EvalResponse,
+  DownloadFormat,
 } from './types';
 
 const API_BASE = '/api';
@@ -21,6 +22,71 @@ export async function solvePuzzle(
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+/**
+ * Generate and download results directly from frontend data.
+ * This avoids re-running the solver on the backend, saving server CPU and memory.
+ */
+export function downloadResults(
+  data: SolveResponse,
+  format: DownloadFormat = 'json',
+): void {
+  const timestamp = Math.floor(Date.now() / 1000);
+  let content: string;
+  let mimeType: string;
+  let extension: string;
+
+  switch (format) {
+    case 'csv': {
+      const lines = ['index,expression'];
+      data.solutions.forEach((sol, i) => {
+        lines.push(`${i + 1},${sol}`);
+      });
+      content = lines.join('\n');
+      mimeType = 'text/csv;charset=utf-8';
+      extension = 'csv';
+      break;
+    }
+    case 'txt': {
+      const lines: string[] = [
+        'Sumzle Solver Results',
+        '=====================',
+        `Solutions found: ${data.stats.found_count}`,
+        `Expressions searched: ${data.stats.searched_count}`,
+        `Time elapsed: ${data.stats.elapsed_ms}ms`,
+        `Search speed: ${data.stats.speed} expr/s`,
+      ];
+      if (data.recommended) {
+        lines.push(`Recommended: ${data.recommended}`);
+      }
+      lines.push('', '--- Solutions ---');
+      data.solutions.forEach((sol, i) => {
+        lines.push(`${i + 1}. ${sol}`);
+      });
+      content = lines.join('\n');
+      mimeType = 'text/plain;charset=utf-8';
+      extension = 'txt';
+      break;
+    }
+    default: {
+      // JSON format
+      content = JSON.stringify(data, null, 2);
+      mimeType = 'application/json;charset=utf-8';
+      extension = 'json';
+      break;
+    }
+  }
+
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `sumzle_solutions_${timestamp}.${extension}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 export async function validateEquation(equation: string): Promise<ValidateResponse> {
