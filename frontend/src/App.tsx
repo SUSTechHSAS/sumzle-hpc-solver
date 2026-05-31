@@ -1,7 +1,9 @@
 import { useState, useCallback, useRef } from 'react';
-import type { GuessRow, SolveResponse, TileState } from './types';
-import { solvePuzzle } from './api';
+import type { GuessRow, TileState, DownloadFormat } from './types';
+import { solvePuzzle, downloadResults } from './api';
 import GuessRowComponent from './components/GuessRow';
+import VirtualKeyboard from './components/VirtualKeyboard';
+import ImportGameState from './components/ImportGameState';
 import { createBlankRow, cycleState } from './utils';
 import Results from './components/Results';
 import ExpressionEvaluator from './components/ExpressionEvaluator';
@@ -11,11 +13,14 @@ import './App.css';
 const DEFAULT_LENGTH = 5;
 
 export default function App() {
+  const [darkMode, setDarkMode] = useState(false);
   const [length, setLength] = useState(DEFAULT_LENGTH);
   const [rows, setRows] = useState<GuessRow[]>([createBlankRow(DEFAULT_LENGTH)]);
-  const [solutions, setSolutions] = useState<SolveResponse | null>(null);
+  const [solutions, setSolutions] = useState<import('./types').SolveResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [downloadLoading, setDownloadLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTile, setSelectedTile] = useState<{ row: number; col: number } | null>(null);
 
   const handleLengthChange = useCallback((newLength: number) => {
     const clamped = Math.min(8, Math.max(3, newLength));
@@ -62,6 +67,31 @@ export default function App() {
     setSolutions(null);
   }, []);
 
+  const handleTileSelect = useCallback((rowIndex: number, tileIndex: number) => {
+    setSelectedTile({ row: rowIndex, col: tileIndex });
+  }, []);
+
+  const handleKeyPress = useCallback(
+    (key: string) => {
+      if (!selectedTile) return;
+      const { row: ri, col: ci } = selectedTile;
+      if (key === '⌫') {
+        // Backspace: clear current tile, then move to previous
+        handleTileCharChange(ri, ci, '');
+        if (ci > 0) {
+          setSelectedTile({ row: ri, col: ci - 1 });
+        }
+      } else {
+        handleTileCharChange(ri, ci, key);
+        // Move to next tile
+        if (ci < length - 1) {
+          setSelectedTile({ row: ri, col: ci + 1 });
+        }
+      }
+    },
+    [selectedTile, length, handleTileCharChange],
+  );
+
   const addRow = useCallback(() => {
     setRows((prev) => [...prev, createBlankRow(length)]);
   }, [length]);
@@ -74,9 +104,9 @@ export default function App() {
     setRows([createBlankRow(length)]);
     setSolutions(null);
     setError(null);
+    setSelectedTile(null);
   }, [length]);
 
-  // Track the latest solve request to discard stale responses
   const solveGenerationRef = useRef(0);
 
   const handleSolve = useCallback(async () => {
@@ -86,7 +116,6 @@ export default function App() {
     setSolutions(null);
     try {
       const res = await solvePuzzle(length, rows);
-      // Only update if this is still the latest request
       if (generation === solveGenerationRef.current) {
         setSolutions(res);
       }
@@ -101,82 +130,146 @@ export default function App() {
     }
   }, [length, rows]);
 
+  const handleDownload = useCallback(
+    async (format: DownloadFormat) => {
+      setDownloadLoading(true);
+      try {
+        await downloadResults(length, rows, format);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Download failed');
+      } finally {
+        setDownloadLoading(false);
+      }
+    },
+    [length, rows],
+  );
+
+  const handleImport = useCallback(
+    (importedLength: number, importedRows: GuessRow[]) => {
+      setLength(importedLength);
+      setRows(importedRows);
+      setSolutions(null);
+      setError(null);
+      setSelectedTile(null);
+    },
+    [],
+  );
+
   return (
-    <div className="app">
+    <div className={`app${darkMode ? ' dark-theme' : ''}`}>
       <header className="app-header">
-        <h1 className="app-title">Sumzle HPC Solver</h1>
-        <p className="app-subtitle">High-performance equation puzzle solver</p>
+        <h1 className="app-title">Sumzle Solver</h1>
+        <button
+          className="theme-toggle"
+          onClick={() => setDarkMode(!darkMode)}
+          title={darkMode ? '切换到亮色模式' : '切换到暗色模式'}
+        >
+          {darkMode ? '☀️' : '🌙'}
+        </button>
       </header>
 
       <main className="app-main">
-        <section className="puzzle-section">
-          <div className="puzzle-controls">
-            <div className="length-control">
-              <label htmlFor="length-input">Equation Length:</label>
-              <input
-                id="length-input"
-                type="number"
-                min={3}
-                max={8}
-                value={length}
-                onChange={(e) => handleLengthChange(parseInt(e.target.value, 10) || 3)}
-                className="length-input"
+        <div className="two-column-layout">
+          {/* Left Column: Configuration */}
+          <div className="column column-left">
+            <div className="panel">
+              <h2 className="section-title">🎯 求解配置</h2>
+
+              <div className="puzzle-controls">
+                <div className="length-control">
+                  <label htmlFor="length-input">表达式长度:</label>
+                  <input
+                    id="length-input"
+                    type="number"
+                    min={3}
+                    max={8}
+                    value={length}
+                    onChange={(e) => handleLengthChange(parseInt(e.target.value, 10) || 3)}
+                    className="length-input"
+                  />
+                </div>
+                <div className="row-buttons">
+                  <button className="btn btn-secondary" onClick={addRow}>
+                    + 添加行
+                  </button>
+                  <button className="btn btn-secondary" onClick={removeRow} disabled={rows.length <= 1}>
+                    − 删除行
+                  </button>
+                  <button className="btn btn-danger" onClick={clearAll}>
+                    清空
+                  </button>
+                </div>
+              </div>
+
+              <div className="guess-rows">
+                {rows.map((row, i) => (
+                  <GuessRowComponent
+                    key={i}
+                    row={row}
+                    rowIndex={i}
+                    onTileCharChange={handleTileCharChange}
+                    onTileStateToggle={handleTileStateToggle}
+                    selectedTile={selectedTile}
+                    onTileSelect={handleTileSelect}
+                  />
+                ))}
+              </div>
+
+              <VirtualKeyboard onKeyPress={handleKeyPress} />
+
+              <div className="solve-section">
+                <button
+                  className="btn btn-primary btn-solve"
+                  onClick={handleSolve}
+                  disabled={loading}
+                >
+                  {loading ? '求解中...' : '🧩 开始求解'}
+                </button>
+                <p className="solve-hint">
+                  点击方块角标切换颜色：绿色（正确位置）→ 黄色（存在但位置错误）→ 灰色（不存在）
+                </p>
+              </div>
+
+              <ImportGameState length={length} onImport={handleImport} />
+
+              {/* Help section */}
+              <div className="help-section">
+                <h4 className="help-title">💡 操作提示</h4>
+                <ul className="help-list">
+                  <li>点击方块输入字符，点击角标切换状态</li>
+                  <li>使用虚拟键盘或直接输入字符</li>
+                  <li>绿色 = 正确位置，黄色 = 存在但错位，灰色 = 不存在</li>
+                  <li>支持运算符：+ - × ÷ % ^ ! A ( ) [ ] = &gt;</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column: Results */}
+          <div className="column column-right">
+            <div className="panel">
+              <Results
+                data={solutions}
+                loading={loading}
+                error={error}
+                onDownload={handleDownload}
+                downloadLoading={downloadLoading}
               />
             </div>
-            <div className="row-buttons">
-              <button className="btn btn-secondary" onClick={addRow}>
-                + Add Row
-              </button>
-              <button className="btn btn-secondary" onClick={removeRow} disabled={rows.length <= 1}>
-                − Remove Row
-              </button>
-              <button className="btn btn-danger" onClick={clearAll}>
-                Clear All
-              </button>
+
+            {/* Tools section */}
+            <div className="panel tools-panel">
+              <div className="tools-grid">
+                <ExpressionEvaluator />
+                <EquationValidator />
+              </div>
             </div>
           </div>
-
-          <div className="guess-rows">
-            {rows.map((row, i) => (
-              <GuessRowComponent
-                key={i}
-                row={row}
-                rowIndex={i}
-                onTileCharChange={handleTileCharChange}
-                onTileStateToggle={handleTileStateToggle}
-              />
-            ))}
-          </div>
-
-          <div className="solve-section">
-            <button
-              className="btn btn-primary btn-solve"
-              onClick={handleSolve}
-              disabled={loading}
-            >
-              {loading ? 'Solving...' : '🧩 Solve'}
-            </button>
-            <p className="solve-hint">
-              Click the corner button on each tile to cycle its color: green (correct position) →
-              yellow (wrong position) → gray (absent)
-            </p>
-          </div>
-        </section>
-
-        <Results data={solutions} loading={loading} error={error} />
-
-        <section className="tools-section">
-          <div className="tools-grid">
-            <ExpressionEvaluator />
-            <EquationValidator />
-          </div>
-        </section>
+        </div>
       </main>
 
       <footer className="app-footer">
-        <p>
-          Sumzle HPC Solver &mdash; Powered by Rust + axum backend
-        </p>
+        <p>Sumzle HPC Solver &mdash; Powered by Rust + axum</p>
       </footer>
     </div>
   );

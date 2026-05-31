@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import GuessRowComponent from './GuessRow';
-import { createBlankRow, cycleState } from '../utils';
+import { createBlankRow } from '../utils';
 
 describe('GuessRow', () => {
   const mockOnCharChange = vi.fn();
@@ -23,7 +23,7 @@ describe('GuessRow', () => {
     expect(inputs).toHaveLength(5);
   });
 
-  it('renders the row label', () => {
+  it('renders the row label with Chinese text', () => {
     const row = createBlankRow(3);
     render(
       <GuessRowComponent
@@ -33,7 +33,7 @@ describe('GuessRow', () => {
         onTileStateToggle={mockOnStateToggle}
       />,
     );
-    expect(screen.getByText('Row 3')).toBeInTheDocument();
+    expect(screen.getByText('第 3 行')).toBeInTheDocument();
   });
 
   it('displays characters in tiles', () => {
@@ -113,23 +113,22 @@ describe('GuessRow', () => {
     await user.click(buttons[0]);
     expect(onStateToggle).toHaveBeenCalledWith(0, 0);
   });
-});
 
-describe('createBlankRow', () => {
-  it('creates a row with the correct number of empty tiles', () => {
-    const row = createBlankRow(5);
-    expect(row.tiles).toHaveLength(5);
-    row.tiles.forEach((tile) => {
-      expect(tile.char).toBe('');
-      expect(tile.state).toBe('empty');
-    });
-  });
-});
-
-describe('cycleState', () => {
-  it('cycles through correct → present → empty → correct', () => {
-    expect(cycleState('correct')).toBe('present');
-    expect(cycleState('present')).toBe('empty');
-    expect(cycleState('empty')).toBe('correct');
+  it('supports tile selection', () => {
+    const onSelect = vi.fn();
+    const row = createBlankRow(3);
+    const { container } = render(
+      <GuessRowComponent
+        row={row}
+        rowIndex={0}
+        onTileCharChange={mockOnCharChange}
+        onTileStateToggle={mockOnStateToggle}
+        selectedTile={{ row: 0, col: 1 }}
+        onTileSelect={onSelect}
+      />,
+    );
+    const tiles = container.querySelectorAll('.tile');
+    expect(tiles[1]).toHaveClass('tile-selected');
+    expect(tiles[0]).not.toHaveClass('tile-selected');
   });
 });

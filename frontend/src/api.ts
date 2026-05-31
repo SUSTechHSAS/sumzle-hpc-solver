@@ -5,6 +5,7 @@ import type {
   ValidateResponse,
   EvalRequest,
   EvalResponse,
+  DownloadFormat,
 } from './types';
 
 const API_BASE = '/api';
@@ -21,6 +22,36 @@ export async function solvePuzzle(
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+export async function downloadResults(
+  length: number,
+  rows: SolveRequest['rows'],
+  format: DownloadFormat = 'json',
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/download?format=${format}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ length, rows }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+
+  const blob = await res.blob();
+  const contentDisposition = res.headers.get('content-disposition');
+  let filename = `sumzle_solutions.${format}`;
+  if (contentDisposition) {
+    const match = contentDisposition.match(/filename="?(.+?)"?$/);
+    if (match) filename = match[1];
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 export async function validateEquation(equation: string): Promise<ValidateResponse> {

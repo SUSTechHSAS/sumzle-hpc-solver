@@ -1,66 +1,97 @@
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import Results from './Results';
 import type { SolveResponse } from '../types';
 
-const mockData: SolveResponse = {
-  solutions: ['1+2=3', '2+1=3', '3-2=1'],
-  stats: {
-    searched_count: 841,
-    found_count: 3,
-    elapsed_ms: 1,
-    speed: 841000,
-  },
-};
-
 describe('Results', () => {
-  it('renders nothing when data is null and not loading', () => {
-    const { container } = render(<Results data={null} loading={false} error={null} />);
-    expect(container.firstChild).toBeNull();
+  const mockOnDownload = vi.fn();
+
+  it('shows placeholder when no data', () => {
+    render(<Results data={null} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    expect(screen.getByText('等待求解开始...')).toBeInTheDocument();
   });
 
-  it('renders loading state', () => {
-    render(<Results data={null} loading={true} error={null} />);
-    expect(screen.getByText('Solving puzzle...')).toBeInTheDocument();
+  it('shows loading state', () => {
+    render(<Results data={null} loading={true} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    expect(screen.getByText('正在求解...')).toBeInTheDocument();
   });
 
-  it('renders error state', () => {
-    render(<Results data={null} loading={false} error="Something went wrong" />);
+  it('shows error message', () => {
+    render(<Results data={null} loading={false} error="Something went wrong" onDownload={mockOnDownload} downloadLoading={false} />);
     expect(screen.getByText('Something went wrong')).toBeInTheDocument();
   });
 
-  it('renders results with stats', () => {
-    render(<Results data={mockData} loading={false} error={null} />);
-    expect(screen.getByText('Results')).toBeInTheDocument();
-    expect(screen.getByText('841')).toBeInTheDocument();
-    // "3" appears in multiple places, use getAllByText
-    const threes = screen.getAllByText('3');
-    expect(threes.length).toBeGreaterThanOrEqual(1);
+  it('displays solutions and stats', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3', '2+3=5'],
+      stats: { searched_count: 1000, found_count: 2, elapsed_ms: 50, speed: 20000 },
+      char_probabilities: [
+        { char: '=', display: '=', count: 2, probability: 100 },
+        { char: '1', display: '1', count: 1, probability: 50 },
+      ],
+      recommended: '1+2=3',
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+
+    // Check that solutions are displayed (may appear multiple times: recommended + list)
+    expect(container.querySelectorAll('.result-item')).toHaveLength(2);
+    expect(container.querySelector('.result-item.recommended')).toBeInTheDocument();
+    // Check stats
+    expect(screen.getByText('1,000')).toBeInTheDocument();
   });
 
-  it('renders solution cards', () => {
-    render(<Results data={mockData} loading={false} error={null} />);
-    expect(screen.getByText('1+2=3')).toBeInTheDocument();
-    expect(screen.getByText('2+1=3')).toBeInTheDocument();
-    expect(screen.getByText('3-2=1')).toBeInTheDocument();
+  it('shows character probabilities', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3'],
+      stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [
+        { char: '=', display: '=', count: 1, probability: 100 },
+        { char: '*', display: '×', count: 1, probability: 100 },
+      ],
+      recommended: '1+2=3',
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+
+    expect(container.querySelector('.char-prob-section')).toBeInTheDocument();
+    expect(screen.getByText('×')).toBeInTheDocument();
   });
 
-  it('renders summary section', () => {
-    render(<Results data={mockData} loading={false} error={null} />);
-    // Check for the summary container which contains the text split across elements
-    const summary = document.querySelector('.results-summary');
-    expect(summary).toBeInTheDocument();
-    expect(summary?.textContent).toContain('Found');
-    expect(summary?.textContent).toContain('3');
-    expect(summary?.textContent).toContain('1ms');
+  it('shows recommended solution', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3', '2+3=5'],
+      stats: { searched_count: 1000, found_count: 2, elapsed_ms: 50, speed: 20000 },
+      char_probabilities: [],
+      recommended: '1+2=3',
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+
+    expect(container.querySelector('.recommended-section')).toBeInTheDocument();
+    expect(container.querySelector('.recommended-expression')).toHaveTextContent('1+2=3');
   });
 
-  it('renders no solutions message when empty', () => {
-    const noSolutionsData: SolveResponse = {
+  it('shows no solutions message when empty', () => {
+    const data: SolveResponse = {
       solutions: [],
       stats: { searched_count: 100, found_count: 0, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [],
+      recommended: null,
     };
-    render(<Results data={noSolutionsData} loading={false} error={null} />);
-    expect(screen.getByText('No solutions found for this puzzle.')).toBeInTheDocument();
+    render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+
+    expect(screen.getByText('暂无找到符合条件的解')).toBeInTheDocument();
+  });
+
+  it('shows download buttons when solutions exist', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3'],
+      stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [],
+      recommended: '1+2=3',
+    };
+    render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+
+    expect(screen.getByText('JSON')).toBeInTheDocument();
+    expect(screen.getByText('CSV')).toBeInTheDocument();
+    expect(screen.getByText('TXT')).toBeInTheDocument();
   });
 });

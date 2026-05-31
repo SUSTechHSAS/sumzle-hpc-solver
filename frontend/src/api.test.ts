@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { solvePuzzle, validateEquation, evaluateExpression } from './api';
+import { solvePuzzle, validateEquation, evaluateExpression, downloadResults } from './api';
 
 describe('API functions', () => {
   beforeEach(() => {
@@ -7,10 +7,15 @@ describe('API functions', () => {
   });
 
   describe('solvePuzzle', () => {
-    it('sends correct request and returns data', async () => {
+    it('sends correct request and returns data with new fields', async () => {
       const mockResponse = {
         solutions: ['1+2=3'],
         stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+        char_probabilities: [
+          { char: '=', display: '=', count: 1, probability: 100 },
+          { char: '1', display: '1', count: 1, probability: 100 },
+        ],
+        recommended: '1+2=3',
       };
       vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
         ok: true,
@@ -27,6 +32,8 @@ describe('API functions', () => {
         }),
       });
       expect(result).toEqual(mockResponse);
+      expect(result.char_probabilities).toBeDefined();
+      expect(result.recommended).toBe('1+2=3');
     });
 
     it('throws on non-ok response', async () => {
@@ -93,16 +100,59 @@ describe('API functions', () => {
     });
   });
 
-  describe('solvePuzzle JSON body structure', () => {
-    // These tests verify that the JSON body sent by the frontend matches
-    // the format expected by the Rust backend's serde deserialization.
-    // This prevents the bug where the frontend sent {rows: [{tiles: [...]}]}
-    // but the backend expected {rows: [[...]]}.
+  describe('downloadResults', () => {
+    it('sends correct request for JSON download', async () => {
+      const mockBlob = new Blob(['{"solutions":[]}'], { type: 'application/json' });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        blob: () => Promise.resolve(mockBlob),
+        headers: new Headers({ 'content-disposition': 'attachment; filename="test.json"' }),
+      } as Response);
 
+      await downloadResults(5, [], 'json');
+      expect(fetch).toHaveBeenCalledWith('/api/download?format=json', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ length: 5, rows: [] }),
+      });
+    });
+
+    it('sends correct request for CSV download', async () => {
+      const mockBlob = new Blob(['index,expression'], { type: 'text/csv' });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        blob: () => Promise.resolve(mockBlob),
+        headers: new Headers(),
+      } as Response);
+
+      await downloadResults(5, [], 'csv');
+      expect(fetch).toHaveBeenCalledWith('/api/download?format=csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ length: 5, rows: [] }),
+      });
+    });
+
+    it('throws on non-ok response', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        text: () => Promise.resolve('Server error'),
+      } as Response);
+
+      await expect(downloadResults(5, [], 'json')).rejects.toThrow('Server error');
+    });
+  });
+
+  describe('solvePuzzle JSON body structure', () => {
     it('sends rows with tiles wrapper (not raw arrays)', async () => {
       vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ solutions: [], stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 } }),
+        json: () => Promise.resolve({
+          solutions: [],
+          stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 },
+          char_probabilities: [],
+          recommended: null,
+        }),
       } as Response);
 
       await solvePuzzle(6, [
@@ -123,7 +173,12 @@ describe('API functions', () => {
     it('sends tiles with char and state string fields', async () => {
       vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ solutions: [], stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 } }),
+        json: () => Promise.resolve({
+          solutions: [],
+          stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 },
+          char_probabilities: [],
+          recommended: null,
+        }),
       } as Response);
 
       await solvePuzzle(6, [
@@ -143,7 +198,12 @@ describe('API functions', () => {
     it('sends multiple rows correctly', async () => {
       vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ solutions: [], stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 } }),
+        json: () => Promise.resolve({
+          solutions: [],
+          stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 },
+          char_probabilities: [],
+          recommended: null,
+        }),
       } as Response);
 
       await solvePuzzle(6, [

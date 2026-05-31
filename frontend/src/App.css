@@ -1,73 +1,192 @@
+/* ===== CSS Custom Properties ===== */
+:root {
+  --color-background: #f8f9fa;
+  --color-surface: #ffffff;
+  --color-text: #212529;
+  --color-text-secondary: #6c757d;
+  --color-border: #dee2e6;
+  --color-divider: #e8e8e8;
+  --color-correct: #28a745;
+  --color-present: #ffc107;
+  --color-absent: #7a7a7a;
+  --fluent-blue: #007bff;
+  --color-danger: #dc3545;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-s: 0 2px 4px rgba(0, 0, 0, 0.06);
+  --shadow-m: 0 4px 8px rgba(0, 0, 0, 0.08);
+  --shadow-l: 0 8px 16px rgba(0, 0, 0, 0.1);
+}
+
+.dark-theme {
+  --color-background: #1a1a1d;
+  --color-surface: #2c2f33;
+  --color-text: #f0f0f0;
+  --color-text-secondary: #a0a0a0;
+  --color-border: #424549;
+  --color-divider: #36393f;
+  --color-correct: #28a745;
+  --color-present: #ffc107;
+  --color-absent: #555555;
+  --fluent-blue: #4da3ff;
+  --color-danger: #ff6b6b;
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-s: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-m: 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-l: 0 8px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ===== Global Reset ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--color-text);
+  background-color: var(--color-background);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+input,
+button,
+textarea {
+  font-family: inherit;
+}
+
 /* ===== App Layout ===== */
 .app {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #f0f2f5;
+  background: var(--color-background);
+  transition: background-color 0.3s ease;
 }
 
 /* ===== Header ===== */
 .app-header {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
   color: #ffffff;
-  padding: 28px 20px 24px;
+  padding: 20px 24px;
   text-align: center;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-  position: relative;
-  overflow: hidden;
-}
-
-.app-header::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, #6aaa64, #c9b458, #6aaa64);
+  box-shadow: var(--shadow-m);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
 }
 
 .app-title {
   margin: 0;
-  font-size: 2.2rem;
+  font-size: 1.8rem;
   font-weight: 800;
   letter-spacing: -0.5px;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(90deg, #ff6b6b, #4ecdc4, #45b7d1, #ff6b6b);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: shimmer 4s ease-in-out infinite;
 }
 
-.app-subtitle {
-  margin: 6px 0 0;
-  font-size: 1rem;
-  font-weight: 400;
-  opacity: 0.8;
-  letter-spacing: 0.5px;
+@keyframes shimmer {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.theme-toggle {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 1.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+}
+
+.theme-toggle:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: translateY(-50%) scale(1.1);
 }
 
 /* ===== Main ===== */
 .app-main {
   flex: 1;
-  max-width: 800px;
+  max-width: 1200px;
   width: 100%;
   margin: 0 auto;
-  padding: 24px 16px;
+  padding: 20px 16px;
 }
 
-/* ===== Puzzle Section ===== */
-.puzzle-section {
-  background: #ffffff;
-  border-radius: 16px;
-  padding: 24px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-  border: 1px solid #e8e8e8;
-  margin-bottom: 20px;
+/* ===== Two Column Layout ===== */
+.two-column-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  align-items: start;
 }
 
+.column {
+  min-width: 0;
+}
+
+/* ===== Panel ===== */
+.panel {
+  background: var(--color-surface);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-s);
+  border: 1px solid var(--color-border);
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.tools-panel {
+  margin-top: 16px;
+}
+
+/* ===== Section Title ===== */
+.section-title {
+  margin: 0 0 12px 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--color-text);
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--color-divider);
+}
+
+/* ===== Puzzle Controls ===== */
 .puzzle-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 .length-control {
@@ -77,45 +196,45 @@
 }
 
 .length-control label {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
-  color: #555;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
+  color: var(--color-text-secondary);
 }
 
 .length-input {
-  width: 60px;
-  padding: 6px 10px;
-  border: 2px solid #ddd;
-  border-radius: 8px;
-  font-size: 1.1rem;
+  width: 56px;
+  padding: 5px 8px;
+  border: 2px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 1rem;
   font-weight: 700;
   text-align: center;
   outline: none;
   transition: border-color 0.2s;
+  background: var(--color-background);
+  color: var(--color-text);
 }
 
 .length-input:focus {
-  border-color: #6aaa64;
+  border-color: var(--fluent-blue);
 }
 
 .row-buttons {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
 /* ===== Buttons ===== */
 .btn {
-  padding: 8px 16px;
+  padding: 7px 14px;
   border: none;
-  border-radius: 8px;
-  font-size: 0.9rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
 }
 
 .btn:active {
@@ -123,28 +242,32 @@
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #6aaa64, #5a9a54);
+  background: linear-gradient(135deg, var(--fluent-blue), #0056b3);
   color: #fff;
-  box-shadow: 0 2px 8px rgba(106, 170, 100, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 123, 255, 0.3);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #5a9a54, #4a8a44);
-  box-shadow: 0 4px 12px rgba(106, 170, 100, 0.4);
+  box-shadow: 0 4px 12px rgba(0, 123, 255, 0.4);
 }
 
 .btn-secondary {
-  background: #e8eaed;
-  color: #333;
+  background: var(--color-border);
+  color: var(--color-text);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: #d0d3d8;
+  opacity: 0.8;
 }
 
 .btn-danger {
   background: #f8d7da;
   color: #842029;
+}
+
+.dark-theme .btn-danger {
+  background: #3d1f22;
+  color: #ff8a8a;
 }
 
 .btn-danger:hover:not(:disabled) {
@@ -157,9 +280,10 @@
 }
 
 .btn-solve {
-  padding: 12px 32px;
-  font-size: 1.1rem;
-  border-radius: 10px;
+  padding: 10px 28px;
+  font-size: 1rem;
+  border-radius: 8px;
+  width: 100%;
 }
 
 /* ===== Guess Rows ===== */
@@ -167,7 +291,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -177,27 +301,52 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .solve-hint {
-  font-size: 0.8rem;
-  color: #999;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
   text-align: center;
   margin: 0;
-  max-width: 500px;
+  max-width: 400px;
   line-height: 1.4;
 }
 
-/* ===== Tools Section ===== */
-.tools-section {
-  margin-top: 20px;
+/* ===== Help Section ===== */
+.help-section {
+  margin-top: 16px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--fluent-blue) 8%, var(--color-surface));
+  border-left: 4px solid var(--fluent-blue);
+  border-radius: 6px;
 }
 
+.help-title {
+  margin: 0 0 6px 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fluent-blue);
+}
+
+.help-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.help-list li {
+  margin-bottom: 2px;
+}
+
+/* ===== Tools Section ===== */
 .tools-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 12px;
 }
 
 /* ===== Footer ===== */
@@ -205,8 +354,8 @@
   background: #1a1a2e;
   color: rgba(255, 255, 255, 0.6);
   text-align: center;
-  padding: 16px;
-  font-size: 0.85rem;
+  padding: 14px;
+  font-size: 0.8rem;
   margin-top: auto;
 }
 
@@ -215,25 +364,25 @@
 }
 
 /* ===== Responsive ===== */
-@media (max-width: 600px) {
+@media (max-width: 768px) {
+  .two-column-layout {
+    grid-template-columns: 1fr;
+  }
+
   .app-header {
-    padding: 20px 16px 18px;
+    padding: 14px 16px;
   }
 
   .app-title {
-    font-size: 1.6rem;
-  }
-
-  .app-subtitle {
-    font-size: 0.85rem;
+    font-size: 1.4rem;
   }
 
   .app-main {
-    padding: 16px 10px;
+    padding: 12px 8px;
   }
 
-  .puzzle-section {
-    padding: 16px 12px;
+  .panel {
+    padding: 14px 12px;
   }
 
   .puzzle-controls {
@@ -251,10 +400,6 @@
 
   .tools-grid {
     grid-template-columns: 1fr;
-  }
-
-  .btn-solve {
-    width: 100%;
   }
 
   .stats-grid {

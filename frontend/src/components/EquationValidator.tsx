@@ -29,23 +29,23 @@ export default function EquationValidator() {
 
   return (
     <div className="validator-section" data-testid="equation-validator">
-      <h3>Equation Validator</h3>
+      <h3 className="section-title">✅ 方程验证</h3>
       <div className="validator-row">
         <input
           type="text"
           className="validator-input"
-          placeholder="e.g. 1+2=3"
+          placeholder="例如 1+2=3"
           value={equation}
           onChange={(e) => setEquation(e.target.value)}
           onKeyDown={handleKeyDown}
         />
         <button className="validator-btn" onClick={handleValidate} disabled={loading}>
-          {loading ? '...' : 'Check'}
+          {loading ? '...' : '验证'}
         </button>
       </div>
       {valid !== null && (
         <div className={`validator-result ${valid ? 'valid' : 'invalid'}`}>
-          {valid ? '✓ Valid equation' : '✗ Invalid equation'}
+          {valid ? '✓ 有效的方程' : '✗ 无效的方程'}
         </div>
       )}
       {error && <div className="validator-error">{error}</div>}

@@ -1,0 +1,63 @@
+.import-section {
+  margin-top: 12px;
+}
+
+.btn-import-toggle {
+  width: 100%;
+  padding: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-import-toggle:hover {
+  background: var(--color-border);
+}
+
+.import-panel {
+  margin-top: 8px;
+  padding: 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.import-textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 2px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-family: 'Courier New', monospace;
+  resize: vertical;
+  outline: none;
+  background: var(--color-background);
+  color: var(--color-text);
+  transition: border-color 0.2s;
+}
+
+.import-textarea:focus {
+  border-color: var(--fluent-blue);
+}
+
+.import-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
+
+.import-error {
+  margin-top: 8px;
+  color: var(--color-danger);
+  font-size: 0.8rem;
+}
