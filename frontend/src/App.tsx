@@ -18,7 +18,6 @@ export default function App() {
   const [rows, setRows] = useState<GuessRow[]>([createBlankRow(DEFAULT_LENGTH)]);
   const [solutions, setSolutions] = useState<SolveResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [downloadLoading, setDownloadLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedTile, setSelectedTile] = useState<{ row: number; col: number } | null>(null);
 
@@ -131,17 +130,15 @@ export default function App() {
   }, [length, rows]);
 
   const handleDownload = useCallback(
-    async (format: DownloadFormat) => {
-      setDownloadLoading(true);
+    (format: DownloadFormat) => {
+      if (!solutions) return;
       try {
-        await downloadResults(length, rows, format);
+        downloadResults(solutions, format);
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Download failed');
-      } finally {
-        setDownloadLoading(false);
       }
     },
-    [length, rows],
+    [solutions],
   );
 
   const handleImport = useCallback(
@@ -253,7 +250,6 @@ export default function App() {
                 loading={loading}
                 error={error}
                 onDownload={handleDownload}
-                downloadLoading={downloadLoading}
               />
             </div>
 

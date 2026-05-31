@@ -7,17 +7,17 @@ describe('Results', () => {
   const mockOnDownload = vi.fn();
 
   it('shows placeholder when no data', () => {
-    render(<Results data={null} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    render(<Results data={null} loading={false} error={null} onDownload={mockOnDownload}  />);
     expect(screen.getByText('等待求解开始...')).toBeInTheDocument();
   });
 
   it('shows loading state', () => {
-    render(<Results data={null} loading={true} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    render(<Results data={null} loading={true} error={null} onDownload={mockOnDownload}  />);
     expect(screen.getByText('正在求解...')).toBeInTheDocument();
   });
 
   it('shows error message', () => {
-    render(<Results data={null} loading={false} error="Something went wrong" onDownload={mockOnDownload} downloadLoading={false} />);
+    render(<Results data={null} loading={false} error="Something went wrong" onDownload={mockOnDownload}  />);
     expect(screen.getByText('Something went wrong')).toBeInTheDocument();
   });
 
@@ -31,7 +31,7 @@ describe('Results', () => {
       ],
       recommended: '1+2=3',
     };
-    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     // Check that solutions are displayed (may appear multiple times: recommended + list)
     expect(container.querySelectorAll('.result-item')).toHaveLength(2);
@@ -50,7 +50,7 @@ describe('Results', () => {
       ],
       recommended: '1+2=3',
     };
-    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     expect(container.querySelector('.char-prob-section')).toBeInTheDocument();
     expect(screen.getByText('×')).toBeInTheDocument();
@@ -63,7 +63,7 @@ describe('Results', () => {
       char_probabilities: [],
       recommended: '1+2=3',
     };
-    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     expect(container.querySelector('.recommended-section')).toBeInTheDocument();
     expect(container.querySelector('.recommended-expression')).toHaveTextContent('1+2=3');
@@ -76,7 +76,7 @@ describe('Results', () => {
       char_probabilities: [],
       recommended: null,
     };
-    render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     expect(screen.getByText('暂无找到符合条件的解')).toBeInTheDocument();
   });
@@ -88,7 +88,7 @@ describe('Results', () => {
       char_probabilities: [],
       recommended: '1+2=3',
     };
-    render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} downloadLoading={false} />);
+    render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     expect(screen.getByText('JSON')).toBeInTheDocument();
     expect(screen.getByText('CSV')).toBeInTheDocument();

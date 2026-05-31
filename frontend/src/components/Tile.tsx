@@ -1,3 +1,4 @@
+import { useRef, useEffect } from 'react';
 import { type Tile as TileType, type TileState } from '../types';
 import './Tile.css';
 
@@ -16,6 +17,14 @@ const STATE_LABELS: Record<TileState, string> = {
 };
 
 export default function Tile({ tile, onCharChange, onStateToggle, selected, onSelect }: TileProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (selected && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [selected]);
+
   const handleInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     if (val.length === 0) {
@@ -37,6 +46,7 @@ export default function Tile({ tile, onCharChange, onStateToggle, selected, onSe
       onClick={onSelect}
     >
       <input
+        ref={inputRef}
         className="tile-input"
         type="text"
         maxLength={1}

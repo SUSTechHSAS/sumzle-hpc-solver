@@ -24,30 +24,65 @@ export async function solvePuzzle(
   return res.json();
 }
 
-export async function downloadResults(
-  length: number,
-  rows: SolveRequest['rows'],
+/**
+ * Generate and download results directly from frontend data.
+ * This avoids re-running the solver on the backend, saving server CPU and memory.
+ */
+export function downloadResults(
+  data: SolveResponse,
   format: DownloadFormat = 'json',
-): Promise<void> {
-  const res = await fetch(`${API_BASE}/download?format=${format}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ length, rows }),
-  });
-  if (!res.ok) throw new Error(await res.text());
+): void {
+  const timestamp = Math.floor(Date.now() / 1000);
+  let content: string;
+  let mimeType: string;
+  let extension: string;
 
-  const blob = await res.blob();
-  const contentDisposition = res.headers.get('content-disposition');
-  let filename = `sumzle_solutions.${format}`;
-  if (contentDisposition) {
-    const match = contentDisposition.match(/filename="?(.+?)"?$/);
-    if (match) filename = match[1];
+  switch (format) {
+    case 'csv': {
+      const lines = ['index,expression'];
+      data.solutions.forEach((sol, i) => {
+        lines.push(`${i + 1},${sol}`);
+      });
+      content = lines.join('\n');
+      mimeType = 'text/csv;charset=utf-8';
+      extension = 'csv';
+      break;
+    }
+    case 'txt': {
+      const lines: string[] = [
+        'Sumzle Solver Results',
+        '=====================',
+        `Solutions found: ${data.stats.found_count}`,
+        `Expressions searched: ${data.stats.searched_count}`,
+        `Time elapsed: ${data.stats.elapsed_ms}ms`,
+        `Search speed: ${data.stats.speed} expr/s`,
+      ];
+      if (data.recommended) {
+        lines.push(`Recommended: ${data.recommended}`);
+      }
+      lines.push('', '--- Solutions ---');
+      data.solutions.forEach((sol, i) => {
+        lines.push(`${i + 1}. ${sol}`);
+      });
+      content = lines.join('\n');
+      mimeType = 'text/plain;charset=utf-8';
+      extension = 'txt';
+      break;
+    }
+    default: {
+      // JSON format
+      content = JSON.stringify(data, null, 2);
+      mimeType = 'application/json;charset=utf-8';
+      extension = 'json';
+      break;
+    }
   }
 
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = filename;
+  a.download = `sumzle_solutions_${timestamp}.${extension}`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

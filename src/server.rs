@@ -186,8 +186,9 @@ pub fn compute_char_probabilities(solutions: &[String]) -> Vec<CharProbability> 
     let total = solutions.len() as f64;
     let mut char_counts: HashMap<char, usize> = HashMap::new();
 
+    let mut seen = std::collections::HashSet::new();
     for sol in solutions {
-        let mut seen = std::collections::HashSet::new();
+        seen.clear();
         for ch in sol.chars() {
             if seen.insert(ch) {
                 *char_counts.entry(ch).or_insert(0) += 1;
@@ -245,8 +246,9 @@ pub fn compute_recommended(solutions: &[String], probs: &[CharProbability]) -> O
     let mut best_solution: Option<String> = None;
     let mut best_score: f64 = f64::NEG_INFINITY;
 
+    let mut seen = std::collections::HashSet::new();
     for sol in solutions {
-        let mut seen = std::collections::HashSet::new();
+        seen.clear();
         let mut score: f64 = 0.0;
 
         for ch in sol.chars() {
@@ -420,9 +422,10 @@ async fn download_handler(
 
     match format.as_str() {
         "csv" => {
+            use std::fmt::Write;
             let mut csv = String::from("index,expression\n");
             for (i, sol) in results.iter().enumerate() {
-                csv.push_str(&format!("{},{}\n", i + 1, sol));
+                let _ = writeln!(csv, "{},{}", i + 1, sol);
             }
             let filename = format!("sumzle_solutions_{}.csv", timestamp);
             (
@@ -439,19 +442,20 @@ async fn download_handler(
                 .into_response()
         }
         "txt" => {
+            use std::fmt::Write;
             let mut txt = String::new();
-            txt.push_str("Sumzle Solver Results\n");
-            txt.push_str("=====================\n");
-            txt.push_str(&format!("Solutions found: {}\n", found_count));
-            txt.push_str(&format!("Expressions searched: {}\n", searched_count));
-            txt.push_str(&format!("Time elapsed: {}ms\n", elapsed_ms));
-            txt.push_str(&format!("Search speed: {} expr/s\n", speed));
+            let _ = writeln!(txt, "Sumzle Solver Results");
+            let _ = writeln!(txt, "=====================");
+            let _ = writeln!(txt, "Solutions found: {}", found_count);
+            let _ = writeln!(txt, "Expressions searched: {}", searched_count);
+            let _ = writeln!(txt, "Time elapsed: {}ms", elapsed_ms);
+            let _ = writeln!(txt, "Search speed: {} expr/s", speed);
             if let Some(ref rec) = recommended {
-                txt.push_str(&format!("Recommended: {}\n", rec));
+                let _ = writeln!(txt, "Recommended: {}", rec);
             }
-            txt.push_str("\n--- Solutions ---\n");
+            let _ = writeln!(txt, "\n--- Solutions ---");
             for (i, sol) in results.iter().enumerate() {
-                txt.push_str(&format!("{}. {}\n", i + 1, sol));
+                let _ = writeln!(txt, "{}. {}", i + 1, sol);
             }
             let filename = format!("sumzle_solutions_{}.txt", timestamp);
             (

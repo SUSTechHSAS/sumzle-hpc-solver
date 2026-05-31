@@ -101,45 +101,63 @@ describe('API functions', () => {
   });
 
   describe('downloadResults', () => {
-    it('sends correct request for JSON download', async () => {
-      const mockBlob = new Blob(['{"solutions":[]}'], { type: 'application/json' });
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: true,
-        blob: () => Promise.resolve(mockBlob),
-        headers: new Headers({ 'content-disposition': 'attachment; filename="test.json"' }),
-      } as Response);
+    const mockData: import('./types').SolveResponse = {
+      solutions: ['1+2=3', '2+3=5'],
+      stats: { searched_count: 100, found_count: 2, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [],
+      recommended: '1+2=3',
+    };
 
-      await downloadResults(5, [], 'json');
-      expect(fetch).toHaveBeenCalledWith('/api/download?format=json', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ length: 5, rows: [] }),
-      });
+    it('generates JSON download content', () => {
+      // Mock URL.createObjectURL and related DOM APIs
+      const mockUrl = 'blob:mock-url';
+      const mockAnchor = {
+        href: '', download: '', click: vi.fn(), style: {},
+        setAttribute: vi.fn(), removeAttribute: vi.fn(),
+      } as unknown as HTMLAnchorElement;
+      vi.spyOn(document, 'createElement').mockReturnValueOnce(mockAnchor);
+      vi.spyOn(URL, 'createObjectURL').mockReturnValueOnce(mockUrl);
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementationOnce(() => {});
+      vi.spyOn(document.body, 'appendChild').mockImplementationOnce(() => mockAnchor);
+      vi.spyOn(document.body, 'removeChild').mockImplementationOnce(() => mockAnchor);
+
+      downloadResults(mockData, 'json');
+      expect(mockAnchor.click).toHaveBeenCalled();
+      expect(mockAnchor.download).toMatch(/\.json$/);
     });
 
-    it('sends correct request for CSV download', async () => {
-      const mockBlob = new Blob(['index,expression'], { type: 'text/csv' });
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: true,
-        blob: () => Promise.resolve(mockBlob),
-        headers: new Headers(),
-      } as Response);
+    it('generates CSV download content', () => {
+      const mockUrl = 'blob:mock-url';
+      const mockAnchor = {
+        href: '', download: '', click: vi.fn(), style: {},
+        setAttribute: vi.fn(), removeAttribute: vi.fn(),
+      } as unknown as HTMLAnchorElement;
+      vi.spyOn(document, 'createElement').mockReturnValueOnce(mockAnchor);
+      vi.spyOn(URL, 'createObjectURL').mockReturnValueOnce(mockUrl);
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementationOnce(() => {});
+      vi.spyOn(document.body, 'appendChild').mockImplementationOnce(() => mockAnchor);
+      vi.spyOn(document.body, 'removeChild').mockImplementationOnce(() => mockAnchor);
 
-      await downloadResults(5, [], 'csv');
-      expect(fetch).toHaveBeenCalledWith('/api/download?format=csv', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ length: 5, rows: [] }),
-      });
+      downloadResults(mockData, 'csv');
+      expect(mockAnchor.click).toHaveBeenCalled();
+      expect(mockAnchor.download).toMatch(/\.csv$/);
     });
 
-    it('throws on non-ok response', async () => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: false,
-        text: () => Promise.resolve('Server error'),
-      } as Response);
+    it('generates TXT download content', () => {
+      const mockUrl = 'blob:mock-url';
+      const mockAnchor = {
+        href: '', download: '', click: vi.fn(), style: {},
+        setAttribute: vi.fn(), removeAttribute: vi.fn(),
+      } as unknown as HTMLAnchorElement;
+      vi.spyOn(document, 'createElement').mockReturnValueOnce(mockAnchor);
+      vi.spyOn(URL, 'createObjectURL').mockReturnValueOnce(mockUrl);
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementationOnce(() => {});
+      vi.spyOn(document.body, 'appendChild').mockImplementationOnce(() => mockAnchor);
+      vi.spyOn(document.body, 'removeChild').mockImplementationOnce(() => mockAnchor);
 
-      await expect(downloadResults(5, [], 'json')).rejects.toThrow('Server error');
+      downloadResults(mockData, 'txt');
+      expect(mockAnchor.click).toHaveBeenCalled();
+      expect(mockAnchor.download).toMatch(/\.txt$/);
     });
   });
 

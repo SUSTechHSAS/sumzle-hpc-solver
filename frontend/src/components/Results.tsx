@@ -10,12 +10,11 @@ interface ResultsProps {
   loading: boolean;
   error: string | null;
   onDownload: (format: DownloadFormat) => void;
-  downloadLoading: boolean;
 }
 
 const MAX_DISPLAY_SOLUTIONS = 500;
 
-export default function Results({ data, loading, error, onDownload, downloadLoading }: ResultsProps) {
+export default function Results({ data, loading, error, onDownload }: ResultsProps) {
   if (loading) {
     return (
       <div className="results-section">
@@ -119,21 +118,18 @@ export default function Results({ data, loading, error, onDownload, downloadLoad
             <button
               className="btn btn-download"
               onClick={() => onDownload('json')}
-              disabled={downloadLoading}
             >
               JSON
             </button>
             <button
               className="btn btn-download"
               onClick={() => onDownload('csv')}
-              disabled={downloadLoading}
             >
               CSV
             </button>
             <button
               className="btn btn-download"
               onClick={() => onDownload('txt')}
-              disabled={downloadLoading}
             >
               TXT
             </button>

@@ -63,12 +63,15 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
         if (!tile || typeof tile !== 'object') {
           throw new Error(`JSON格式错误: 第${rowIndex + 1}行第${tileIndex + 1}个tile必须是对象`);
         }
-        const t = tile as { char?: string; state?: string };
+        const t = tile as { char?: unknown; state?: unknown };
         return {
-          char: t.char || '',
-          state: normalizeState(t.state || ''),
+          char: t.char !== undefined && t.char !== null ? String(t.char) : '',
+          state: normalizeState(t.state !== undefined && t.state !== null ? String(t.state) : ''),
         };
       });
+      if (tiles.length !== importedLength) {
+        throw new Error(`JSON格式错误: 第${rowIndex + 1}行的列数(${tiles.length})与表达式长度(${importedLength})不匹配`);
+      }
       return { tiles };
     });
 
