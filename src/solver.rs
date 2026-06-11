@@ -39,9 +39,14 @@ fn get_optimized_char_order(
                 '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '-', '*', '/', '%', '^',
                 'A', '!', ')', ']', '[', '=', '>',
             ]
-        } else if is_operator(pc) || is_open_bracket(pc) {
+        } else if is_binary_operator(pc) || is_open_bracket(pc) {
+            // After a binary operator or open bracket: only digits and open brackets
+            // This matches the JS: isBinaryOperator(prevChar) || isOpenBracket(prevChar)
             vec!['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '(', '[']
         } else if is_close_bracket(pc) || is_unary_post_operator(pc) {
+            // After a close bracket or unary postfix operator (like '!'):
+            // operators, close brackets, open square bracket, main operators
+            // This matches the JS: isCloseBracket(prevChar) || isUnaryPostOperator(prevChar)
             vec![
                 '+', '-', '*', '/', '%', '^', 'A', '!', ')', ']', '[', '=', '>',
             ]
@@ -241,7 +246,7 @@ fn can_place_char(
             {
                 return false;
             }
-            if is_close_bracket(ch) {
+            if is_close_bracket(ch) && !is_unary_post_operator(pc) {
                 return false;
             }
             if is_main_operator(ch) && !is_unary_post_operator(pc) {
