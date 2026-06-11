@@ -261,6 +261,55 @@ fn bench_recommended_solution(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_factorial_enumeration(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factorial_enumeration");
+
+    // Construct GlobalKnowledge outside of b.iter to avoid measuring
+    // allocation overhead, consistent with other benchmarks in this file.
+    let gk4 = empty_gk(4);
+    group.bench_function("length_4_no_constraints", |b| {
+        b.iter(|| {
+            let solver = Solver::new(black_box(4), black_box(gk4.clone()));
+            solver.solve()
+        });
+    });
+
+    let gk5 = empty_gk(5);
+    group.bench_function("length_5_no_constraints", |b| {
+        b.iter(|| {
+            let solver = Solver::new(black_box(5), black_box(gk5.clone()));
+            solver.solve()
+        });
+    });
+
+    let gk6 = empty_gk(6);
+    group.bench_function("length_6_no_constraints", |b| {
+        b.iter(|| {
+            let solver = Solver::new(black_box(6), black_box(gk6.clone()));
+            solver.solve()
+        });
+    });
+
+    // Benchmark: factorial expression evaluation performance
+    group.bench_function("eval_factorial_simple", |b| {
+        b.iter(|| sumzle_solver::evaluator::evaluate_expression(black_box("5!")));
+    });
+
+    group.bench_function("eval_factorial_in_equation", |b| {
+        b.iter(|| sumzle_solver::evaluator::is_valid_equation(black_box("5!=120")));
+    });
+
+    group.bench_function("eval_factorial_arithmetic", |b| {
+        b.iter(|| sumzle_solver::evaluator::is_valid_equation(black_box("3!*2=12")));
+    });
+
+    group.bench_function("eval_factorial_comparison", |b| {
+        b.iter(|| sumzle_solver::evaluator::is_valid_equation(black_box("5!>100")));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sequential_solve,
@@ -271,6 +320,7 @@ criterion_group!(
     bench_parallel_scaling,
     bench_char_probability,
     bench_recommended_solution,
+    bench_factorial_enumeration,
 );
 
 criterion_main!(benches);

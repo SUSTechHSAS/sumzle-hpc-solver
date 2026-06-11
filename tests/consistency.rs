@@ -641,3 +641,317 @@ fn test_solve_length_5() {
     }
     assert!(results.contains(&"1+2=3".to_string()));
 }
+
+// =========================================================================
+// Factorial Enumeration Tests (Bug Fix: '!' operator with empty constraints)
+// =========================================================================
+
+/// Test that factorial equations with '=' are enumerated when constraints are empty.
+/// This was the core bug: after '!', the solver only offered digits and open brackets
+/// as candidates (treating '!' as a binary operator), preventing expressions like
+/// "3!=6" from ever being generated.
+#[test]
+fn test_factorial_equations_with_equals_no_constraints() {
+    // Length 4 should include 1!=1, 2!=2, 3!=6
+    let gk = empty_gk(4);
+    let solver = Solver::new(4, gk);
+    let (results, _searched) = solver.solve();
+
+    assert!(results.contains(&"1!=1".to_string()), "Should find '1!=1'");
+    assert!(results.contains(&"2!=2".to_string()), "Should find '2!=2'");
+    assert!(results.contains(&"3!=6".to_string()), "Should find '3!=6'");
+}
+
+/// Test that factorial with greater-than operator is enumerated
+#[test]
+fn test_factorial_equations_with_greater_than_no_constraints() {
+    let gk = empty_gk(4);
+    let solver = Solver::new(4, gk);
+    let (results, _searched) = solver.solve();
+
+    // 3! > N patterns: 3! = 6, so 6 > 0..5
+    assert!(results.contains(&"3!>0".to_string()), "Should find '3!>0'");
+    assert!(results.contains(&"3!>5".to_string()), "Should find '3!>5'");
+
+    // N > M! patterns: e.g., 2 > 0! (= 2 > 1), 2 > 1! (= 2 > 1)
+    assert!(results.contains(&"2>0!".to_string()), "Should find '2>0!'");
+    assert!(results.contains(&"2>1!".to_string()), "Should find '2>1!'");
+}
+
+/// Test that longer factorial equations are properly enumerated
+#[test]
+fn test_factorial_equations_length_5_no_constraints() {
+    let gk = empty_gk(5);
+    let solver = Solver::new(5, gk);
+    let (results, _searched) = solver.solve();
+
+    // 4!=24 (4! = 24)
+    assert!(
+        results.contains(&"4!=24".to_string()),
+        "Should find '4!=24'"
+    );
+
+    // Factorial combined with arithmetic: 1!*N=M, 1!+N=M, etc.
+    let factorial_eq_solutions: Vec<_> = results
+        .iter()
+        .filter(|s| s.contains('!') && s.contains('='))
+        .collect();
+    assert!(
+        !factorial_eq_solutions.is_empty(),
+        "Should find factorial equations with '=' in length 5"
+    );
+}
+
+/// Test that factorial equations are enumerated in length 6
+#[test]
+fn test_factorial_equations_length_6_no_constraints() {
+    let gk = empty_gk(6);
+    let solver = Solver::new(6, gk);
+    let (results, _searched) = solver.solve();
+
+    // 5!=120 (5! = 120)
+    assert!(
+        results.contains(&"5!=120".to_string()),
+        "Should find '5!=120'"
+    );
+
+    // Various factorial arithmetic combinations
+    let factorial_eq_solutions: Vec<_> = results
+        .iter()
+        .filter(|s| s.contains('!') && s.contains('='))
+        .collect();
+    assert!(
+        factorial_eq_solutions.len() >= 100,
+        "Should find at least 100 factorial equations with '=' in length 6, found {}",
+        factorial_eq_solutions.len()
+    );
+}
+
+/// Test that factorial followed by arithmetic operators works
+#[test]
+fn test_factorial_with_arithmetic_no_constraints() {
+    let gk = empty_gk(6);
+    let solver = Solver::new(6, gk);
+    let (results, _searched) = solver.solve();
+
+    // 1!*N=M patterns (1! = 1, so 1*N = M)
+    let factorial_mult: Vec<_> = results
+        .iter()
+        .filter(|s| s.contains('!') && s.contains('*') && s.contains('='))
+        .collect();
+    assert!(
+        !factorial_mult.is_empty(),
+        "Should find factorial multiplication equations"
+    );
+
+    // 1!+N=M patterns (1! = 1, so 1+N = M)
+    let factorial_add: Vec<_> = results
+        .iter()
+        .filter(|s| s.contains('!') && s.contains('+') && s.contains('='))
+        .collect();
+    assert!(
+        !factorial_add.is_empty(),
+        "Should find factorial addition equations"
+    );
+
+    // 1!-N=M patterns
+    let factorial_sub: Vec<_> = results
+        .iter()
+        .filter(|s| s.contains('!') && s.contains('-') && s.contains('='))
+        .collect();
+    assert!(
+        !factorial_sub.is_empty(),
+        "Should find factorial subtraction equations"
+    );
+}
+
+/// Test that factorial at end of expression works (e.g., N>M!)
+#[test]
+fn test_factorial_at_end_no_constraints() {
+    let gk = empty_gk(5);
+    let solver = Solver::new(5, gk);
+    let (results, _searched) = solver.solve();
+
+    // N>M! patterns
+    let factorial_end: Vec<_> = results.iter().filter(|s| s.ends_with('!')).collect();
+    assert!(
+        !factorial_end.is_empty(),
+        "Should find solutions ending with '!'"
+    );
+
+    // Specific examples: 10>0! (10 > 1), 10>1! (10 > 1)
+    assert!(
+        results.contains(&"10>0!".to_string()),
+        "Should find '10>0!'"
+    );
+}
+
+/// Test factorial equations with constraints still work
+#[test]
+fn test_factorial_with_constraints() {
+    // Constraint: first char is '3' (correct), no other significant constraints
+    // Use a row where only position 0 has a Correct tile,
+    // and other positions have distinct chars that won't affect factorial
+    let row1: GuessRow = vec![
+        Tile {
+            char: '3',
+            state: TileState::Correct,
+        },
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        }, // '0' not at pos 1
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        }, // '0' not at pos 2
+        Tile {
+            char: '0',
+            state: TileState::Empty,
+        }, // '0' not at pos 3
+    ];
+    let gk = GlobalKnowledge::from_guess_rows(4, &[row1]).unwrap();
+    let solver = Solver::new(4, gk);
+    let (results, _searched) = solver.solve();
+
+    assert!(
+        results.contains(&"3!=6".to_string()),
+        "Should find '3!=6' with constraint fixing '3' at pos 0"
+    );
+}
+
+/// Test that factorial with permutation (A) operator works
+#[test]
+fn test_factorial_with_permutation_no_constraints() {
+    // Use length 6 which is reasonably fast
+    let gk = empty_gk(6);
+    let solver = Solver::new(6, gk);
+    let (results, _searched) = solver.solve();
+
+    // Check factorial and permutation coexist in solutions
+    let with_bang: Vec<_> = results.iter().filter(|s| s.contains('!')).collect();
+    let with_a: Vec<_> = results.iter().filter(|s| s.contains('A')).collect();
+    assert!(!with_bang.is_empty(), "Should have factorial solutions");
+    assert!(!with_a.is_empty(), "Should have permutation solutions");
+}
+
+/// Test parallel solver also finds factorial equations
+#[test]
+fn test_parallel_solver_finds_factorial_equations() {
+    let gk = empty_gk(5);
+    let solver = Solver::new(5, gk);
+    let parallel_solver = ParallelSolver::new(solver, Some(2));
+    let (results, _searched) = parallel_solver.solve();
+
+    assert!(
+        results.contains(&"4!=24".to_string()),
+        "Parallel solver should find '4!=24'"
+    );
+
+    let factorial_eq_count = results
+        .iter()
+        .filter(|s| s.contains('!') && s.contains('='))
+        .count();
+    assert!(
+        factorial_eq_count > 0,
+        "Parallel solver should find factorial equations with '='"
+    );
+}
+
+/// Test that factorial results are consistent between sequential and parallel solvers
+#[test]
+fn test_factorial_sequential_parallel_consistency() {
+    let gk = empty_gk(5);
+    let solver = Solver::new(5, gk.clone());
+
+    let (seq_results, _) = solver.solve();
+
+    let solver2 = Solver::new(5, gk);
+    let parallel_solver = ParallelSolver::new(solver2, Some(2));
+    let (par_results, _) = parallel_solver.solve();
+
+    let mut seq_sorted = seq_results;
+    seq_sorted.sort();
+    let mut par_sorted = par_results;
+    par_sorted.sort();
+
+    assert_eq!(
+        seq_sorted, par_sorted,
+        "Sequential and parallel factorial results should match"
+    );
+
+    // Both should contain factorial equations
+    let seq_factorial: Vec<_> = seq_sorted.iter().filter(|s| s.contains('!')).collect();
+    assert!(
+        !seq_factorial.is_empty(),
+        "Both solvers should find factorial solutions"
+    );
+}
+
+/// Verify that all factorial solutions are valid equations
+#[test]
+fn test_all_factorial_solutions_are_valid() {
+    for length in 4..=6 {
+        let gk = empty_gk(length);
+        let solver = Solver::new(length, gk);
+        let (results, _searched) = solver.solve();
+
+        let factorial_solutions: Vec<_> = results.iter().filter(|s| s.contains('!')).collect();
+
+        // Assert non-empty to prevent silent passes if a bug causes
+        // the solver to return zero factorial solutions.
+        assert!(
+            !factorial_solutions.is_empty(),
+            "Length {}: expected at least one factorial solution, but found none",
+            length
+        );
+
+        for sol in &factorial_solutions {
+            assert!(
+                is_valid_equation(sol),
+                "Factorial solution '{}' should be a valid equation",
+                sol
+            );
+            assert_eq!(
+                sol.len(),
+                length,
+                "Factorial solution '{}' should have length {}",
+                sol,
+                length
+            );
+        }
+    }
+}
+
+/// Verify that close brackets can follow factorial operators (Gemini fix #1).
+/// Before the fix, can_place_char unconditionally rejected ')' after any
+/// operator, preventing valid equations like (3!)=6.
+#[test]
+fn test_factorial_close_bracket_pruning() {
+    // Verify that expressions like (3!)=6 are generated
+    let gk = empty_gk(6);
+    let solver = Solver::new(6, gk);
+    let (results, _) = solver.solve();
+
+    // (3!)=6 should be found if factorial-close-bracket pruning is correct
+    assert!(
+        results.contains(&"(3!)=6".to_string()),
+        "Should find '(3!)=6' — close bracket after factorial must be allowed"
+    );
+
+    // Also verify length-7 solutions contain (4!)=24
+    let gk7 = empty_gk(7);
+    let solver7 = Solver::new(7, gk7);
+    let (results7, _) = solver7.solve();
+    assert!(
+        results7.contains(&"(4!)=24".to_string()),
+        "Should find '(4!)=24' — close bracket after factorial must be allowed"
+    );
+
+    // Check that we find factorial-in-parentheses solutions in general
+    let paren_factorial: Vec<_> = results.iter().filter(|s| s.contains("!)")).collect();
+    assert!(
+        !paren_factorial.is_empty(),
+        "Should find at least one solution with ')' after '!'"
+    );
+}
