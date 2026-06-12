@@ -874,7 +874,7 @@ impl Solver {
             &mut expr,
             Some(first),
             main_op.map(|c| c as u8),
-            if main_op.is_some() { 0 } else { 0 },
+            0,
             &mut char_counts,
             floor_ctx,
             &mut bracket_stack,
