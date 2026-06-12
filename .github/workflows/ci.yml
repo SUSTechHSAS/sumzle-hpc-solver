@@ -75,37 +75,19 @@ jobs:
           echo "| Platform | \`${{ matrix.os }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Target | \`${{ matrix.target }}\` |" >> $GITHUB_STEP_SUMMARY
 
-          # Parse test output with a single awk script (fully portable across
-          # Linux, macOS, and Windows Git Bash).  We pipe through sed first to
-          # strip any \r characters that Windows cargo may emit.
-          #
-          # How it works:
-          #   1. Collect suite names from "Running <deps/…>" lines (test
-          #      execution) and "Doc-tests" marker lines.  Compilation lines
-          #      that also mention deps are filtered out by checking that the
-          #      line does NOT contain "--crate-name".
-          #   2. Parse every "test result:" line for passed/failed/ignored/
-          #      measured/duration.
-          #   3. In the END block, emit a per-suite summary table and totals.
           sed 's/\r$//' test-output.txt | awk '
             BEGIN { suite_count=0; result_count=0; sumzle_count=0 }
 
-            # ---- suite name extraction ----
-
-            # "Doc-tests" marker (precedes the rustdoc Running line)
             /^[[:space:]]*Doc-tests[[:space:]]/ {
               suite_name[suite_count++] = "Doc-tests"
             }
 
-            # Test-execution "Running" lines.
-            # Match paths that go through target/debug/deps/ (or target\debug\deps\)
-            # but NOT compilation lines (which contain --crate-name).
             /Running/ && /target[\/\\]debug[\/\\]deps[\/\\]/ && !/--crate-name/ {
               path = $0
               sub(/.*target[\/\\]debug[\/\\]deps[\/\\]/, "", path)
-              sub(/[\x27`"].*$/, "", path)   # strip trailing backtick/quote+rest
-              sub(/-[^-]+$/, "", path)       # strip -HASH suffix
-              sub(/\.exe$/, "", path)        # strip .exe on Windows
+              sub(/[\x27`"].*$/, "", path)
+              sub(/-[^-]+$/, "", path)
+              sub(/\.exe$/, "", path)
 
               sumzle_count++
               if (path == "sumzle_solver") {
@@ -117,8 +99,6 @@ jobs:
                 suite_name[suite_count++] = path
               }
             }
-
-            # ---- test result parsing ----
 
             /^test result:/ {
               idx = result_count
@@ -132,7 +112,6 @@ jobs:
               result_count++
             }
 
-            # ---- output ----
             END {
               tp=0; tf=0; ti=0; tm=0
               for (i=0; i<result_count; i++) {
@@ -157,7 +136,6 @@ jobs:
             }
           ' >> $GITHUB_STEP_SUMMARY
 
-          # Add raw output in collapsible section
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "<details>" >> $GITHUB_STEP_SUMMARY
           echo "<summary>📝 Raw Test Output</summary>" >> $GITHUB_STEP_SUMMARY
@@ -216,6 +194,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -231,6 +211,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
+      # ---------------------------------------------------------------
+      #  Current branch (PR head or push branch) benchmarks
+      # ---------------------------------------------------------------
+
       - name: Build release binary
         run: cargo build --release
 
@@ -239,26 +223,31 @@ jobs:
           echo "## 📊 CLI Solver Benchmarks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Run CLI benchmarks for all supported lengths
+          # Run CLI benchmarks for all supported lengths and save results
+          # in a machine-parseable format: length:solutions:searched:time_raw
+          > current-bench-results.txt
           for len in 3 4 5 6; do
             echo "Running CLI benchmark for length $len..."
             OUTPUT=$(./target/release/sumzle-solver bench -l $len 2>&1 || true)
             echo "$OUTPUT" >> cli-benchmark-output.txt
+
+            # Parse the output line for this length
+            SOL=$(echo "$OUTPUT" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
+            SRC=$(echo "$OUTPUT" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
+            TIME_RAW=$(echo "$OUTPUT" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
+
+            if [ -n "$SOL" ]; then
+              echo "${len}:${SOL}:${SRC}:${TIME_RAW}" >> current-bench-results.txt
+            fi
           done
 
           # Build summary table
           echo "| Length | Solutions | Expressions Searched | Time |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-----------|---------------------|------|" >> $GITHUB_STEP_SUMMARY
 
-          while IFS= read -r LINE; do
-            LEN=$(echo "$LINE" | sed -n 's/.*Length \([0-9]*\):.*/\1/p')
-            SOL=$(echo "$LINE" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
-            SRC=$(echo "$LINE" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
-            TIME=$(echo "$LINE" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
-            if [ -n "$LEN" ]; then
-              echo "| $LEN | $SOL | $SRC | $TIME |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done < cli-benchmark-output.txt
+          while IFS=: read -r LEN SOL SRC TIME_RAW; do
+            echo "| $LEN | $SOL | $SRC | $TIME_RAW |" >> $GITHUB_STEP_SUMMARY
+          done < current-bench-results.txt
 
           echo "" >> $GITHUB_STEP_SUMMARY
 
@@ -271,6 +260,238 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+      # ---------------------------------------------------------------
+      #  Baseline (main branch) benchmarks – PR only
+      # ---------------------------------------------------------------
+
+      - name: Checkout base ref for baseline
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add $RUNNER_TEMP/baseline ${{ github.base_ref }}
+
+      - name: Build baseline release binary
+        if: github.event_name == 'pull_request'
+        run: |
+          cd $RUNNER_TEMP/baseline
+          cargo build --release --target-dir $RUNNER_TEMP/baseline-target
+
+      - name: Run CLI benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: |
+          BASELINE_BIN="$RUNNER_TEMP/baseline-target/release/sumzle-solver"
+
+          > baseline-bench-results.txt
+          for len in 3 4 5 6; do
+            echo "Running baseline CLI benchmark for length $len..."
+            OUTPUT=$($BASELINE_BIN bench -l $len 2>&1 || true)
+            echo "$OUTPUT" >> baseline-benchmark-output.txt
+
+            SOL=$(echo "$OUTPUT" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
+            SRC=$(echo "$OUTPUT" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
+            TIME_RAW=$(echo "$OUTPUT" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
+
+            if [ -n "$SOL" ]; then
+              echo "${len}:${SOL}:${SRC}:${TIME_RAW}" >> baseline-bench-results.txt
+            fi
+          done
+
+      # ---------------------------------------------------------------
+      #  Benchmark comparison (PR only)
+      # ---------------------------------------------------------------
+
+      - name: Compare benchmark results with main branch
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          python3 << 'PYEOF'
+          import re, os
+
+          def parse_time_ns(time_str):
+              """Convert a time string like 275us, 2.2ms, 367ms to nanoseconds."""
+              if not time_str or time_str.strip() == "":
+                  return None
+              time_str = time_str.strip()
+              # Handle micro sign (µ) and ASCII 'us'
+              m = re.match(r"^([0-9.]+)\s*(ns|µs|us|ms|s)$", time_str)
+              if not m:
+                  return None
+              value = float(m.group(1))
+              unit = m.group(2)
+              multipliers = {"ns": 1, "µs": 1e3, "us": 1e3, "ms": 1e6, "s": 1e9}
+              return value * multipliers.get(unit, 1)
+
+          def format_time(ns):
+              """Format nanoseconds to a human-readable string."""
+              if ns is None:
+                  return "N/A"
+              if ns < 1e3:
+                  return f"{ns:.0f}ns"
+              elif ns < 1e6:
+                  return f"{ns/1e3:.1f}us"
+              elif ns < 1e9:
+                  return f"{ns/1e6:.1f}ms"
+              else:
+                  return f"{ns/1e9:.2f}s"
+
+          def format_diff_pct(current_ns, baseline_ns):
+              """Format percentage difference with emoji indicator."""
+              if current_ns is None or baseline_ns is None or baseline_ns == 0:
+                  return "N/A", "⚪"
+              pct = ((current_ns - baseline_ns) / baseline_ns) * 100
+              if pct > 10:
+                  emoji = "🔴"
+              elif pct > 5:
+                  emoji = "🟡"
+              elif pct < -10:
+                  emoji = "🟢"
+              elif pct < -5:
+                  emoji = "🔵"
+              else:
+                  emoji = "⚪"
+              sign = "+" if pct >= 0 else ""
+              return f"{sign}{pct:.1f}%", emoji
+
+          def load_results(filepath):
+              """Load benchmark results from colon-separated file."""
+              results = {}
+              try:
+                  with open(filepath) as f:
+                      for line in f:
+                          parts = line.strip().split(":", 3)
+                          if len(parts) == 4:
+                              length = parts[0]
+                              results[length] = {
+                                  "solutions": int(parts[1]),
+                                  "searched": int(parts[2]),
+                                  "time_raw": parts[3],
+                                  "time_ns": parse_time_ns(parts[3]),
+                              }
+              except FileNotFoundError:
+                  pass
+              return results
+
+          current = load_results("current-bench-results.txt")
+          baseline = load_results("baseline-bench-results.txt")
+
+          pr_branch = os.environ.get("PR_BRANCH", "PR")
+          base_branch = os.environ.get("BASE_BRANCH", "main")
+
+          if not baseline:
+              print("No baseline results found. Skipping comparison.")
+              exit(0)
+
+          # Build comparison table
+          lines = []
+          lines.append("## 📊 Benchmark Comparison with Main Branch")
+          lines.append("")
+          lines.append(f"Comparing **{pr_branch}** (PR) vs **{base_branch}** (baseline)")
+          lines.append("")
+          lines.append("| Length | Metric | PR | Main | Match | Diff |")
+          lines.append("|--------|--------|-----|------|-------|------|")
+
+          has_mismatch = False
+          has_regression = False
+
+          for length in ["3", "4", "5", "6"]:
+              cur = current.get(length)
+              base = baseline.get(length)
+
+              if not cur or not base:
+                  lines.append(f"| {length} | — | — | — | ⚠️ Missing | — |")
+                  continue
+
+              # Solutions comparison
+              sol_match = cur["solutions"] == base["solutions"]
+              sol_icon = "✅" if sol_match else "❌"
+              if not sol_match:
+                  has_mismatch = True
+                  sol_diff = f'{cur["solutions"] - base["solutions"]:+d}'
+              else:
+                  sol_diff = "="
+              lines.append(f'| {length} | Solutions | {cur["solutions"]} | {base["solutions"]} | {sol_icon} | {sol_diff} |')
+
+              # Expressions Searched comparison
+              src_match = cur["searched"] == base["searched"]
+              src_icon = "✅" if src_match else "❌"
+              if not src_match:
+                  has_mismatch = True
+                  src_diff = f'{cur["searched"] - base["searched"]:+d}'
+              else:
+                  src_diff = "="
+              lines.append(f'| {length} | Expr Searched | {cur["searched"]} | {base["searched"]} | {src_icon} | {src_diff} |')
+
+              # Time comparison
+              time_diff_pct, time_emoji = format_diff_pct(cur["time_ns"], base["time_ns"])
+              if time_emoji in ("🔴", "🟡"):
+                  has_regression = True
+              cur_time_str = format_time(cur["time_ns"]) if cur["time_ns"] is not None else cur["time_raw"]
+              base_time_str = format_time(base["time_ns"]) if base["time_ns"] is not None else base["time_raw"]
+              lines.append(f"| {length} | Time | {cur_time_str} | {base_time_str} | {time_emoji} | {time_diff_pct} |")
+
+          lines.append("")
+
+          # Add legend
+          lines.append("<details>")
+          lines.append("<summary>📖 Comparison Legend</summary>")
+          lines.append("")
+          lines.append("| Icon | Meaning |")
+          lines.append("|------|---------|")
+          lines.append("| ✅ | Values match (correctness OK) |")
+          lines.append("| ❌ | Values differ (correctness concern) |")
+          lines.append("| 🟢 | Time improved > 10% |")
+          lines.append("| 🔵 | Time improved 5-10% |")
+          lines.append("| ⚪ | Time within ±5% (noise range) |")
+          lines.append("| 🟡 | Time regressed 5-10% |")
+          lines.append("| 🔴 | Time regressed > 10% |")
+          lines.append("")
+          lines.append("</details>")
+          lines.append("")
+
+          # Add warnings / all-clear
+          if has_mismatch:
+              lines.append("> ⚠️ **Solutions or Expressions Searched count mismatch detected!** This may indicate a correctness issue.")
+              lines.append("")
+          if has_regression:
+              lines.append("> 🔴 **Performance regression detected!** One or more benchmarks show > 5% slowdown compared to main.")
+              lines.append("")
+          if not has_mismatch and not has_regression:
+              lines.append("> ✅ **No correctness or significant performance issues detected.**")
+              lines.append("")
+
+          # Add raw baseline output in collapsible section
+          lines.append("<details>")
+          lines.append("<summary>📝 Raw Baseline (Main Branch) Benchmark Output</summary>")
+          lines.append("")
+          lines.append("```")
+          try:
+              with open("baseline-benchmark-output.txt") as f:
+                  lines.append(f.read())
+          except FileNotFoundError:
+              lines.append("(no baseline output)")
+          lines.append("```")
+          lines.append("")
+          lines.append("</details>")
+
+          # Write to step summary
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a") as f:
+              f.write("\n".join(lines) + "\n")
+
+          # Print summary for the log
+          if has_mismatch:
+              print("WARNING: Solutions or Expressions Searched mismatch detected!")
+          if has_regression:
+              print("WARNING: Performance regression detected!")
+          if not has_mismatch and not has_regression:
+              print("All benchmark comparisons passed.")
+          PYEOF
+
+      # ---------------------------------------------------------------
+      #  Criterion micro-benchmarks (all events)
+      # ---------------------------------------------------------------
 
       - name: Run Criterion benchmarks
         run: |
@@ -287,12 +508,9 @@ jobs:
           echo "|----------------|-----------|-----------|" >> $GITHUB_STEP_SUMMARY
 
           # Extract benchmark results from criterion output
-          # Criterion outputs lines like: "benchmark_name          time:   [X ns Y ns Z ns]"
           grep -E '^\S+.*time:\s+\[' criterion-output.txt | while IFS= read -r LINE; do
-            # Extract benchmark name and mean time
             BENCH_NAME=$(echo "$LINE" | sed -E 's/\s+time:.*//')
             MEAN_TIME=$(echo "$LINE" | sed -E 's/.*time:\s+\[\s*([^]]+)\].*/\1/' | awk '{print $1, $2}')
-            # Try to extract group/bench split
             GROUP=$(echo "$BENCH_NAME" | cut -d'/' -f1)
             BENCH=$(echo "$BENCH_NAME" | cut -d'/' -f2-)
             echo "| $GROUP | $BENCH | $MEAN_TIME |" >> $GITHUB_STEP_SUMMARY
