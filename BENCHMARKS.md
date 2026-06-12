@@ -3,19 +3,20 @@
 All benchmarks run single-threaded in release mode.
 
 ## Test Environment
-- **Date**: 2026-05-28
-- **Cores**: 4
+- **Date**: 2026-06-12
+- **Cores**: 2 (sandbox)
 - **Build**: `cargo build --release`
-- **Rust**: 1.95.0
+- **Rust**: 1.96.0
 
 ## Solver Performance (No Constraints)
 
 | Length | Solutions | Expressions Searched | Time | Speed (expr/s) |
 |--------|-----------|---------------------|------|----------------|
-| 3 | 54 | 841 | 275µs | ~3.1M |
-| 4 | 236 | 5,143 | 2.2ms | ~2.3M |
-| 5 | 6,049 | 86,281 | 37.5ms | ~2.3M |
-| 6 | 37,730 | 685,561 | 367ms | ~1.9M |
+| 3 | 54 | 99 | ~15µs | ~6.6M |
+| 4 | 308 | 582 | ~80µs | ~7.3M |
+| 5 | 6,243 | 13,136 | ~1.3ms | ~10M |
+| 6 | 49,952 | 108,487 | ~10ms | ~11M |
+| 7 | 648,055 | 1,533,967 | ~125ms | ~12M |
 
 ## Expression Evaluation
 

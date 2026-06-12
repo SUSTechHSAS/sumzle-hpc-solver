@@ -1,10 +1,42 @@
 //! Brute-force search solver with pruning for Sumzle
 
-use crate::evaluator::is_valid_equation_solver_with_main_bytes;
+use crate::evaluator::{evaluate_expression_solver_bytes, is_integer};
 use crate::types::*;
 
 const CHARSET_LEN: usize = 24;
 const NO_CHAR: u8 = 0;
+const INVALID_INDEX: u8 = u8::MAX;
+
+const fn build_char_index() -> [u8; 256] {
+    let mut table = [INVALID_INDEX; 256];
+    table[b'0' as usize] = 0;
+    table[b'1' as usize] = 1;
+    table[b'2' as usize] = 2;
+    table[b'3' as usize] = 3;
+    table[b'4' as usize] = 4;
+    table[b'5' as usize] = 5;
+    table[b'6' as usize] = 6;
+    table[b'7' as usize] = 7;
+    table[b'8' as usize] = 8;
+    table[b'9' as usize] = 9;
+    table[b'+' as usize] = 10;
+    table[b'-' as usize] = 11;
+    table[b'*' as usize] = 12;
+    table[b'/' as usize] = 13;
+    table[b'%' as usize] = 14;
+    table[b'^' as usize] = 15;
+    table[b'=' as usize] = 16;
+    table[b'(' as usize] = 17;
+    table[b')' as usize] = 18;
+    table[b'!' as usize] = 19;
+    table[b'[' as usize] = 20;
+    table[b']' as usize] = 21;
+    table[b'>' as usize] = 22;
+    table[b'A' as usize] = 23;
+    table
+}
+
+const CHAR_INDEX: [u8; 256] = build_char_index();
 
 const FLOOR_NO_SLASH: &[u8] = b"0123456789/";
 const FLOOR_WITH_SLASH: &[u8] = b"0123456789]";
@@ -27,6 +59,7 @@ struct PreparedKnowledge {
     exact_counts: [u8; CHARSET_LEN],
     exact_mask: u32,
     constrained_indices: Vec<usize>,
+    unconstrained: bool,
 }
 
 impl PreparedKnowledge {
@@ -81,6 +114,11 @@ impl PreparedKnowledge {
             }
         }
 
+        let unconstrained = fixed_chars.iter().all(|&ch| ch == NO_CHAR)
+            && cannot_be_at_masks.iter().all(|&mask| mask == 0)
+            && globally_forbidden_mask == 0
+            && constrained_indices.is_empty();
+
         Self {
             fixed_chars,
             cannot_be_at_masks,
@@ -89,6 +127,7 @@ impl PreparedKnowledge {
             exact_counts,
             exact_mask,
             constrained_indices,
+            unconstrained,
         }
     }
 
@@ -100,16 +139,6 @@ impl PreparedKnowledge {
     #[inline]
     fn cannot_be_at(&self, index: usize, ch: u8) -> bool {
         self.cannot_be_at_masks[index] & char_mask(ch) != 0
-    }
-
-    #[inline]
-    fn exact_count(&self, ch: u8) -> Option<u8> {
-        let idx = idx_of(ch);
-        if self.exact_mask & (1u32 << idx) != 0 {
-            Some(self.exact_counts[idx])
-        } else {
-            None
-        }
     }
 
     #[inline]
@@ -134,39 +163,43 @@ impl PreparedKnowledge {
 
 #[inline]
 fn idx_of(ch: u8) -> usize {
-    match ch {
-        b'0' => 0,
-        b'1' => 1,
-        b'2' => 2,
-        b'3' => 3,
-        b'4' => 4,
-        b'5' => 5,
-        b'6' => 6,
-        b'7' => 7,
-        b'8' => 8,
-        b'9' => 9,
-        b'+' => 10,
-        b'-' => 11,
-        b'*' => 12,
-        b'/' => 13,
-        b'%' => 14,
-        b'^' => 15,
-        b'=' => 16,
-        b'(' => 17,
-        b')' => 18,
-        b'!' => 19,
-        b'[' => 20,
-        b']' => 21,
-        b'>' => 22,
-        b'A' => 23,
-        _ => unreachable!("invalid Sumzle character: {ch}"),
-    }
+    let idx = CHAR_INDEX[ch as usize];
+    debug_assert_ne!(idx, INVALID_INDEX, "invalid Sumzle character: {ch}");
+    idx as usize
 }
 
 #[inline]
 fn idx_of_char(ch: char) -> Option<usize> {
+    // Preserve the previous behavior for unexpected ASCII symbols: they are
+    // programmer/input errors and should not be silently ignored.
     if ch.is_ascii() {
-        Some(idx_of(ch as u8))
+        Some(match ch as u8 {
+            b'0' => 0,
+            b'1' => 1,
+            b'2' => 2,
+            b'3' => 3,
+            b'4' => 4,
+            b'5' => 5,
+            b'6' => 6,
+            b'7' => 7,
+            b'8' => 8,
+            b'9' => 9,
+            b'+' => 10,
+            b'-' => 11,
+            b'*' => 12,
+            b'/' => 13,
+            b'%' => 14,
+            b'^' => 15,
+            b'=' => 16,
+            b'(' => 17,
+            b')' => 18,
+            b'!' => 19,
+            b'[' => 20,
+            b']' => 21,
+            b'>' => 22,
+            b'A' => 23,
+            _ => unreachable!("invalid Sumzle character: {ch}"),
+        })
     } else {
         None
     }
@@ -175,6 +208,45 @@ fn idx_of_char(ch: char) -> Option<usize> {
 #[inline]
 fn char_mask(ch: u8) -> u32 {
     1u32 << idx_of(ch)
+}
+
+#[inline]
+fn unconstrained_solution_capacity(length: usize) -> usize {
+    match length {
+        3 => 64,
+        4 => 320,
+        5 => 6_500,
+        6 => 50_000,
+        7 => 650_000,
+        _ => 0,
+    }
+}
+
+#[inline]
+fn write_i64_decimal(n: i64, out: &mut [u8; 20]) -> usize {
+    let mut value = n.unsigned_abs();
+    let mut tmp = [0u8; 20];
+    let mut idx = tmp.len();
+
+    if value == 0 {
+        idx -= 1;
+        tmp[idx] = b'0';
+    } else {
+        while value > 0 {
+            idx -= 1;
+            tmp[idx] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+    }
+
+    let mut len = 0;
+    if n < 0 {
+        out[0] = b'-';
+        len = 1;
+    }
+    let digits = &tmp[idx..];
+    out[len..len + digits.len()].copy_from_slice(digits);
+    len + digits.len()
 }
 
 #[inline]
@@ -358,12 +430,14 @@ fn fill_candidate_chars(
 #[allow(clippy::too_many_arguments)]
 fn can_place_char(
     ch: u8,
+    ch_idx: usize,
     index: usize,
     prev_char: Option<u8>,
     main_op_so_far: Option<u8>,
     char_counts: &[u8; CHARSET_LEN],
     floor_ctx: FloorContext,
     bracket_stack: &[u8],
+    stack_len: usize,
     prepared: &PreparedKnowledge,
     length: usize,
     current_num_len: u8,
@@ -374,10 +448,10 @@ fn can_place_char(
     // Only count-dependent constraints remain here.
 
     // Exact count constraint
-    if let Some(exact) = prepared.exact_count(ch) {
-        if char_counts[idx_of(ch)] >= exact {
-            return false;
-        }
+    if prepared.exact_mask & (1u32 << ch_idx) != 0
+        && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
+    {
+        return false;
     }
 
     // Floor context constraints
@@ -422,8 +496,9 @@ fn can_place_char(
         return false;
     }
 
-    // Leading zero check and operand value check
-    if is_digit_b(ch) && main_op_so_far != Some(b'=') {
+    // Leading zero check and operand value check.  Left-side operands are capped;
+    // after '=' the RHS is a simple number, so only its leading-zero rule matters.
+    if is_digit_b(ch) {
         let digit = (ch - b'0') as i64;
         let continuing_number = prev_char.is_some_and(is_digit_b);
         let new_len = if continuing_number {
@@ -445,7 +520,7 @@ fn can_place_char(
         if new_len > 1 && leading_zero {
             return false;
         }
-        if new_value > MAX_OPERAND_VALUE {
+        if main_op_so_far != Some(b'=') && new_value > MAX_OPERAND_VALUE {
             return false;
         }
     }
@@ -535,17 +610,18 @@ fn can_place_char(
 
     // Incremental bracket balance check
     let new_stack_len = match ch {
-        b'(' | b'[' => bracket_stack.len() + 1,
+        b'(' | b'[' => stack_len + 1,
         b')' | b']' => {
-            let Some(&last_open) = bracket_stack.last() else {
+            if stack_len == 0 {
                 return false;
-            };
+            }
+            let last_open = bracket_stack[stack_len - 1];
             if !matches_bracket(last_open, ch) {
                 return false;
             }
-            bracket_stack.len() - 1
+            stack_len - 1
         }
-        _ => bracket_stack.len(),
+        _ => stack_len,
     };
 
     if index == length - 1 && new_stack_len != 0 {
@@ -585,6 +661,58 @@ fn can_place_char(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
+fn complete_eq_rhs(
+    length: usize,
+    main_op_index: usize,
+    expr: &mut [u8],
+    char_counts: &mut [u8; CHARSET_LEN],
+    prepared: &PreparedKnowledge,
+    rhs: &[u8],
+    results: &mut Vec<String>,
+    searched_count: &mut u64,
+) {
+    debug_assert_eq!(rhs.len(), length - main_op_index - 1);
+
+    let mut filled = 0usize;
+    let mut valid = true;
+    for (offset, &ch) in rhs.iter().enumerate() {
+        let pos = main_op_index + 1 + offset;
+        if prepared.is_globally_forbidden(ch)
+            || prepared.cannot_be_at(pos, ch)
+            || (prepared.fixed_chars[pos] != NO_CHAR && prepared.fixed_chars[pos] != ch)
+        {
+            valid = false;
+            break;
+        }
+
+        let ch_idx = idx_of(ch);
+        if prepared.exact_mask & (1u32 << ch_idx) != 0
+            && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
+        {
+            valid = false;
+            break;
+        }
+
+        expr[pos] = ch;
+        char_counts[ch_idx] += 1;
+        filled += 1;
+    }
+
+    if valid && prepared.counts_can_still_succeed(char_counts, 0) {
+        *searched_count += 1;
+        let expr_str = unsafe { std::str::from_utf8_unchecked(expr) };
+        results.push(expr_str.to_owned());
+    }
+
+    for &ch in &rhs[..filled] {
+        char_counts[idx_of(ch)] -= 1;
+    }
+    for b in expr.iter_mut().take(length).skip(main_op_index + 1) {
+        *b = NO_CHAR;
+    }
+}
+
 /// The main solver struct
 pub struct Solver {
     pub length: usize,
@@ -604,11 +732,15 @@ impl Solver {
 
     /// Solve with single-threaded brute force
     pub fn solve(&self) -> (Vec<String>, u64) {
-        let mut results: Vec<String> = Vec::new();
+        let mut results: Vec<String> = if self.prepared.unconstrained {
+            Vec::with_capacity(unconstrained_solution_capacity(self.length))
+        } else {
+            Vec::new()
+        };
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
-        let mut bracket_stack: Vec<u8> = Vec::with_capacity(self.length);
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
 
         self.recursive_search(
             0,
@@ -616,9 +748,11 @@ impl Solver {
             None,
             None,
             0,
+            None,
             &mut char_counts,
             FloorContext::new(),
             &mut bracket_stack,
+            0,
             &self.prepared,
             0,
             0,
@@ -638,9 +772,11 @@ impl Solver {
         prev_char: Option<u8>,
         main_op_so_far: Option<u8>,
         main_op_index: usize,
+        main_lhs_value: Option<i64>,
         char_counts: &mut [u8; CHARSET_LEN],
         floor_ctx: FloorContext,
-        bracket_stack: &mut Vec<u8>,
+        bracket_stack: &mut [u8],
+        stack_len: usize,
         prepared: &PreparedKnowledge,
         current_num_len: u8,
         current_num_value: i64,
@@ -661,7 +797,7 @@ impl Solver {
                     3
                 }
             } else {
-                2 + bracket_stack.len()
+                2 + stack_len
                     + usize::from(
                         prev_char
                             .is_none_or(|pc| is_binary_operator_b(pc) || is_open_bracket_b(pc)),
@@ -688,11 +824,17 @@ impl Solver {
                 return;
             }
 
-            if is_valid_equation_solver_with_main_bytes(
-                expr,
-                main_op_index,
-                main_op_so_far.expect("main operator missing"),
-            ) {
+            let main_op = main_op_so_far.expect("main operator missing");
+            let lhs_value = main_lhs_value.expect("main operator value missing");
+            let right_side = &expr[main_op_index + 1..];
+            let valid = match main_op {
+                b'=' => false,
+                b'>' => evaluate_expression_solver_bytes(right_side)
+                    .is_some_and(|rv| is_integer(rv) && lhs_value > rv as i64),
+                _ => false,
+            };
+
+            if valid {
                 let expr_str = unsafe { std::str::from_utf8_unchecked(expr) };
                 results.push(expr_str.to_owned());
             }
@@ -711,14 +853,17 @@ impl Solver {
         );
 
         for &ch in &candidates[..candidate_count] {
+            let ch_idx = idx_of(ch);
             if !can_place_char(
                 ch,
+                ch_idx,
                 index,
                 prev_char,
                 main_op_so_far,
                 char_counts,
                 floor_ctx,
                 bracket_stack,
+                stack_len,
                 prepared,
                 self.length,
                 current_num_len,
@@ -729,10 +874,49 @@ impl Solver {
             }
 
             expr[index] = ch;
-            char_counts[idx_of(ch)] += 1;
+            char_counts[ch_idx] += 1;
 
             let next_floor_ctx = update_floor_context(ch, floor_ctx);
+            let mut new_main_lhs_value = main_lhs_value;
             let new_main_op = if is_main_operator_b(ch) {
+                let Some(lhs_value) = evaluate_expression_solver_bytes(&expr[..index]) else {
+                    char_counts[ch_idx] -= 1;
+                    expr[index] = NO_CHAR;
+                    continue;
+                };
+                if !is_integer(lhs_value) {
+                    char_counts[ch_idx] -= 1;
+                    expr[index] = NO_CHAR;
+                    continue;
+                }
+                let lhs_value = lhs_value as i64;
+                if ch == b'=' {
+                    let rhs_slots = self.length - index - 1;
+                    let mut rhs_buf = [0u8; 20];
+                    let rhs_len = if lhs_value == 0 && rhs_slots == 2 {
+                        rhs_buf[0] = b'-';
+                        rhs_buf[1] = b'0';
+                        2
+                    } else {
+                        write_i64_decimal(lhs_value, &mut rhs_buf)
+                    };
+                    if rhs_len == rhs_slots {
+                        complete_eq_rhs(
+                            self.length,
+                            index,
+                            expr,
+                            char_counts,
+                            prepared,
+                            &rhs_buf[..rhs_len],
+                            results,
+                            searched_count,
+                        );
+                    }
+                    char_counts[ch_idx] -= 1;
+                    expr[index] = NO_CHAR;
+                    continue;
+                }
+                new_main_lhs_value = Some(lhs_value);
                 Some(ch)
             } else {
                 main_op_so_far
@@ -751,12 +935,14 @@ impl Solver {
                 (0, 0, false)
             };
 
-            let mut popped_bracket = None;
-            match ch {
-                b'(' | b'[' => bracket_stack.push(ch),
-                b')' | b']' => popped_bracket = bracket_stack.pop(),
-                _ => {}
-            }
+            let next_stack_len = match ch {
+                b'(' | b'[' => {
+                    bracket_stack[stack_len] = ch;
+                    stack_len + 1
+                }
+                b')' | b']' => stack_len - 1,
+                _ => stack_len,
+            };
 
             self.recursive_search(
                 index + 1,
@@ -768,9 +954,11 @@ impl Solver {
                 } else {
                     main_op_index
                 },
+                new_main_lhs_value,
                 char_counts,
                 next_floor_ctx,
                 bracket_stack,
+                next_stack_len,
                 prepared,
                 next_num_len,
                 next_num_value,
@@ -779,17 +967,7 @@ impl Solver {
                 searched_count,
             );
 
-            match ch {
-                b'(' | b'[' => {
-                    bracket_stack.pop();
-                }
-                b')' | b']' => {
-                    bracket_stack.push(popped_bracket.expect("matching bracket missing"));
-                }
-                _ => {}
-            }
-
-            char_counts[idx_of(ch)] -= 1;
+            char_counts[ch_idx] -= 1;
             expr[index] = NO_CHAR;
         }
     }
@@ -816,12 +994,14 @@ impl Solver {
             .filter(|&ch| {
                 can_place_char(
                     ch,
+                    idx_of(ch),
                     0,
                     None,
                     None,
                     &char_counts,
                     FloorContext::new(),
                     &bracket_stack,
+                    0,
                     &self.prepared,
                     self.length,
                     0,
@@ -860,14 +1040,17 @@ impl Solver {
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
-        let mut bracket_stack: Vec<u8> = Vec::with_capacity(self.length);
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
 
         expr[0] = first;
         char_counts[idx_of(first)] += 1;
-        match first {
-            b'(' | b'[' => bracket_stack.push(first),
-            _ => {}
-        }
+        let stack_len = match first {
+            b'(' | b'[' => {
+                bracket_stack[0] = first;
+                1
+            }
+            _ => 0,
+        };
 
         self.recursive_search(
             1,
@@ -875,9 +1058,11 @@ impl Solver {
             Some(first),
             main_op.map(|c| c as u8),
             0,
+            None,
             &mut char_counts,
             floor_ctx,
             &mut bracket_stack,
+            stack_len,
             &self.prepared,
             if is_digit_b(first) { 1 } else { 0 },
             if is_digit_b(first) {

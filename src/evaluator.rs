@@ -97,6 +97,24 @@ pub(crate) fn evaluate_expression_bytes(expr: &[u8]) -> Option<f64> {
     evaluate_arithmetic_bytes(current.as_ref())
 }
 
+/// Fast evaluator for solver-generated expressions. Solver expressions never
+/// contain whitespace, so the common arithmetic-only path can avoid the more
+/// general whitespace-aware parser while preserving public evaluator behavior.
+#[inline]
+pub(crate) fn evaluate_expression_solver_bytes(expr: &[u8]) -> Option<f64> {
+    if expr.is_empty() {
+        return None;
+    }
+
+    for &b in expr {
+        if matches!(b, b'[' | b']' | b'!' | b'A') {
+            return evaluate_expression_bytes(expr);
+        }
+    }
+
+    evaluate_arithmetic_no_ws_bytes(expr)
+}
+
 fn resolve_floor_brackets_bytes(expr: &[u8]) -> Option<Vec<u8>> {
     let mut processed = expr.to_vec();
     let mut bracket_iterations = 0;
@@ -501,6 +519,154 @@ impl<'a> Parser<'a> {
     }
 }
 
+#[inline]
+fn evaluate_arithmetic_no_ws_bytes(expr: &[u8]) -> Option<f64> {
+    if expr.is_empty() {
+        return None;
+    }
+
+    let mut parser = NoWsParser::new(expr);
+    let result = parser.parse_expression()?;
+    if parser.pos < parser.bytes.len() || result.is_nan() || result.is_infinite() {
+        return None;
+    }
+    Some(result)
+}
+
+struct NoWsParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> NoWsParser<'a> {
+    #[inline]
+    fn new(expr: &'a [u8]) -> Self {
+        Self {
+            bytes: expr,
+            pos: 0,
+        }
+    }
+
+    #[inline]
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    #[inline]
+    fn advance(&mut self) {
+        self.pos += 1;
+    }
+
+    fn parse_expression(&mut self) -> Option<f64> {
+        let mut result = self.parse_term()?;
+        loop {
+            match self.peek() {
+                Some(b'+') => {
+                    self.advance();
+                    result += self.parse_term()?;
+                }
+                Some(b'-') => {
+                    self.advance();
+                    result -= self.parse_term()?;
+                }
+                _ => break,
+            }
+        }
+        Some(result)
+    }
+
+    fn parse_term(&mut self) -> Option<f64> {
+        let mut result = self.parse_power()?;
+        loop {
+            match self.peek() {
+                Some(b'*') => {
+                    self.advance();
+                    if self.peek() == Some(b'*') {
+                        return None;
+                    }
+                    result *= self.parse_power()?;
+                }
+                Some(b'/') => {
+                    self.advance();
+                    let right = self.parse_power()?;
+                    if right == 0.0 {
+                        return None;
+                    }
+                    result /= right;
+                }
+                Some(b'%') => {
+                    self.advance();
+                    let right = self.parse_power()?;
+                    if right == 0.0 {
+                        return None;
+                    }
+                    result %= right;
+                }
+                _ => break,
+            }
+        }
+        Some(result)
+    }
+
+    fn parse_power(&mut self) -> Option<f64> {
+        let base = self.parse_unary()?;
+        if self.peek() == Some(b'^') {
+            self.advance();
+            let exp = self.parse_power()?;
+            if base < 0.0 && exp != exp.floor() {
+                return None;
+            }
+            let result = base.powf(exp);
+            if result.is_nan() || result.is_infinite() {
+                return None;
+            }
+            Some(result)
+        } else {
+            Some(base)
+        }
+    }
+
+    fn parse_unary(&mut self) -> Option<f64> {
+        if self.peek() == Some(b'-') {
+            self.advance();
+            Some(-self.parse_unary()?)
+        } else {
+            self.parse_primary()
+        }
+    }
+
+    fn parse_primary(&mut self) -> Option<f64> {
+        match self.peek() {
+            Some(b'(') => {
+                self.advance();
+                let result = self.parse_expression()?;
+                if self.peek() != Some(b')') {
+                    return None;
+                }
+                self.advance();
+                Some(result)
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let start = self.pos;
+                let mut value = 0.0f64;
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        value = value * 10.0 + (c - b'0') as f64;
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                if self.pos - start > 1 && self.bytes[start] == b'0' {
+                    return None;
+                }
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Check if a value is an integer (matches JS Number.isInteger)
 pub fn is_integer(value: f64) -> bool {
     value.is_finite() && value == value.floor()
@@ -649,47 +815,6 @@ fn is_valid_equation_bytes_impl(expression: &[u8], check_brackets: bool) -> bool
 #[inline]
 pub(crate) fn is_valid_equation_bytes(expression: &[u8]) -> bool {
     is_valid_equation_bytes_impl(expression, true)
-}
-
-#[inline]
-pub(crate) fn is_valid_equation_solver_with_main_bytes(
-    expression: &[u8],
-    main_op_index: usize,
-    main_op: u8,
-) -> bool {
-    if main_op_index == 0 || main_op_index + 1 >= expression.len() {
-        return false;
-    }
-
-    let left_side = &expression[..main_op_index];
-    let right_side = &expression[main_op_index + 1..];
-
-    if left_side.is_empty() || right_side.is_empty() || trim_ascii_whitespace(right_side) == b"-" {
-        return false;
-    }
-
-    match main_op {
-        b'=' => {
-            let Some(rv) = parse_simple_number_or_negative_value_bytes(right_side) else {
-                return false;
-            };
-            let Some(lv) = evaluate_expression_bytes(left_side) else {
-                return false;
-            };
-            is_integer(lv) && (lv as i64) == (rv as i64)
-        }
-        b'>' => {
-            let left_value = evaluate_expression_bytes(left_side);
-            let right_value = evaluate_expression_bytes(right_side);
-            match (left_value, right_value) {
-                (Some(lv), Some(rv)) => {
-                    is_integer(lv) && is_integer(rv) && (lv as i64) > (rv as i64)
-                }
-                _ => false,
-            }
-        }
-        _ => false,
-    }
 }
 
 /// Validate a complete equation expression

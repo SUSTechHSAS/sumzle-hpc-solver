@@ -968,3 +968,18 @@ fn test_factorial_close_bracket_pruning() {
         "Should find at least one solution with ')' after '!'"
     );
 }
+
+/// The reference evaluator accepts `-0` as a simple numeric RHS.  Solver-side
+/// pruning must therefore keep equations whose right side is exactly `-0`.
+#[test]
+fn test_solver_preserves_negative_zero_rhs() {
+    assert!(is_valid_equation("1-1=-0"));
+
+    let gk = empty_gk(6);
+    let solver = Solver::new(6, gk);
+    let (results, _) = solver.solve();
+    assert!(
+        results.contains(&"1-1=-0".to_string()),
+        "Solver pruning must not drop valid negative-zero RHS equations"
+    );
+}
