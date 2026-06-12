@@ -2,8 +2,6 @@
 
 use crate::solver::Solver;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 /// Parallel solver that distributes work across multiple CPU cores
 pub struct ParallelSolver {
@@ -28,29 +26,28 @@ impl ParallelSolver {
             .unwrap();
 
         let branches = self.solver.get_top_level_branches();
-        let total_searched = AtomicU64::new(0);
-        let results_mutex = Mutex::new(Vec::new());
 
-        pool.install(|| {
+        let (mut results, searched_count) = pool.install(|| {
             branches
                 .par_iter()
-                .for_each(|&(first_char, main_op, floor_ctx)| {
-                    let (branch_results, branch_searched) =
-                        self.solver.solve_branch(first_char, main_op, floor_ctx);
-
-                    total_searched.fetch_add(branch_searched, Ordering::Relaxed);
-
-                    if !branch_results.is_empty() {
-                        let mut all_results = results_mutex.lock().unwrap();
-                        all_results.extend(branch_results);
-                    }
-                });
+                .map(|&(first_char, main_op, floor_ctx)| {
+                    self.solver.solve_branch(first_char, main_op, floor_ctx)
+                })
+                .reduce(
+                    || (Vec::new(), 0),
+                    |mut left, mut right| {
+                        left.1 += right.1;
+                        if !right.0.is_empty() {
+                            left.0.append(&mut right.0);
+                        }
+                        left
+                    },
+                )
         });
 
-        let mut results = results_mutex.into_inner().unwrap();
-        results.sort();
+        results.sort_unstable();
         results.dedup();
 
-        (results, total_searched.into_inner())
+        (results, searched_count)
     }
 }

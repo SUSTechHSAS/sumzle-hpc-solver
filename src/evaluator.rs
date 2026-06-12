@@ -5,19 +5,46 @@
 //! integer results at the equation validation level.
 
 use crate::types::*;
+use std::borrow::Cow;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainOperator {
+    Equal,
+    Greater,
+    GreaterEqual,
+}
+
+#[inline]
+const fn is_open_bracket_b(ch: u8) -> bool {
+    matches!(ch, b'(' | b'[')
+}
+
+#[inline]
+const fn is_close_bracket_b(ch: u8) -> bool {
+    matches!(ch, b')' | b']')
+}
+
+#[inline]
+const fn is_main_operator_b(ch: u8) -> bool {
+    matches!(ch, b'=' | b'>')
+}
 
 /// Check if brackets are properly matched
 pub fn check_brackets(expr: &str) -> bool {
-    let mut stack: Vec<char> = Vec::new();
-    for ch in expr.chars() {
-        if is_open_bracket(ch) {
+    check_brackets_bytes(expr.as_bytes())
+}
+
+#[inline]
+fn check_brackets_bytes(expr: &[u8]) -> bool {
+    let mut stack: Vec<u8> = Vec::with_capacity(expr.len().min(8));
+    for &ch in expr {
+        if is_open_bracket_b(ch) {
             stack.push(ch);
-        } else if is_close_bracket(ch) {
-            if stack.is_empty() {
+        } else if is_close_bracket_b(ch) {
+            let Some(last_open) = stack.pop() else {
                 return false;
-            }
-            let last_open = stack.pop().unwrap();
-            if get_matching_bracket(last_open) != Some(ch) {
+            };
+            if !matches!((last_open, ch), (b'(', b')') | (b'[', b']')) {
                 return false;
             }
         }
@@ -28,119 +55,153 @@ pub fn check_brackets(expr: &str) -> bool {
 /// Evaluate a mathematical expression, returning None if invalid.
 /// Returns f64 to support fractional intermediate results (e.g., 7/2 = 3.5).
 pub fn evaluate_expression(expr: &str) -> Option<f64> {
+    evaluate_expression_bytes(expr.as_bytes())
+}
+
+#[inline]
+pub(crate) fn evaluate_expression_bytes(expr: &[u8]) -> Option<f64> {
     if expr.is_empty() {
         return None;
     }
 
-    let mut processed = expr.to_string();
+    let mut has_floor = false;
+    let mut has_factorial = false;
+    let mut has_permutation = false;
+    for &b in expr {
+        match b {
+            b'[' | b']' => has_floor = true,
+            b'!' => has_factorial = true,
+            b'A' => has_permutation = true,
+            _ => {}
+        }
+    }
 
-    // Handle floor brackets [expr]
-    // Replace [inner] with floor(eval(inner))
+    if !has_floor && !has_factorial && !has_permutation {
+        return evaluate_arithmetic_bytes(expr);
+    }
+
+    let mut current: Cow<'_, [u8]> = Cow::Borrowed(expr);
+
+    if has_floor {
+        current = Cow::Owned(resolve_floor_brackets_bytes(current.as_ref())?);
+    }
+
+    if has_factorial {
+        current = Cow::Owned(handle_factorials_bytes(current.as_ref())?);
+    }
+
+    if has_permutation {
+        current = Cow::Owned(handle_permutations_bytes(current.as_ref())?);
+    }
+
+    evaluate_arithmetic_bytes(current.as_ref())
+}
+
+fn resolve_floor_brackets_bytes(expr: &[u8]) -> Option<Vec<u8>> {
+    let mut processed = expr.to_vec();
     let mut bracket_iterations = 0;
     const MAX_BRACKET_ITERATIONS: usize = 10;
 
     while bracket_iterations < MAX_BRACKET_ITERATIONS {
-        // Find innermost [...]
-        if let Some(start) = processed.rfind('[') {
-            if let Some(end) = processed[start + 1..].find(']') {
-                let inner_start = start + 1;
-                let inner_end = start + 1 + end;
-                let inner_expr = &processed[inner_start..inner_end];
+        if let Some(start) = processed.iter().rposition(|&b| b == b'[') {
+            let end_rel = processed[start + 1..].iter().position(|&b| b == b']')?;
+            let inner_start = start + 1;
+            let inner_end = start + 1 + end_rel;
+            let inner_expr = &processed[inner_start..inner_end];
 
-                if inner_expr.is_empty() {
-                    return None;
-                }
-
-                // Evaluate the inner expression
-                let inner_val = evaluate_inner_expression(inner_expr)?;
-                if !inner_val.is_finite() {
-                    return None;
-                }
-                let floored = inner_val.floor() as i64;
-                processed = format!(
-                    "{}{}{}",
-                    &processed[..start],
-                    floored,
-                    &processed[inner_end + 1..]
-                );
-            } else {
+            if inner_expr.is_empty() {
                 return None;
             }
+
+            let inner_val = evaluate_inner_expression_bytes(inner_expr)?;
+            if !inner_val.is_finite() {
+                return None;
+            }
+
+            let floored = inner_val.floor() as i64;
+            let mut next = Vec::with_capacity(processed.len() + 16);
+            next.extend_from_slice(&processed[..start]);
+            append_i64_decimal(&mut next, floored);
+            next.extend_from_slice(&processed[inner_end + 1..]);
+            processed = next;
         } else {
             break;
         }
         bracket_iterations += 1;
     }
 
-    if bracket_iterations >= MAX_BRACKET_ITERATIONS && processed.contains('[') {
+    if bracket_iterations >= MAX_BRACKET_ITERATIONS && processed.contains(&b'[') {
         return None;
     }
 
-    // Handle factorial: digits!
-    processed = handle_factorials(&processed)?;
-
-    // Handle permutation: digitsAdigits (like 5A3 = 5*4*3)
-    processed = handle_permutations(&processed)?;
-
-    // Now evaluate the simple arithmetic expression
-    evaluate_arithmetic(&processed)
+    Some(processed)
 }
 
 /// Evaluate an expression inside floor brackets (no nested brackets expected)
-fn evaluate_inner_expression(expr: &str) -> Option<f64> {
+#[inline]
+fn evaluate_inner_expression_bytes(expr: &[u8]) -> Option<f64> {
     if expr.is_empty() {
         return None;
     }
 
-    let mut processed = expr.to_string();
+    let mut has_factorial = false;
+    let mut has_permutation = false;
+    for &b in expr {
+        match b {
+            b'!' => has_factorial = true,
+            b'A' => has_permutation = true,
+            _ => {}
+        }
+    }
 
-    // Handle factorial inside brackets
-    processed = handle_factorials(&processed)?;
-    // Handle permutation inside brackets
-    processed = handle_permutations(&processed)?;
+    if !has_factorial && !has_permutation {
+        return evaluate_arithmetic_bytes(expr);
+    }
 
-    evaluate_arithmetic(&processed)
+    let mut current: Cow<'_, [u8]> = Cow::Borrowed(expr);
+
+    if has_factorial {
+        current = Cow::Owned(handle_factorials_bytes(current.as_ref())?);
+    }
+
+    if has_permutation {
+        current = Cow::Owned(handle_permutations_bytes(current.as_ref())?);
+    }
+
+    evaluate_arithmetic_bytes(current.as_ref())
 }
 
-/// Handle factorial expressions in the string
-fn handle_factorials(expr: &str) -> Option<String> {
-    let chars: Vec<char> = expr.chars().collect();
-    let mut result = String::new();
+/// Handle factorial expressions in the byte string
+fn handle_factorials_bytes(expr: &[u8]) -> Option<Vec<u8>> {
+    let mut result: Vec<u8> = Vec::with_capacity(expr.len() + 8);
     let mut i = 0;
 
-    while i < chars.len() {
-        if chars[i] == '!' {
-            // Look back for the number in result
-            let bs: Vec<char> = result.chars().collect();
-            if bs.is_empty() {
+    while i < expr.len() {
+        let ch = expr[i];
+        if ch == b'!' {
+            if result.is_empty() {
                 return None;
             }
 
-            // Walk back to find the trailing number
-            let mut j = bs.len();
-            while j > 0 && bs[j - 1].is_ascii_digit() {
+            let mut j = result.len();
+            while j > 0 && result[j - 1].is_ascii_digit() {
                 j -= 1;
             }
 
-            if j == bs.len() {
-                // No number before !
+            if j == result.len() {
                 return None;
             }
 
-            let num_str: String = bs[j..].iter().collect();
-            let n: u64 = num_str.parse().ok()?;
-
+            let n = parse_u64_digits(&result[j..])?;
             if n > MAX_FACTORIAL {
                 return None;
             }
 
             let factorial = compute_factorial(n);
-
-            // Replace the number part
-            result = bs[..j].iter().collect();
-            result.push_str(&factorial.to_string());
+            result.truncate(j);
+            append_u64_decimal(&mut result, factorial);
         } else {
-            result.push(chars[i]);
+            result.push(ch);
         }
         i += 1;
     }
@@ -149,6 +210,7 @@ fn handle_factorials(expr: &str) -> Option<String> {
 }
 
 /// Compute factorial
+#[inline]
 fn compute_factorial(n: u64) -> u64 {
     if n == 0 {
         return 1;
@@ -161,59 +223,49 @@ fn compute_factorial(n: u64) -> u64 {
 }
 
 /// Handle permutation expressions (nAr = n!/(n-r)!)
-fn handle_permutations(expr: &str) -> Option<String> {
-    let chars: Vec<char> = expr.chars().collect();
-    let mut result = String::new();
+fn handle_permutations_bytes(expr: &[u8]) -> Option<Vec<u8>> {
+    let mut result: Vec<u8> = Vec::with_capacity(expr.len() + 8);
     let mut i = 0;
 
-    while i < chars.len() {
-        if chars[i] == 'A' {
-            // Look back for number before A
-            let bs: Vec<char> = result.chars().collect();
-            if bs.is_empty() {
+    while i < expr.len() {
+        let ch = expr[i];
+        if ch == b'A' {
+            if result.is_empty() {
                 return None;
             }
 
-            let mut j = bs.len();
-            while j > 0 && bs[j - 1].is_ascii_digit() {
+            let mut j = result.len();
+            while j > 0 && result[j - 1].is_ascii_digit() {
                 j -= 1;
             }
 
-            if j == bs.len() {
-                // No number before A
+            if j == result.len() {
                 return None;
             }
 
-            let m_str: String = bs[j..].iter().collect();
-            let m: u64 = m_str.parse().ok()?;
+            let m = parse_u64_digits(&result[j..])?;
 
-            // Look ahead for number after A
             let mut k = i + 1;
-            while k < chars.len() && chars[k].is_ascii_digit() {
+            while k < expr.len() && expr[k].is_ascii_digit() {
                 k += 1;
             }
 
             if k == i + 1 {
-                // No number after A
                 return None;
             }
 
-            let n_str: String = chars[i + 1..k].iter().collect();
-            let n: u64 = n_str.parse().ok()?;
-
+            let n = parse_u64_digits(&expr[i + 1..k])?;
             if m > MAX_PERMUTATION || n > MAX_PERMUTATION || n > m {
                 return None;
             }
 
             let perm = compute_permutation(m, n);
-
-            // Replace
-            result = bs[..j].iter().collect();
-            result.push_str(&perm.to_string());
-            i = k; // Skip past the digits after A
+            result.truncate(j);
+            append_u64_decimal(&mut result, perm);
+            i = k;
             continue;
         } else {
-            result.push(chars[i]);
+            result.push(ch);
         }
         i += 1;
     }
@@ -222,6 +274,7 @@ fn handle_permutations(expr: &str) -> Option<String> {
 }
 
 /// Compute permutation P(m,n) = m!/(m-n)!
+#[inline]
 fn compute_permutation(m: u64, n: u64) -> u64 {
     let mut result: u64 = 1;
     for i in 0..n {
@@ -230,49 +283,60 @@ fn compute_permutation(m: u64, n: u64) -> u64 {
     result
 }
 
+#[inline]
+fn parse_u64_digits(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value = 0u64;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+    }
+    Some(value)
+}
+
+#[inline]
+fn append_u64_decimal(buf: &mut Vec<u8>, mut n: u64) {
+    if n == 0 {
+        buf.push(b'0');
+        return;
+    }
+
+    let mut tmp = [0u8; 20];
+    let mut idx = tmp.len();
+    while n > 0 {
+        idx -= 1;
+        tmp[idx] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    buf.extend_from_slice(&tmp[idx..]);
+}
+
+#[inline]
+fn append_i64_decimal(buf: &mut Vec<u8>, n: i64) {
+    if n < 0 {
+        buf.push(b'-');
+        append_u64_decimal(buf, (-n) as u64);
+    } else {
+        append_u64_decimal(buf, n as u64);
+    }
+}
+
 /// Evaluate a simple arithmetic expression using a recursive descent parser.
 /// Supports: +, -, *, /, %, ^, parentheses
-fn evaluate_arithmetic(expr: &str) -> Option<f64> {
+fn evaluate_arithmetic_bytes(expr: &[u8]) -> Option<f64> {
     if expr.is_empty() {
         return None;
     }
 
-    // Check for leading zeros in multi-digit numbers
-    let chars: Vec<char> = expr.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i].is_ascii_digit() {
-            if chars[i] == '0' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
-                // This is a leading zero in a multi-digit number
-                return None;
-            }
-            // Skip remaining digits of this number
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    // Validate: only allowed characters
-    for ch in expr.chars() {
-        if !ch.is_ascii_digit()
-            && !matches!(ch, '+' | '-' | '*' | '/' | '%' | '^' | '(' | ')' | ' ')
-        {
-            return None;
-        }
-    }
-
     let mut parser = Parser::new(expr);
     let result = parser.parse_expression()?;
+    parser.skip_whitespace();
 
-    // Ensure we consumed all input
-    if parser.pos < parser.chars.len() {
-        return None;
-    }
-
-    if result.is_nan() || result.is_infinite() {
+    if parser.pos < parser.bytes.len() || result.is_nan() || result.is_infinite() {
         return None;
     }
 
@@ -280,33 +344,37 @@ fn evaluate_arithmetic(expr: &str) -> Option<f64> {
 }
 
 /// Recursive descent parser for arithmetic expressions
-struct Parser {
-    chars: Vec<char>,
+struct Parser<'a> {
+    bytes: &'a [u8],
     pos: usize,
 }
 
-impl Parser {
-    fn new(expr: &str) -> Self {
+impl<'a> Parser<'a> {
+    #[inline]
+    fn new(expr: &'a [u8]) -> Self {
         Self {
-            chars: expr.chars().collect(),
+            bytes: expr,
             pos: 0,
         }
     }
 
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+    #[inline]
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
     }
 
-    fn advance(&mut self) -> Option<char> {
-        let ch = self.chars.get(self.pos).copied();
+    #[inline]
+    fn advance(&mut self) -> Option<u8> {
+        let ch = self.bytes.get(self.pos).copied();
         if ch.is_some() {
             self.pos += 1;
         }
         ch
     }
 
+    #[inline]
     fn skip_whitespace(&mut self) {
-        while self.pos < self.chars.len() && self.chars[self.pos].is_whitespace() {
+        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
             self.pos += 1;
         }
     }
@@ -317,15 +385,13 @@ impl Parser {
         loop {
             self.skip_whitespace();
             match self.peek() {
-                Some('+') => {
+                Some(b'+') => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    result += right;
+                    result += self.parse_term()?;
                 }
-                Some('-') => {
+                Some(b'-') => {
                     self.advance();
-                    let right = self.parse_term()?;
-                    result -= right;
+                    result -= self.parse_term()?;
                 }
                 _ => break,
             }
@@ -340,16 +406,14 @@ impl Parser {
         loop {
             self.skip_whitespace();
             match self.peek() {
-                Some('*') => {
-                    // Check for ** (not supported, should be handled by ^)
+                Some(b'*') => {
                     self.advance();
-                    if self.peek() == Some('*') {
-                        return None; // ** not allowed
+                    if self.peek() == Some(b'*') {
+                        return None;
                     }
-                    let right = self.parse_power()?;
-                    result *= right;
+                    result *= self.parse_power()?;
                 }
-                Some('/') => {
+                Some(b'/') => {
                     self.advance();
                     let right = self.parse_power()?;
                     if right == 0.0 {
@@ -357,7 +421,7 @@ impl Parser {
                     }
                     result /= right;
                 }
-                Some('%') => {
+                Some(b'%') => {
                     self.advance();
                     let right = self.parse_power()?;
                     if right == 0.0 {
@@ -376,9 +440,9 @@ impl Parser {
         let base = self.parse_unary()?;
 
         self.skip_whitespace();
-        if self.peek() == Some('^') {
+        if self.peek() == Some(b'^') {
             self.advance();
-            let exp = self.parse_power()?; // Right-associative
+            let exp = self.parse_power()?;
             if base < 0.0 && exp != exp.floor() {
                 return None;
             }
@@ -394,10 +458,9 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Option<f64> {
         self.skip_whitespace();
-        if self.peek() == Some('-') {
+        if self.peek() == Some(b'-') {
             self.advance();
-            let val = self.parse_unary()?;
-            Some(-val)
+            Some(-self.parse_unary()?)
         } else {
             self.parse_primary()
         }
@@ -407,27 +470,31 @@ impl Parser {
         self.skip_whitespace();
 
         match self.peek() {
-            Some('(') => {
+            Some(b'(') => {
                 self.advance();
                 let result = self.parse_expression()?;
                 self.skip_whitespace();
-                if self.peek() != Some(')') {
+                if self.peek() != Some(b')') {
                     return None;
                 }
                 self.advance();
                 Some(result)
             }
             Some(c) if c.is_ascii_digit() => {
-                let mut num_str = String::new();
+                let start = self.pos;
+                let mut value = 0.0f64;
                 while let Some(c) = self.peek() {
                     if c.is_ascii_digit() {
-                        num_str.push(c);
+                        value = value * 10.0 + (c - b'0') as f64;
                         self.advance();
                     } else {
                         break;
                     }
                 }
-                num_str.parse::<f64>().ok()
+                if self.pos - start > 1 && self.bytes[start] == b'0' {
+                    return None;
+                }
+                Some(value)
             }
             _ => None,
         }
@@ -439,71 +506,109 @@ pub fn is_integer(value: f64) -> bool {
     value.is_finite() && value == value.floor()
 }
 
-/// Check if a string is a simple number (or negative number)
-pub fn is_simple_number_or_negative(expr: &str) -> bool {
-    let trimmed = expr.trim();
-    if let Some(stripped) = trimmed.strip_prefix('-') {
-        !stripped.is_empty() && stripped.chars().all(|c| c.is_ascii_digit())
+#[inline]
+fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+#[inline]
+fn is_simple_number_or_negative_bytes(expr: &[u8]) -> bool {
+    let trimmed = trim_ascii_whitespace(expr);
+    if let Some(stripped) = trimmed.strip_prefix(b"-") {
+        !stripped.is_empty() && stripped.iter().all(|b| b.is_ascii_digit())
     } else {
-        !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit())
+        !trimmed.is_empty() && trimmed.iter().all(|b| b.is_ascii_digit())
     }
 }
 
-/// Validate a complete equation expression
-pub fn is_valid_equation(expression: &str) -> bool {
-    if !check_brackets(expression) {
+#[inline]
+fn parse_simple_number_or_negative_value_bytes(expr: &[u8]) -> Option<f64> {
+    let trimmed = trim_ascii_whitespace(expr);
+    let (negative, digits) = if let Some(stripped) = trimmed.strip_prefix(b"-") {
+        (true, stripped)
+    } else {
+        (false, trimmed)
+    };
+
+    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if digits.len() > 1 && digits[0] == b'0' {
+        return None;
+    }
+
+    let mut value = 0.0f64;
+    for &b in digits {
+        value = value * 10.0 + (b - b'0') as f64;
+    }
+
+    Some(if negative { -value } else { value })
+}
+
+/// Check if a string is a simple number (or negative number)
+pub fn is_simple_number_or_negative(expr: &str) -> bool {
+    is_simple_number_or_negative_bytes(expr.as_bytes())
+}
+
+#[inline]
+fn is_valid_equation_bytes_impl(expression: &[u8], check_brackets: bool) -> bool {
+    if check_brackets && !check_brackets_bytes(expression) {
         return false;
     }
 
-    // Find the main operator (= or >=) at depth 0
-    let chars: Vec<char> = expression.chars().collect();
-    let mut main_op: Option<String> = None;
-    let mut main_op_end_index: usize = 0; // index AFTER the main operator
+    let mut main_op: Option<MainOperator> = None;
+    let mut main_op_end_index: usize = 0;
     let mut depth: i32 = 0;
 
     let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-        if is_open_bracket(ch) {
+    while i < expression.len() {
+        let ch = expression[i];
+        if is_open_bracket_b(ch) {
             depth += 1;
-        } else if is_close_bracket(ch) {
+        } else if is_close_bracket_b(ch) {
             depth -= 1;
-        } else if depth == 0 && is_main_operator(ch) {
+        } else if depth == 0 && is_main_operator_b(ch) {
             match main_op {
                 None => {
-                    main_op = Some(ch.to_string());
+                    main_op = Some(if ch == b'=' {
+                        MainOperator::Equal
+                    } else {
+                        MainOperator::Greater
+                    });
                     main_op_end_index = i + 1;
                 }
-                Some(ref prev) => {
-                    if prev == ">" && ch == '=' {
-                        main_op = Some(">=".to_string());
-                        main_op_end_index = i + 1;
-                    } else if prev == "=" && ch == '=' {
-                        return false; // Double = not allowed
-                    } else if prev.as_str() != &expression[i..i + 1] {
-                        return false; // Different main operators
-                    } else {
-                        // Same operator repeated
-                        if ch == '=' {
-                            return false;
-                        }
-                    }
+                Some(MainOperator::Greater) if ch == b'=' => {
+                    main_op = Some(MainOperator::GreaterEqual);
+                    main_op_end_index = i + 1;
+                }
+                Some(MainOperator::Equal) if ch == b'=' => return false,
+                Some(MainOperator::Equal) => return false,
+                Some(MainOperator::GreaterEqual) => return false,
+                Some(MainOperator::Greater) => {
+                    // Preserve prior behavior for repeated '>' by letting RHS parsing reject it.
                 }
             }
         }
         i += 1;
     }
 
-    let main_op = match main_op {
-        Some(op) => op,
-        None => return false,
+    let Some(main_op) = main_op else {
+        return false;
     };
 
-    if main_op_end_index == 0 || main_op_end_index >= chars.len() {
+    if main_op_end_index == 0 || main_op_end_index >= expression.len() {
         return false;
     }
 
-    let left_end = if main_op == ">=" {
+    let left_end = if main_op == MainOperator::GreaterEqual {
         main_op_end_index - 2
     } else {
         main_op_end_index - 1
@@ -512,41 +617,84 @@ pub fn is_valid_equation(expression: &str) -> bool {
     let left_side = &expression[..left_end];
     let right_side = &expression[main_op_end_index..];
 
-    if left_side.is_empty() || right_side.is_empty() {
+    if left_side.is_empty() || right_side.is_empty() || trim_ascii_whitespace(right_side) == b"-" {
         return false;
     }
 
-    // Check for negative number on RHS
-    let has_minus_on_rhs_start = right_side.starts_with('-');
-    if has_minus_on_rhs_start && right_side.len() == 1 {
-        return false;
-    }
-
-    let left_value = evaluate_expression(left_side);
-    let right_value = evaluate_expression(right_side);
-
-    match (left_value, right_value) {
-        (Some(lv), Some(rv)) => {
-            // Both must be integers
-            if !is_integer(lv) || !is_integer(rv) {
+    match main_op {
+        MainOperator::Equal => {
+            let Some(rv) = parse_simple_number_or_negative_value_bytes(right_side) else {
                 return false;
+            };
+            let Some(lv) = evaluate_expression_bytes(left_side) else {
+                return false;
+            };
+            is_integer(lv) && (lv as i64) == (rv as i64)
+        }
+        MainOperator::Greater | MainOperator::GreaterEqual => {
+            let left_value = evaluate_expression_bytes(left_side);
+            let right_value = evaluate_expression_bytes(right_side);
+            match (left_value, right_value) {
+                (Some(lv), Some(rv)) if is_integer(lv) && is_integer(rv) => match main_op {
+                    MainOperator::Greater => (lv as i64) > (rv as i64),
+                    MainOperator::GreaterEqual => (lv as i64) >= (rv as i64),
+                    MainOperator::Equal => unreachable!(),
+                },
+                _ => false,
             }
+        }
+    }
+}
 
-            match main_op.as_str() {
-                "=" => {
-                    // RHS must be a simple number
-                    if !is_simple_number_or_negative(right_side) {
-                        return false;
-                    }
-                    (lv as i64) == (rv as i64)
+#[inline]
+pub(crate) fn is_valid_equation_bytes(expression: &[u8]) -> bool {
+    is_valid_equation_bytes_impl(expression, true)
+}
+
+#[inline]
+pub(crate) fn is_valid_equation_solver_with_main_bytes(
+    expression: &[u8],
+    main_op_index: usize,
+    main_op: u8,
+) -> bool {
+    if main_op_index == 0 || main_op_index + 1 >= expression.len() {
+        return false;
+    }
+
+    let left_side = &expression[..main_op_index];
+    let right_side = &expression[main_op_index + 1..];
+
+    if left_side.is_empty() || right_side.is_empty() || trim_ascii_whitespace(right_side) == b"-" {
+        return false;
+    }
+
+    match main_op {
+        b'=' => {
+            let Some(rv) = parse_simple_number_or_negative_value_bytes(right_side) else {
+                return false;
+            };
+            let Some(lv) = evaluate_expression_bytes(left_side) else {
+                return false;
+            };
+            is_integer(lv) && (lv as i64) == (rv as i64)
+        }
+        b'>' => {
+            let left_value = evaluate_expression_bytes(left_side);
+            let right_value = evaluate_expression_bytes(right_side);
+            match (left_value, right_value) {
+                (Some(lv), Some(rv)) => {
+                    is_integer(lv) && is_integer(rv) && (lv as i64) > (rv as i64)
                 }
-                ">" => (lv as i64) > (rv as i64),
-                ">=" => (lv as i64) >= (rv as i64),
                 _ => false,
             }
         }
         _ => false,
     }
+}
+
+/// Validate a complete equation expression
+pub fn is_valid_equation(expression: &str) -> bool {
+    is_valid_equation_bytes(expression.as_bytes())
 }
 
 #[cfg(test)]

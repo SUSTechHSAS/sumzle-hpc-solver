@@ -642,6 +642,19 @@ fn test_solve_length_5() {
     assert!(results.contains(&"1+2=3".to_string()));
 }
 
+#[test]
+fn test_solver_does_not_generate_greater_equal() {
+    for length in 3..=6 {
+        let solver = Solver::new(length, empty_gk(length));
+        let (results, _) = solver.solve();
+        assert!(
+            results.iter().all(|s| !s.contains(">=")),
+            "Solver should not generate >= main operators for length {}",
+            length
+        );
+    }
+}
+
 // =========================================================================
 // Factorial Enumeration Tests (Bug Fix: '!' operator with empty constraints)
 // =========================================================================
