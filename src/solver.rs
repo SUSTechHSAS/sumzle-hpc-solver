@@ -791,8 +791,15 @@ impl Solver {
 
         if main_op_so_far.is_none() {
             let min_needed = if floor_ctx.in_floor {
+                // Slots still required: close the floor, then the main operator
+                // and at least one RHS digit (2). To close the floor we need at
+                // least `]` (1) when the denominator digit is already placed; the
+                // numerator/slash/denominator may still be pending, but this must
+                // stay a *lower* bound or valid completions (e.g. `[7/2]=3`) get
+                // pruned. has_slash ⇒ as few as 1 more char (`]`); otherwise at
+                // least `/d]` (3).
                 2 + if floor_ctx.has_slash_in_current_floor {
-                    2
+                    1
                 } else {
                     3
                 }
@@ -807,8 +814,11 @@ impl Solver {
                 return;
             }
         } else if floor_ctx.in_floor {
+            // RHS of `>` may contain a floor (e.g. `5>[2/3]`). Same lower-bound
+            // reasoning: with a slash already present, as little as `]` (1) may
+            // remain; without one, at least `/d]` (3).
             let min_needed = if floor_ctx.has_slash_in_current_floor {
-                2
+                1
             } else {
                 3
             };
