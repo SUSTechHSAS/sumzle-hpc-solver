@@ -20,11 +20,28 @@ impl ParallelSolver {
         }
     }
 
-    fn pool(&self) -> rayon::ThreadPool {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(self.num_threads)
-            .build()
-            .unwrap()
+    /// Run `f` on a Rayon pool sized to `self.num_threads`.
+    ///
+    /// When the requested count already matches the ambient pool (the common
+    /// case: `num_threads` defaulted to the CPU count, which is also Rayon's
+    /// global-pool size), `f` runs directly on that pool — avoiding the cost of
+    /// spawning and tearing down a fresh set of OS threads on every call. This
+    /// matters in the server, where a solve happens per request. Only an
+    /// explicit, differing thread count builds a transient pool.
+    fn run_in_pool<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        if self.num_threads == rayon::current_num_threads() {
+            f()
+        } else {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(self.num_threads)
+                .build()
+                .expect("failed to build rayon thread pool")
+                .install(f)
+        }
     }
 
     /// Partition the search into fine-grained prefix branches.
@@ -59,30 +76,34 @@ impl ParallelSolver {
     /// This only changes how the identical search is divided — solutions and
     /// the total searched count match the single-threaded solver exactly.
     pub fn solve(&self) -> (Vec<String>, u64) {
-        let pool = self.pool();
         let (branches, mut eager_results, mut searched) = self.collect_branches();
 
-        // Solve each branch independently; collect per-branch results without a
-        // shared lock.
-        let outcomes: Vec<(Vec<String>, u64)> = pool.install(|| {
-            branches
+        // Solve every branch and assemble the sorted result set within a single
+        // pool acquisition (both the per-branch search and the final sort run in
+        // parallel).
+        let mut results = self.run_in_pool(|| {
+            let outcomes: Vec<(Vec<String>, u64)> = branches
                 .par_iter()
                 .map(|branch| self.solver.solve_from_prefix(branch))
-                .collect()
+                .collect();
+
+            let total_len =
+                eager_results.len() + outcomes.iter().map(|(r, _)| r.len()).sum::<usize>();
+            let mut results: Vec<String> = Vec::with_capacity(total_len);
+            results.append(&mut eager_results);
+            for (branch_results, branch_searched) in outcomes {
+                searched += branch_searched;
+                results.extend(branch_results);
+            }
+
+            // Branches partition the search space by prefix, so they never
+            // produce duplicates; sort for a deterministic order (parallelized —
+            // the result set can be millions of strings).
+            results.par_sort_unstable();
+            results
         });
 
-        let total_len = eager_results.len() + outcomes.iter().map(|(r, _)| r.len()).sum::<usize>();
-        let mut results: Vec<String> = Vec::with_capacity(total_len);
-        results.append(&mut eager_results);
-        for (branch_results, branch_searched) in outcomes {
-            searched += branch_searched;
-            results.extend(branch_results);
-        }
-
-        // Branches partition the search space by prefix, so they never produce
-        // duplicates; sort for a deterministic order (parallelized — the result
-        // set can be millions of strings). The dedup is a defensive no-op.
-        pool.install(|| results.par_sort_unstable());
+        // The dedup is a defensive no-op (branches are disjoint by prefix).
         results.dedup();
 
         (results, searched)
@@ -97,7 +118,6 @@ impl ParallelSolver {
     /// deterministic order is required.
     /// Returns `(solutions_written, searched_count)`.
     pub fn solve_to_writer<W: Write + Send>(&self, writer: W) -> std::io::Result<(u64, u64)> {
-        let pool = self.pool();
         let (branches, eager_results, eager_searched) = self.collect_branches();
 
         let writer = Mutex::new(writer);
@@ -109,7 +129,7 @@ impl ParallelSolver {
         }
         let eager_written = esink.finish()?;
 
-        let (branch_written, branch_searched): (u64, u64) = pool.install(|| {
+        let (branch_written, branch_searched): (u64, u64) = self.run_in_pool(|| {
             branches
                 .par_iter()
                 .map(|branch| {
@@ -148,17 +168,19 @@ impl ParallelSolver {
     /// sorted by score descending (ties broken by expression ascending) and the
     /// total searched count.
     pub fn solve_top_n(&self, n: usize) -> (Vec<(f64, String)>, u64) {
-        let pool = self.pool();
         let (branches, eager_results, eager_searched) = self.collect_branches();
 
-        // ---- Pass 1: character-frequency statistics over all solutions. ----
-        let mut base_counts = CountSink::new();
-        for sol in &eager_results {
-            base_counts.accept(sol.as_bytes());
-        }
+        // Both passes share a single pool acquisition. The sequential glue
+        // between them (folding eager solutions, deriving probabilities and the
+        // top-5 mask) is cheap and just runs on the calling thread.
+        let (base_top, searched) = self.run_in_pool(|| {
+            // ---- Pass 1: character-frequency statistics over all solutions. ----
+            let mut base_counts = CountSink::new();
+            for sol in &eager_results {
+                base_counts.accept(sol.as_bytes());
+            }
 
-        let (counts, branch_searched) = pool.install(|| {
-            branches
+            let (counts, branch_searched) = branches
                 .par_iter()
                 .map(|branch| {
                     let mut sink = CountSink::new();
@@ -172,22 +194,20 @@ impl ParallelSolver {
                         a.1 += b.1;
                         a
                     },
-                )
-        });
-        base_counts.merge(&counts);
-        let searched = eager_searched + branch_searched;
+                );
+            base_counts.merge(&counts);
+            let searched = eager_searched + branch_searched;
 
-        let probs = base_counts.probabilities();
-        let top5 = base_counts.top5_mask();
+            let probs = base_counts.probabilities();
+            let top5 = base_counts.top5_mask();
 
-        // ---- Pass 2: score every solution, keep the top n. ----
-        let mut base_top = TopNSink::new(n, probs, top5);
-        for sol in &eager_results {
-            base_top.accept(sol.as_bytes());
-        }
+            // ---- Pass 2: score every solution, keep the top n. ----
+            let mut base_top = TopNSink::new(n, probs, top5);
+            for sol in &eager_results {
+                base_top.accept(sol.as_bytes());
+            }
 
-        let merged = pool.install(|| {
-            branches
+            let merged = branches
                 .par_iter()
                 .map(|branch| {
                     let mut sink = TopNSink::new(n, probs, top5);
@@ -200,9 +220,11 @@ impl ParallelSolver {
                         a.merge(b);
                         a
                     },
-                )
+                );
+            base_top.merge(merged);
+
+            (base_top, searched)
         });
-        base_top.merge(merged);
 
         (base_top.into_sorted(), searched)
     }

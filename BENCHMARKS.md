@@ -16,7 +16,7 @@ All benchmarks run single-threaded in release mode.
 | 4 | 308 | 582 | ~80µs | ~7.3M |
 | 5 | 6,243 | 13,136 | ~1.3ms | ~10M |
 | 6 | 49,952 | 108,487 | ~10ms | ~11M |
-| 7 | 648,055 | 1,533,967 | ~125ms | ~12M |
+| 7 | 648,955 | 1,535,857 | ~125ms | ~12M |
 
 ## Expression Evaluation
 

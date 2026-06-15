@@ -97,7 +97,9 @@ impl Coordinator {
             }
         });
 
-        // Accept worker connections
+        // Accept worker connections. Track each spawned handler thread so we can
+        // wait for in-flight workers to report before reading the final totals.
+        let mut worker_handles = Vec::new();
         loop {
             if next_branch.load(Ordering::SeqCst) as usize >= total_branches {
                 break;
@@ -114,7 +116,7 @@ impl Coordinator {
                     let length_clone = self.solver.length;
                     let gk_clone = self.solver.gk.clone();
 
-                    std::thread::spawn(move || {
+                    worker_handles.push(std::thread::spawn(move || {
                         if let Err(e) = handle_worker(
                             stream,
                             branches_clone,
@@ -126,7 +128,7 @@ impl Coordinator {
                         ) {
                             log::error!("Worker error: {}", e);
                         }
-                    });
+                    }));
                 }
                 Err(_) => {
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -135,6 +137,13 @@ impl Coordinator {
         }
 
         local_handle.join().unwrap();
+        // The accept loop exits once every branch is *assigned*, but remote
+        // workers may still be solving their last branch. Join each handler so
+        // its final `Results` is recorded before we collect — otherwise results
+        // can be non-deterministically lost.
+        for handle in worker_handles {
+            let _ = handle.join();
+        }
 
         let mut results = all_results.lock().unwrap().clone();
         results.sort_unstable();
@@ -256,10 +265,9 @@ impl Worker {
             match msg {
                 CoordinatorMessage::Config { .. } => {}
                 CoordinatorMessage::NoWork | CoordinatorMessage::Shutdown => {
-                    let disc = WorkerMessage::Disconnect {
-                        worker_id: self.worker_id.clone(),
-                    };
-                    send_worker_message(&mut writer, &disc)?;
+                    // The coordinator has stopped serving this worker and is
+                    // closing the connection, so sending `Disconnect` here would
+                    // typically fail with BrokenPipe/ConnectionReset. Exit cleanly.
                     break;
                 }
                 CoordinatorMessage::Work {

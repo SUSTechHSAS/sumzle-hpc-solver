@@ -29,7 +29,7 @@ Single-threaded, release build on a modern CPU:
 | 4 | 308 | 582 | ~80µs |
 | 5 | 6,243 | 13,136 | ~1.3ms |
 | 6 | 49,952 | 108,487 | ~10ms |
-| 7 | 648,055 | 1,533,967 | ~125ms |
+| 7 | 648,955 | 1,535,857 | ~125ms |
 
 Multi-core parallelism provides near-linear speedup with the number of cores.
 
@@ -37,7 +37,7 @@ Multi-core parallelism provides near-linear speedup with the number of cores.
 
 ### Prerequisites
 
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
+- Rust 1.82+ (install via [rustup](https://rustup.rs/))
 - Node.js 18+ and npm (for frontend development)
 
 ### Build Backend

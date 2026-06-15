@@ -337,7 +337,9 @@ fn append_u64_decimal(buf: &mut Vec<u8>, mut n: u64) {
 fn append_i64_decimal(buf: &mut Vec<u8>, n: i64) {
     if n < 0 {
         buf.push(b'-');
-        append_u64_decimal(buf, (-n) as u64);
+        // `unsigned_abs` instead of `-n`: negating i64::MIN overflows and panics
+        // in debug builds, and this path is reachable from public evaluator input.
+        append_u64_decimal(buf, n.unsigned_abs());
     } else {
         append_u64_decimal(buf, n as u64);
     }
@@ -795,7 +797,10 @@ fn is_valid_equation_bytes_impl(expression: &[u8], check_brackets: bool) -> bool
             let Some(lv) = evaluate_expression_bytes(left_side) else {
                 return false;
             };
-            is_integer(lv) && (lv as i64) == (rv as i64)
+            // `is_integer(rv)` rejects a non-finite RHS: a very long numeric
+            // literal parses to ±∞, whose `as i64` cast saturates to
+            // i64::MAX/MIN and could spuriously equal a saturated LHS.
+            is_integer(lv) && is_integer(rv) && (lv as i64) == (rv as i64)
         }
         MainOperator::Greater | MainOperator::GreaterEqual => {
             let left_value = evaluate_expression_bytes(left_side);

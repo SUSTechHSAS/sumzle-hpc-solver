@@ -267,6 +267,34 @@ impl TopNSink {
         }
     }
 
+    /// Whether a solution with this score/expression would be retained, decided
+    /// without allocating. Mirrors `push_scored`'s keep condition exactly so the
+    /// owned `String` is only built for solutions that actually survive — the
+    /// vast majority of candidates in a large search are discarded here for free.
+    #[inline]
+    fn would_keep(&self, score: f64, expr: &[u8]) -> bool {
+        if self.n == 0 {
+            return false;
+        }
+        if self.heap.len() < self.n {
+            return true;
+        }
+        match self.heap.peek() {
+            Some(std::cmp::Reverse(min)) => match score.total_cmp(&min.score) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                // Tie on score: keep only if this expression is lexicographically
+                // smaller than the current minimum's (the smaller expression is
+                // preferred, matching `ScoredSolution`'s eviction order).
+                std::cmp::Ordering::Equal => {
+                    let s = unsafe { std::str::from_utf8_unchecked(expr) };
+                    s < min.expr.as_str()
+                }
+            },
+            None => true,
+        }
+    }
+
     /// Merge another sink's kept solutions into this one (parallel reduction).
     pub fn merge(&mut self, other: TopNSink) {
         for std::cmp::Reverse(item) in other.heap.into_vec() {
@@ -293,10 +321,11 @@ impl TopNSink {
 impl SolutionSink for TopNSink {
     #[inline]
     fn accept(&mut self, expr: &[u8]) {
-        if self.n == 0 {
+        let score = self.score(expr);
+        // Skip the allocation entirely for solutions that cannot make the cut.
+        if !self.would_keep(score, expr) {
             return;
         }
-        let score = self.score(expr);
         let s = unsafe { std::str::from_utf8_unchecked(expr) };
         self.push_scored(ScoredSolution {
             score,
@@ -325,10 +354,16 @@ pub struct JsonlSink<'a, W: std::io::Write> {
 
 impl<'a, W: std::io::Write> JsonlSink<'a, W> {
     pub fn new(writer: &'a std::sync::Mutex<W>) -> Self {
+        // `accept` appends a line and *then* checks `flush_at`, so a flush can
+        // fire with the buffer already past `flush_at`. Keeping `flush_at` one
+        // line below capacity guarantees that trailing append still fits, so
+        // the buffer never reallocates and stays strictly bounded at 256 KiB.
+        // A Sumzle solution line is at most a few dozen bytes — far under 1 KiB.
+        const CAPACITY: usize = 256 * 1024;
         Self {
             writer,
-            buf: Vec::with_capacity(256 * 1024),
-            flush_at: 256 * 1024,
+            buf: Vec::with_capacity(CAPACITY),
+            flush_at: CAPACITY - 1024,
             count: 0,
             error: None,
         }
@@ -503,39 +538,40 @@ fn idx_of(ch: u8) -> usize {
 
 #[inline]
 fn idx_of_char(ch: char) -> Option<usize> {
-    // Preserve the previous behavior for unexpected ASCII symbols: they are
-    // programmer/input errors and should not be silently ignored.
-    if ch.is_ascii() {
-        Some(match ch as u8 {
-            b'0' => 0,
-            b'1' => 1,
-            b'2' => 2,
-            b'3' => 3,
-            b'4' => 4,
-            b'5' => 5,
-            b'6' => 6,
-            b'7' => 7,
-            b'8' => 8,
-            b'9' => 9,
-            b'+' => 10,
-            b'-' => 11,
-            b'*' => 12,
-            b'/' => 13,
-            b'%' => 14,
-            b'^' => 15,
-            b'=' => 16,
-            b'(' => 17,
-            b')' => 18,
-            b'!' => 19,
-            b'[' => 20,
-            b']' => 21,
-            b'>' => 22,
-            b'A' => 23,
-            _ => unreachable!("invalid Sumzle character: {ch}"),
-        })
-    } else {
-        None
+    // Returns `None` for any character outside the Sumzle charset. Guess rows
+    // come from untrusted API/CLI input and may contain arbitrary characters,
+    // so this must never panic: an unrepresentable character simply has no
+    // charset index, and callers drop it when building constraints.
+    if !ch.is_ascii() {
+        return None;
     }
+    Some(match ch as u8 {
+        b'0' => 0,
+        b'1' => 1,
+        b'2' => 2,
+        b'3' => 3,
+        b'4' => 4,
+        b'5' => 5,
+        b'6' => 6,
+        b'7' => 7,
+        b'8' => 8,
+        b'9' => 9,
+        b'+' => 10,
+        b'-' => 11,
+        b'*' => 12,
+        b'/' => 13,
+        b'%' => 14,
+        b'^' => 15,
+        b'=' => 16,
+        b'(' => 17,
+        b')' => 18,
+        b'!' => 19,
+        b'[' => 20,
+        b']' => 21,
+        b'>' => 22,
+        b'A' => 23,
+        _ => return None,
+    })
 }
 
 #[inline]

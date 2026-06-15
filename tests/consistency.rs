@@ -1216,8 +1216,44 @@ fn test_top_n_output_ordering_and_tie_break() {
         let (topk, _) = ps.solve_top_n(k);
         let kept: Vec<String> = topk.into_iter().map(|(_, e)| e).collect();
         assert_eq!(
-            kept, tied[..k],
+            kept,
+            tied[..k],
             "on a boundary score tie, the lexicographically smallest expressions must be kept"
         );
     }
+}
+
+// ---- Regression tests for PR review fixes ----
+
+#[test]
+fn invalid_guess_char_does_not_panic() {
+    // A character outside the Sumzle charset in a guess row must not crash the
+    // constraint-preparation path: `idx_of_char` returns `None` and the char is
+    // dropped, instead of hitting `unreachable!` (which crashed the API/CLI).
+    let row: GuessRow = vec![Tile {
+        char: 'x',
+        state: TileState::Empty,
+    }];
+    let gk = GlobalKnowledge::from_guess_rows(5, &[row]).expect("constraints should build");
+    let solver = Solver::new(5, gk);
+    let (results, _searched) = solver.solve();
+    // The unrepresentable char contributes no constraint, so the full
+    // unconstrained length-5 solution set remains.
+    assert_eq!(results.len(), 6243);
+}
+
+#[test]
+fn floor_value_saturating_below_i64_min_does_not_panic() {
+    // `[0-9^20]` floors to ~-1.2e19, below i64::MIN; the cast saturates and the
+    // decimal formatter must not panic (previously `-i64::MIN` overflowed in
+    // debug builds). Asserting it returns at all is enough to guard the panic.
+    let _ = evaluate_expression("[0-9^20]");
+}
+
+#[test]
+fn non_finite_numeric_rhs_is_rejected() {
+    // A numeric RHS long enough to overflow f64 to infinity must be rejected,
+    // not silently accepted because ±∞ and a large LHS both saturate to i64::MAX.
+    let huge = "9".repeat(320);
+    assert!(!is_valid_equation(&format!("9^20={huge}")));
 }
