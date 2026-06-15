@@ -483,6 +483,48 @@ fn test_parallel_matches_sequential() {
 }
 
 #[test]
+fn test_parallel_matches_sequential_length7() {
+    let gk = empty_gk(7);
+    let solver = Solver::new(7, gk);
+
+    let (seq_results, _seq_searched) = solver.solve();
+
+    let parallel_solver = ParallelSolver::new(solver, Some(2));
+    let (par_results, _par_searched) = parallel_solver.solve();
+
+    let mut seq_sorted = seq_results;
+    seq_sorted.sort();
+    let mut par_sorted = par_results;
+    par_sorted.sort();
+
+    assert_eq!(
+        seq_sorted, par_sorted,
+        "Parallel and sequential results should match for length 7"
+    );
+}
+
+#[test]
+fn test_parallel_matches_sequential_length8() {
+    let gk = empty_gk(8);
+    let solver = Solver::new(8, gk);
+
+    let (seq_results, _seq_searched) = solver.solve();
+
+    let parallel_solver = ParallelSolver::new(solver, Some(4));
+    let (par_results, _par_searched) = parallel_solver.solve();
+
+    let mut seq_sorted = seq_results;
+    seq_sorted.sort();
+    let mut par_sorted = par_results;
+    par_sorted.sort();
+
+    assert_eq!(
+        seq_sorted, par_sorted,
+        "Parallel and sequential results should match for length 8"
+    );
+}
+
+#[test]
 fn test_parallel_with_constraints() {
     let row: GuessRow = vec![
         Tile {
@@ -644,7 +686,7 @@ fn test_solve_length_5() {
 
 #[test]
 fn test_solver_does_not_generate_greater_equal() {
-    for length in 3..=6 {
+    for length in 3..=8 {
         let solver = Solver::new(length, empty_gk(length));
         let (results, _) = solver.solve();
         assert!(
@@ -904,7 +946,7 @@ fn test_factorial_sequential_parallel_consistency() {
 /// Verify that all factorial solutions are valid equations
 #[test]
 fn test_all_factorial_solutions_are_valid() {
-    for length in 4..=6 {
+    for length in 4..=8 {
         let gk = empty_gk(length);
         let solver = Solver::new(length, gk);
         let (results, _searched) = solver.solve();

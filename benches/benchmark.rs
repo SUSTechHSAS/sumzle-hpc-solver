@@ -203,6 +203,21 @@ fn bench_parallel_scaling(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    let mut group = c.benchmark_group("parallel_scaling_length8");
+
+    for threads in [1, 2, 4, 8] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, &t| {
+            let gk = empty_gk(8);
+            b.iter(|| {
+                let solver = Solver::new(8, gk.clone());
+                let ps = ParallelSolver::new(solver, Some(t));
+                ps.solve()
+            });
+        });
+    }
+    group.finish();
 }
 
 fn bench_char_probability(c: &mut Criterion) {
