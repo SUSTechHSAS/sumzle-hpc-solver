@@ -18,7 +18,7 @@ fn empty_gk(length: usize) -> GlobalKnowledge {
 fn bench_sequential_solve(c: &mut Criterion) {
     let mut group = c.benchmark_group("sequential_solve");
 
-    for length in [3, 4, 5, 6, 7] {
+    for length in [3, 4, 5, 6, 7, 8] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             let gk = empty_gk(len);
@@ -34,7 +34,7 @@ fn bench_sequential_solve(c: &mut Criterion) {
 fn bench_parallel_solve(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel_solve");
 
-    for length in [5, 6, 7] {
+    for length in [5, 6, 7, 8] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             let gk = empty_gk(len);

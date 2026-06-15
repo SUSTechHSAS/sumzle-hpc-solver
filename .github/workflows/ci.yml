@@ -226,7 +226,7 @@ jobs:
           # Run CLI benchmarks for all supported lengths and save results
           # in a machine-parseable format: length:solutions:searched:time_raw
           > current-bench-results.txt
-          for len in 3 4 5 6; do
+          for len in 3 4 5 6 7 8; do
             echo "Running CLI benchmark for length $len..."
             OUTPUT=$(./target/release/sumzle-solver bench -l $len 2>&1 || true)
             echo "$OUTPUT" >> cli-benchmark-output.txt
@@ -282,7 +282,7 @@ jobs:
           BASELINE_BIN="$RUNNER_TEMP/baseline-target/release/sumzle-solver"
 
           > baseline-bench-results.txt
-          for len in 3 4 5 6; do
+          for len in 3 4 5 6 7 8; do
             echo "Running baseline CLI benchmark for length $len..."
             OUTPUT=$($BASELINE_BIN bench -l $len 2>&1 || true)
             echo "$OUTPUT" >> baseline-benchmark-output.txt
@@ -395,7 +395,7 @@ jobs:
           has_mismatch = False
           has_regression = False
 
-          for length in ["3", "4", "5", "6"]:
+          for length in ["3", "4", "5", "6", "7", "8"]:
               cur = current.get(length)
               base = baseline.get(length)
 

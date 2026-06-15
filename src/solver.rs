@@ -218,6 +218,7 @@ fn unconstrained_solution_capacity(length: usize) -> usize {
         5 => 6_500,
         6 => 50_000,
         7 => 650_000,
+        8 => 8_000_000,
         _ => 0,
     }
 }
