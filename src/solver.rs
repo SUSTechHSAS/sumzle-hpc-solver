@@ -713,6 +713,22 @@ fn complete_eq_rhs(
     }
 }
 
+/// A captured search node at a fixed prefix depth, used to distribute work
+/// across threads at a finer granularity than the ~11 top-level branches.
+/// It records everything needed to resume `recursive_search` from `prefix.len()`.
+#[derive(Clone)]
+pub struct Branch {
+    prefix: Vec<u8>,
+    main_op: Option<u8>,
+    main_op_index: usize,
+    main_lhs_value: Option<i64>,
+    floor_ctx: FloorContext,
+    bracket_stack: Vec<u8>,
+    num_len: u8,
+    num_value: i64,
+    num_leading_zero: bool,
+}
+
 /// The main solver struct
 pub struct Solver {
     pub length: usize,
@@ -741,6 +757,7 @@ impl Solver {
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut no_branches: Vec<Branch> = Vec::new();
 
         self.recursive_search(
             0,
@@ -759,6 +776,8 @@ impl Solver {
             false,
             &mut results,
             &mut searched_count,
+            usize::MAX,
+            &mut no_branches,
         );
 
         (results, searched_count)
@@ -783,7 +802,26 @@ impl Solver {
         current_num_leading_zero: bool,
         results: &mut Vec<String>,
         searched_count: &mut u64,
+        // Branch-collection cutoff: when `index == branch_depth`, snapshot the
+        // current node into `branches` and stop. Normal solves pass
+        // `usize::MAX`, so this is a single never-taken comparison per call.
+        branch_depth: usize,
+        branches: &mut Vec<Branch>,
     ) {
+        if index == branch_depth {
+            branches.push(Branch {
+                prefix: expr[..index].to_vec(),
+                main_op: main_op_so_far,
+                main_op_index,
+                main_lhs_value,
+                floor_ctx,
+                bracket_stack: bracket_stack[..stack_len].to_vec(),
+                num_len: current_num_len,
+                num_value: current_num_value,
+                num_leading_zero: current_num_leading_zero,
+            });
+            return;
+        }
         let remaining_slots = self.length - index;
         if !prepared.counts_can_still_succeed(char_counts, remaining_slots) {
             return;
@@ -945,6 +983,19 @@ impl Solver {
                 (0, 0, false)
             };
 
+            // Bracket stack is a shared scratch buffer reused across sibling
+            // branches. A push writes bracket_stack[stack_len]; a deeper branch
+            // that later closes this bracket and opens a different one can
+            // overwrite this slot, so we must save the previous occupant and
+            // restore it on backtrack — otherwise a sibling explored afterwards
+            // (e.g. the `0`/`(`/`[` candidates, which come last) would read a
+            // stale bracket type and wrongly reject a matching close bracket.
+            let pushed_bracket = matches!(ch, b'(' | b'[');
+            let saved_bracket_slot = if pushed_bracket {
+                bracket_stack[stack_len]
+            } else {
+                NO_CHAR
+            };
             let next_stack_len = match ch {
                 b'(' | b'[' => {
                     bracket_stack[stack_len] = ch;
@@ -975,7 +1026,13 @@ impl Solver {
                 next_num_leading_zero,
                 results,
                 searched_count,
+                branch_depth,
+                branches,
             );
+
+            if pushed_bracket {
+                bracket_stack[stack_len] = saved_bracket_slot;
+            }
 
             char_counts[ch_idx] -= 1;
             expr[index] = NO_CHAR;
@@ -1051,6 +1108,7 @@ impl Solver {
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut no_branches: Vec<Branch> = Vec::new();
 
         expr[0] = first;
         char_counts[idx_of(first)] += 1;
@@ -1083,6 +1141,88 @@ impl Solver {
             first == b'0',
             &mut results,
             &mut searched_count,
+            usize::MAX,
+            &mut no_branches,
+        );
+
+        (results, searched_count)
+    }
+
+    /// Traverse the search tree, recording every node reached at `depth` as a
+    /// `Branch` for parallel execution. Solutions whose main operator lands
+    /// before `depth` (the directly-enumerated `=` equations) are found here
+    /// and returned alongside, since those paths terminate before `depth`.
+    ///
+    /// Returns `(branches, eager_results, eager_searched)`.
+    pub fn collect_branches_at_depth(&self, depth: usize) -> (Vec<Branch>, Vec<String>, u64) {
+        let mut branches: Vec<Branch> = Vec::new();
+        let mut results: Vec<String> = Vec::new();
+        let mut searched_count: u64 = 0;
+        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut char_counts = [0u8; CHARSET_LEN];
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+
+        self.recursive_search(
+            0,
+            &mut expr,
+            None,
+            None,
+            0,
+            None,
+            &mut char_counts,
+            FloorContext::new(),
+            &mut bracket_stack,
+            0,
+            &self.prepared,
+            0,
+            0,
+            false,
+            &mut results,
+            &mut searched_count,
+            depth,
+            &mut branches,
+        );
+
+        (branches, results, searched_count)
+    }
+
+    /// Resume the search from a `Branch` captured by `collect_branches_at_depth`,
+    /// reconstructing the exact state `recursive_search` had at that node.
+    pub fn solve_from_prefix(&self, branch: &Branch) -> (Vec<String>, u64) {
+        let depth = branch.prefix.len();
+        let mut results: Vec<String> = Vec::new();
+        let mut searched_count: u64 = 0;
+        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+        expr[..depth].copy_from_slice(&branch.prefix);
+        let mut char_counts = [0u8; CHARSET_LEN];
+        for &ch in &branch.prefix {
+            char_counts[idx_of(ch)] += 1;
+        }
+        let stack_len = branch.bracket_stack.len();
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
+        let prev_char = branch.prefix.last().copied();
+        let mut no_branches: Vec<Branch> = Vec::new();
+
+        self.recursive_search(
+            depth,
+            &mut expr,
+            prev_char,
+            branch.main_op,
+            branch.main_op_index,
+            branch.main_lhs_value,
+            &mut char_counts,
+            branch.floor_ctx,
+            &mut bracket_stack,
+            stack_len,
+            &self.prepared,
+            branch.num_len,
+            branch.num_value,
+            branch.num_leading_zero,
+            &mut results,
+            &mut searched_count,
+            usize::MAX,
+            &mut no_branches,
         );
 
         (results, searched_count)
