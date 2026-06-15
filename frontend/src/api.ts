@@ -10,12 +10,25 @@ import type {
 
 const API_BASE = '/api';
 
+export interface SolveOptions {
+  /** Number of threads (0 = auto, 1 = single-threaded). Default: 0 */
+  threads?: number;
+  /** Return only the top-N most probable solutions (0 = return all). Default: 0 */
+  top?: number;
+}
+
 export async function solvePuzzle(
   length: number,
   rows: SolveRequest['rows'],
-  threads = 0,
+  options: SolveOptions = {},
 ): Promise<SolveResponse> {
-  const res = await fetch(`${API_BASE}/solve?threads=${threads}`, {
+  const threads = options.threads ?? 0;
+  const top = options.top ?? 0;
+  const params = new URLSearchParams({ threads: String(threads) });
+  if (top > 0) {
+    params.set('top', String(top));
+  }
+  const res = await fetch(`${API_BASE}/solve?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ length, rows }),
@@ -57,6 +70,9 @@ export function downloadResults(
         `Time elapsed: ${data.stats.elapsed_ms}ms`,
         `Search speed: ${data.stats.speed} expr/s`,
       ];
+      if (data.top > 0) {
+        lines.push(`Top-N: ${data.top}`);
+      }
       if (data.recommended) {
         lines.push(`Recommended: ${data.recommended}`);
       }

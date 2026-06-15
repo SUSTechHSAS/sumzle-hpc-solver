@@ -48,8 +48,9 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
     );
   }
 
-  const { solutions, stats, char_probabilities, recommended } = data;
+  const { solutions, stats, char_probabilities, recommended, top } = data;
   const truncated = solutions.length > MAX_DISPLAY_SOLUTIONS;
+  const isTopN = top > 0;
 
   return (
     <div className="results-section" data-testid="results-section">
@@ -78,6 +79,14 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
       {/* Recommended solution */}
       <RecommendedSolution solution={recommended} />
 
+      {/* Top-N badge */}
+      {isTopN && (
+        <div className="top-n-badge">
+          <span className="top-n-icon">🏆</span>
+          <span>Top-{top} 模式：仅显示概率最高的 {top} 个解</span>
+        </div>
+      )}
+
       {/* Character probabilities */}
       <CharacterProbability probabilities={char_probabilities} />
 
@@ -87,6 +96,7 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
           <h3 className="section-title">📜 结果列表</h3>
           <span className="results-count">
             找到 <strong>{stats.found_count.toLocaleString()}</strong> 个解
+            {isTopN && <span className="top-n-notice"> (Top-{top})</span>}
             {truncated && <span className="truncation-notice"> (仅显示前{MAX_DISPLAY_SOLUTIONS})</span>}
           </span>
         </div>

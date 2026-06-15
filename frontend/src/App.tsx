@@ -11,6 +11,8 @@ import EquationValidator from './components/EquationValidator';
 import './App.css';
 
 const DEFAULT_LENGTH = 5;
+const DEFAULT_THREADS = 0;
+const DEFAULT_TOP = 0;
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
@@ -20,6 +22,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedTile, setSelectedTile] = useState<{ row: number; col: number } | null>(null);
+  const [threads, setThreads] = useState(DEFAULT_THREADS);
+  const [topN, setTopN] = useState(DEFAULT_TOP);
 
   const handleLengthChange = useCallback((newLength: number) => {
     const clamped = Math.min(8, Math.max(3, newLength));
@@ -114,7 +118,7 @@ export default function App() {
     setError(null);
     setSolutions(null);
     try {
-      const res = await solvePuzzle(length, rows);
+      const res = await solvePuzzle(length, rows, { threads, top: topN });
       if (generation === solveGenerationRef.current) {
         setSolutions(res);
       }
@@ -127,7 +131,7 @@ export default function App() {
         setLoading(false);
       }
     }
-  }, [length, rows]);
+  }, [length, rows, threads, topN]);
 
   const handleDownload = useCallback(
     (format: DownloadFormat) => {
@@ -185,6 +189,32 @@ export default function App() {
                     className="length-input"
                   />
                 </div>
+                <div className="length-control">
+                  <label htmlFor="threads-input">线程数:</label>
+                  <input
+                    id="threads-input"
+                    type="number"
+                    min={0}
+                    max={256}
+                    value={threads}
+                    onChange={(e) => setThreads(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                    className="length-input"
+                    title="0 = 自动检测核心数"
+                  />
+                </div>
+                <div className="length-control">
+                  <label htmlFor="top-n-input">Top-N:</label>
+                  <input
+                    id="top-n-input"
+                    type="number"
+                    min={0}
+                    max={10000}
+                    value={topN}
+                    onChange={(e) => setTopN(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                    className="length-input"
+                    title="0 = 返回所有解，大于0则仅返回概率最高的N个解"
+                  />
+                </div>
                 <div className="row-buttons">
                   <button className="btn btn-secondary" onClick={addRow}>
                     + 添加行
@@ -237,6 +267,8 @@ export default function App() {
                   <li>使用虚拟键盘或直接输入字符</li>
                   <li>绿色 = 正确位置，黄色 = 存在但错位，灰色 = 不存在</li>
                   <li>支持运算符：+ - × ÷ % ^ ! A ( ) [ ] = &gt;</li>
+                  <li>线程数：0 = 自动检测核心数，1 = 单线程</li>
+                  <li>Top-N：0 = 返回所有解，&gt;0 仅返回概率最高的N个解</li>
                 </ul>
               </div>
             </div>

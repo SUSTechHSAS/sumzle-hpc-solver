@@ -18,6 +18,16 @@ describe('App', () => {
     expect(screen.getByLabelText('表达式长度:')).toBeInTheDocument();
   });
 
+  it('renders the threads input', () => {
+    render(<App />);
+    expect(screen.getByLabelText('线程数:')).toBeInTheDocument();
+  });
+
+  it('renders the top-N input', () => {
+    render(<App />);
+    expect(screen.getByLabelText('Top-N:')).toBeInTheDocument();
+  });
+
   it('renders add row and clear buttons', () => {
     render(<App />);
     expect(screen.getByText('+ 添加行')).toBeInTheDocument();
@@ -55,8 +65,18 @@ describe('App', () => {
     expect(screen.getByTitle('切换到暗色模式')).toBeInTheDocument();
   });
 
-  it('renders the help section', () => {
+  it('renders the help section with threads and top-N tips', () => {
     render(<App />);
     expect(screen.getByText('💡 操作提示')).toBeInTheDocument();
+    expect(screen.getByText(/线程数：0/)).toBeInTheDocument();
+    expect(screen.getByText(/Top-N：0/)).toBeInTheDocument();
+  });
+
+  it('defaults threads and top-N inputs to 0', () => {
+    render(<App />);
+    const threadsInput = screen.getByLabelText('线程数:') as HTMLInputElement;
+    const topNInput = screen.getByLabelText('Top-N:') as HTMLInputElement;
+    expect(threadsInput.value).toBe('0');
+    expect(topNInput.value).toBe('0');
   });
 });

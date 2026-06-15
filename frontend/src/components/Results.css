@@ -245,6 +245,31 @@
   cursor: not-allowed;
 }
 
+/* ===== Top-N Badge ===== */
+.top-n-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, #ffc107 12%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, #ffc107 40%, var(--color-border));
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.top-n-icon {
+  font-size: 1.1rem;
+}
+
+.top-n-notice {
+  color: #e67e00;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+
 @media (max-width: 768px) {
   .stats-grid {
     grid-template-columns: 1fr 1fr;

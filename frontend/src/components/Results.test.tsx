@@ -30,6 +30,7 @@ describe('Results', () => {
         { char: '1', display: '1', count: 1, probability: 50 },
       ],
       recommended: '1+2=3',
+      top: 0,
     };
     const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -49,6 +50,7 @@ describe('Results', () => {
         { char: '*', display: '×', count: 1, probability: 100 },
       ],
       recommended: '1+2=3',
+      top: 0,
     };
     const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -62,6 +64,7 @@ describe('Results', () => {
       stats: { searched_count: 1000, found_count: 2, elapsed_ms: 50, speed: 20000 },
       char_probabilities: [],
       recommended: '1+2=3',
+      top: 0,
     };
     const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -75,6 +78,7 @@ describe('Results', () => {
       stats: { searched_count: 100, found_count: 0, elapsed_ms: 5, speed: 20000 },
       char_probabilities: [],
       recommended: null,
+      top: 0,
     };
     render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -87,11 +91,39 @@ describe('Results', () => {
       stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
       char_probabilities: [],
       recommended: '1+2=3',
+      top: 0,
     };
     render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     expect(screen.getByText('JSON')).toBeInTheDocument();
     expect(screen.getByText('CSV')).toBeInTheDocument();
     expect(screen.getByText('TXT')).toBeInTheDocument();
+  });
+
+  it('shows top-N badge when top is greater than 0', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3', '2+3=5'],
+      stats: { searched_count: 1000, found_count: 2, elapsed_ms: 50, speed: 20000 },
+      char_probabilities: [],
+      recommended: '1+2=3',
+      top: 5,
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
+
+    expect(container.querySelector('.top-n-badge')).toBeInTheDocument();
+    expect(screen.getAllByText(/Top-5/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('does not show top-N badge when top is 0', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3'],
+      stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [],
+      recommended: '1+2=3',
+      top: 0,
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
+
+    expect(container.querySelector('.top-n-badge')).not.toBeInTheDocument();
   });
 });

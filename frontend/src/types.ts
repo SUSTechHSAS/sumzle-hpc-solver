@@ -43,6 +43,8 @@ export interface SolveResponse {
   stats: SolverStats;
   char_probabilities: CharProbability[];
   recommended: string | null;
+  /** The top-N value used (0 means all solutions were returned) */
+  top: number;
 }
 
 /** Request body for POST /api/validate */

@@ -86,6 +86,10 @@ pub struct SolveQuery {
     /// Number of threads (0 = auto, 1 = single-threaded)
     #[serde(default)]
     pub threads: usize,
+    /// Return only the top-N most probable solutions (0 = return all).
+    /// Uses a memory-bounded two-pass algorithm when N > 0.
+    #[serde(default)]
+    pub top: usize,
 }
 
 /// Character probability entry
@@ -104,7 +108,7 @@ pub struct CharProbability {
 /// Response body for the solve endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveResponse {
-    /// All valid solutions found
+    /// All valid solutions found (or top-N if `top` was requested)
     pub solutions: Vec<String>,
     /// Solver statistics
     pub stats: SolverStats,
@@ -112,6 +116,9 @@ pub struct SolveResponse {
     pub char_probabilities: Vec<CharProbability>,
     /// Recommended solution (highest probability score)
     pub recommended: Option<String>,
+    /// The top-N value used (0 means all solutions were returned)
+    #[serde(default)]
+    pub top: usize,
 }
 
 /// Query parameters for the download endpoint
@@ -142,6 +149,9 @@ pub struct DownloadRequest {
     /// Recommended solution
     #[serde(default)]
     pub recommended: Option<String>,
+    /// The top-N value used (0 means all solutions were returned)
+    #[serde(default)]
+    pub top: usize,
 }
 
 /// Request body for the validate endpoint
@@ -326,6 +336,8 @@ async fn solve_handler(
         query.threads
     };
 
+    let top = query.top;
+
     // Convert API rows to internal GuessRow format
     let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
 
@@ -348,7 +360,47 @@ async fn solve_handler(
     let start = std::time::Instant::now();
 
     let (results, searched_count) = if threads == 1 {
-        solver.solve()
+        if top > 0 {
+            // Single-threaded top-N: solve fully, then truncate
+            let (all_solutions, searched) = solver.solve();
+            let char_probs = compute_char_probabilities(&all_solutions);
+            let _recommended_opt = compute_recommended(&all_solutions, &char_probs);
+            let prob_map: std::collections::HashMap<char, f64> = char_probs
+                .iter()
+                .filter_map(|p| p.char.chars().next().map(|c| (c, p.probability)))
+                .collect();
+            let top_chars: std::collections::HashSet<char> = char_probs
+                .iter()
+                .take(5)
+                .filter_map(|p| p.char.chars().next())
+                .collect();
+            let mut scored: Vec<(f64, String)> = all_solutions
+                .iter()
+                .map(|sol| {
+                    let mut score = 0.0f64;
+                    let mut seen = std::collections::HashSet::new();
+                    for ch in sol.chars() {
+                        if seen.insert(ch) {
+                            score += prob_map.get(&ch).copied().unwrap_or(0.0);
+                            if top_chars.contains(&ch) {
+                                score += 50.0;
+                            }
+                        }
+                    }
+                    (score, sol.clone())
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.partial_cmp(a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            let truncated: Vec<String> =
+                scored.into_iter().take(top).map(|(_, s)| s).collect();
+            (truncated, searched)
+        } else {
+            solver.solve()
+        }
     } else {
         let num_threads = if threads == 0 {
             num_cpus::get()
@@ -356,7 +408,13 @@ async fn solve_handler(
             threads
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        parallel_solver.solve()
+        if top > 0 {
+            let (scored, searched) = parallel_solver.solve_top_n(top);
+            let results: Vec<String> = scored.into_iter().map(|(_, s)| s).collect();
+            (results, searched)
+        } else {
+            parallel_solver.solve()
+        }
     };
 
     let elapsed = start.elapsed();
@@ -364,7 +422,8 @@ async fn solve_handler(
     let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
     let found_count = results.len();
 
-    // Compute character probabilities and recommended solution
+    // Compute character probabilities and recommended solution.
+    // For top-N mode, char_probabilities are computed from the top-N results only.
     let char_probabilities = compute_char_probabilities(&results);
     let recommended = compute_recommended(&results, &char_probabilities);
 
@@ -378,6 +437,7 @@ async fn solve_handler(
         },
         char_probabilities,
         recommended,
+        top,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -429,6 +489,9 @@ async fn download_handler(
             let _ = writeln!(txt, "Expressions searched: {}", searched_count);
             let _ = writeln!(txt, "Time elapsed: {}ms", elapsed_ms);
             let _ = writeln!(txt, "Search speed: {} expr/s", speed);
+            if body.top > 0 {
+                let _ = writeln!(txt, "Top-N: {}", body.top);
+            }
             if let Some(ref rec) = body.recommended {
                 let _ = writeln!(txt, "Recommended: {}", rec);
             }
@@ -460,6 +523,7 @@ async fn download_handler(
                 stats: body.stats,
                 char_probabilities: body.char_probabilities,
                 recommended: body.recommended,
+                top: body.top,
             };
             let json_bytes = serde_json::to_string_pretty(&response).unwrap_or_default();
             let filename = format!("sumzle_solutions_{}.json", timestamp);
@@ -674,6 +738,7 @@ mod tests {
         // Check new fields
         assert!(!resp.char_probabilities.is_empty());
         assert!(resp.recommended.is_some());
+        assert_eq!(resp.top, 0);
     }
 
     #[tokio::test]
@@ -755,6 +820,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_solve_top_n() {
+        let mut app = test_app();
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        // Request top-3 solutions
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=3",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        // Should return at most 3 solutions
+        assert!(resp.solutions.len() <= 3);
+        assert!(resp.top == 3);
+        // Recommended should be the first solution (highest score)
+        if let Some(ref rec) = resp.recommended {
+            assert!(
+                resp.solutions.contains(rec),
+                "Recommended solution '{}' should be in solutions list",
+                rec
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_parallel() {
+        let mut app = test_app();
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        // Request top-5 solutions with parallel solver
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=0&top=5",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.solutions.len() <= 5);
+        assert!(resp.top == 5);
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_zero_returns_all() {
+        let mut app = test_app();
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        // top=0 should return all solutions (same as no top parameter)
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=0",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.solutions.len() > 0);
+        assert_eq!(resp.top, 0);
+    }
+
+    #[tokio::test]
     async fn test_download_json() {
         let mut app = test_app();
         let req_body = DownloadRequest {
@@ -767,6 +904,7 @@ mod tests {
             },
             char_probabilities: vec![],
             recommended: Some("1+2=3".to_string()),
+            top: 0,
         };
         let (status, body) = send_request(
             &mut app,
@@ -793,6 +931,7 @@ mod tests {
             },
             char_probabilities: vec![],
             recommended: None,
+            top: 0,
         };
         let (status, body) = send_request(
             &mut app,
@@ -820,6 +959,7 @@ mod tests {
             },
             char_probabilities: vec![],
             recommended: Some("1+2=3".to_string()),
+            top: 0,
         };
         let (status, body) = send_request(
             &mut app,
@@ -833,6 +973,33 @@ mod tests {
         assert!(txt.contains("Sumzle Solver Results"));
         assert!(txt.contains("Solutions found: 1"));
         assert!(txt.contains("Recommended: 1+2=3"));
+    }
+
+    #[tokio::test]
+    async fn test_download_txt_with_top_n() {
+        let mut app = test_app();
+        let req_body = DownloadRequest {
+            solutions: vec!["1+2=3".to_string(), "3+2=5".to_string()],
+            stats: SolverStats {
+                searched_count: 500,
+                found_count: 2,
+                elapsed_ms: 10,
+                speed: 50000,
+            },
+            char_probabilities: vec![],
+            recommended: Some("1+2=3".to_string()),
+            top: 10,
+        };
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/download?format=txt",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let txt = String::from_utf8(body).unwrap();
+        assert!(txt.contains("Top-N: 10"));
     }
 
     #[tokio::test]
