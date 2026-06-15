@@ -107,7 +107,7 @@ impl ParallelSolver {
         for sol in &eager_results {
             esink.accept(sol.as_bytes());
         }
-        let eager_written = esink.finish();
+        let eager_written = esink.finish()?;
 
         let (branch_written, branch_searched): (u64, u64) = pool.install(|| {
             branches
@@ -115,12 +115,20 @@ impl ParallelSolver {
                 .map(|branch| {
                     let mut sink = JsonlSink::new(&writer);
                     let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
-                    (sink.finish(), searched)
+                    sink.finish().map(|written| (written, searched))
                 })
-                .reduce(|| (0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1))
-        });
+                .reduce(
+                    || Ok((0u64, 0u64)),
+                    |a, b| match (a, b) {
+                        (Ok((wa, sa)), Ok((wb, sb))) => Ok((wa + wb, sa + sb)),
+                        (Err(e), _) | (_, Err(e)) => Err(e),
+                    },
+                )
+        })?;
 
-        let mut guard = writer.lock().expect("solution writer poisoned");
+        let mut guard = writer
+            .lock()
+            .map_err(|_| std::io::Error::other("solution writer mutex poisoned"))?;
         guard.flush()?;
 
         Ok((

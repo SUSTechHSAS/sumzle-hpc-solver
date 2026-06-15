@@ -38,6 +38,24 @@ const fn build_char_index() -> [u8; 256] {
 
 const CHAR_INDEX: [u8; 256] = build_char_index();
 
+/// Inverse of [`CHAR_INDEX`]: maps a charset index back to its ASCII byte.
+/// Used to tie-break by character (ASCII) value so the top-N scoring matches
+/// `server::compute_char_probabilities`, which orders ties by `char`.
+const fn build_index_to_char() -> [u8; CHARSET_LEN] {
+    let mut table = [0u8; CHARSET_LEN];
+    let mut b = 0usize;
+    while b < 256 {
+        let idx = CHAR_INDEX[b];
+        if idx != INVALID_INDEX {
+            table[idx as usize] = b as u8;
+        }
+        b += 1;
+    }
+    table
+}
+
+const CHAR_FROM_INDEX: [u8; CHARSET_LEN] = build_index_to_char();
+
 const FLOOR_NO_SLASH: &[u8] = b"0123456789/";
 const FLOOR_WITH_SLASH: &[u8] = b"0123456789]";
 const AFTER_EQ_START: &[u8] = b"-0123456789";
@@ -131,8 +149,10 @@ impl CountSink {
     }
 
     /// Mask of the five most probable characters, ranked by probability
-    /// descending then charset index ascending — matching the `take(5)` over
-    /// the sorted list in `server::compute_recommended`.
+    /// descending then character (ASCII) ascending — matching the `take(5)`
+    /// over the list sorted by `server::compute_char_probabilities`, which
+    /// breaks ties by `char`. (Charset-index order is *not* ASCII order, so the
+    /// tie-break must use the actual byte value to stay consistent.)
     pub fn top5_mask(&self) -> u32 {
         let mut order: Vec<usize> = (0..CHARSET_LEN)
             .filter(|&i| self.char_counts[i] > 0)
@@ -140,7 +160,7 @@ impl CountSink {
         order.sort_by(|&a, &b| {
             self.char_counts[b]
                 .cmp(&self.char_counts[a])
-                .then(a.cmp(&b))
+                .then_with(|| CHAR_FROM_INDEX[a].cmp(&CHAR_FROM_INDEX[b]))
         });
         let mut mask = 0u32;
         for &i in order.iter().take(5) {
@@ -177,8 +197,13 @@ pub struct TopNSink {
     heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredSolution>>,
 }
 
-/// A solution paired with its score, ordered by (score, expr) for a total,
-/// deterministic ordering (NaN is impossible here — scores are finite sums).
+/// A solution paired with its score. The `Ord` impl encodes *keep priority*
+/// for the bounded min-heap: a solution is "greater" (more worth keeping) when
+/// it has a higher score, or — on a tie — a lexicographically smaller
+/// expression. The min-heap therefore evicts the lowest-scoring solution and,
+/// among equal scores, the lexicographically largest one. The kept set is thus
+/// the top `n` under "score descending, expression ascending", as documented
+/// for `into_sorted`. (NaN is impossible — scores are finite sums.)
 #[derive(Clone, PartialEq)]
 struct ScoredSolution {
     score: f64,
@@ -191,7 +216,9 @@ impl Ord for ScoredSolution {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.score
             .total_cmp(&other.score)
-            .then_with(|| self.expr.cmp(&other.expr))
+            // Tie: the smaller expression ranks higher (kept in preference to a
+            // larger one), so the min-heap evicts the larger expression first.
+            .then_with(|| other.expr.cmp(&self.expr))
     }
 }
 
@@ -252,7 +279,13 @@ impl TopNSink {
     pub fn into_sorted(self) -> Vec<(f64, String)> {
         let mut items: Vec<ScoredSolution> =
             self.heap.into_vec().into_iter().map(|r| r.0).collect();
-        items.sort_by(|a, b| b.cmp(a));
+        // Sort explicitly by (score desc, expr asc) rather than relying on the
+        // `Ord` impl, whose tie-break is reversed for the heap's eviction logic.
+        items.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.expr.cmp(&b.expr))
+        });
         items.into_iter().map(|s| (s.score, s.expr)).collect()
     }
 }
@@ -276,11 +309,18 @@ impl SolutionSink for TopNSink {
 /// line) through a local byte buffer, flushing to the shared writer only when
 /// the buffer fills. This keeps memory bounded and limits lock contention to
 /// one acquisition per buffer flush rather than one per solution.
+///
+/// Write errors are captured rather than panicked on (the crate builds with
+/// `panic = "abort"`, so a panic mid-search would kill the process): the first
+/// error is stored and surfaced by [`finish`](Self::finish), and further
+/// solutions are dropped so the buffer cannot grow without bound after a
+/// failure (e.g. a full disk).
 pub struct JsonlSink<'a, W: std::io::Write> {
     writer: &'a std::sync::Mutex<W>,
     buf: Vec<u8>,
     flush_at: usize,
     count: u64,
+    error: Option<std::io::Error>,
 }
 
 impl<'a, W: std::io::Write> JsonlSink<'a, W> {
@@ -290,31 +330,47 @@ impl<'a, W: std::io::Write> JsonlSink<'a, W> {
             buf: Vec::with_capacity(256 * 1024),
             flush_at: 256 * 1024,
             count: 0,
+            error: None,
         }
     }
 
     fn flush_buf(&mut self) {
-        if self.buf.is_empty() {
+        if self.error.is_some() || self.buf.is_empty() {
             return;
         }
-        let mut guard = self.writer.lock().expect("solution writer poisoned");
-        guard
-            .write_all(&self.buf)
-            .expect("failed writing solutions");
+        match self.writer.lock() {
+            Ok(mut guard) => {
+                if let Err(e) = guard.write_all(&self.buf) {
+                    self.error = Some(e);
+                }
+            }
+            Err(_) => {
+                self.error = Some(std::io::Error::other("solution writer mutex poisoned"));
+            }
+        }
         self.buf.clear();
     }
 
     /// Flush any remaining buffered bytes and return the number of solutions
-    /// written by this sink. Call once after the search ends.
-    pub fn finish(mut self) -> u64 {
+    /// written by this sink, or the first write error encountered. Call once
+    /// after the search ends.
+    pub fn finish(mut self) -> std::io::Result<u64> {
         self.flush_buf();
-        self.count
+        match self.error.take() {
+            Some(e) => Err(e),
+            None => Ok(self.count),
+        }
     }
 }
 
 impl<W: std::io::Write> SolutionSink for JsonlSink<'_, W> {
     #[inline]
     fn accept(&mut self, expr: &[u8]) {
+        // Once a write has failed, stop buffering so memory stays bounded; the
+        // error is reported by `finish`.
+        if self.error.is_some() {
+            return;
+        }
         // No Sumzle charset character requires JSON string escaping, so the
         // expression can be embedded verbatim between quotes.
         self.buf.extend_from_slice(b"{\"solution\":\"");

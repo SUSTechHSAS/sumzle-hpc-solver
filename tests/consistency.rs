@@ -1125,3 +1125,57 @@ fn test_top_n_best_matches_compute_recommended() {
         "top-1 must equal the maximum score over the full set"
     );
 }
+
+#[test]
+fn test_top_n_output_ordering_and_tie_break() {
+    // The documented contract: results are sorted by score descending, ties
+    // broken by expression ascending; and when a score tie straddles the N
+    // boundary, the lexicographically smaller expressions are the ones kept.
+    let length = 6;
+    let solver = Solver::new(length, empty_gk(length));
+    let ps = ParallelSolver::new(solver, Some(4));
+    let (scored, _) = ps.solve_top_n(50);
+
+    // Ordering: (score desc, expr asc).
+    for w in scored.windows(2) {
+        let (sa, ea) = (&w[0].0, &w[0].1);
+        let (sb, eb) = (&w[1].0, &w[1].1);
+        assert!(
+            sa > sb || (sa == sb && ea < eb),
+            "top-N must be ordered by score desc then expr asc: ({sa},{ea}) before ({sb},{eb})"
+        );
+    }
+
+    // Boundary keep-behavior: take a score that has more occurrences than the
+    // slots we allow, and confirm we keep the lexicographically smallest exprs.
+    let (full_scored, _) = {
+        let solver = Solver::new(length, empty_gk(length));
+        let ps = ParallelSolver::new(solver, Some(4));
+        ps.solve_top_n(usize::MAX >> 8) // effectively "all", bounded sanity
+    };
+    // Group all solutions by score; find the maximum score's tie group.
+    let max_score = full_scored
+        .iter()
+        .map(|(s, _)| *s)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut tied: Vec<String> = full_scored
+        .iter()
+        .filter(|(s, _)| *s == max_score)
+        .map(|(_, e)| e.clone())
+        .collect();
+    tied.sort();
+
+    if tied.len() >= 2 {
+        // Ask for exactly one fewer than the tie-group size at the top: the
+        // kept set must be the smallest exprs of the group.
+        let k = tied.len() - 1;
+        let solver = Solver::new(length, empty_gk(length));
+        let ps = ParallelSolver::new(solver, Some(4));
+        let (topk, _) = ps.solve_top_n(k);
+        let kept: Vec<String> = topk.into_iter().map(|(_, e)| e).collect();
+        assert_eq!(
+            kept, tied[..k],
+            "on a boundary score tie, the lexicographically smallest expressions must be kept"
+        );
+    }
+}
