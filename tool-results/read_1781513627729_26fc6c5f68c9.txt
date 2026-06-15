@@ -1,0 +1,1591 @@
+     1→//! Brute-force search solver with pruning for Sumzle
+     2→
+     3→use crate::evaluator::{evaluate_expression_solver_bytes, is_integer};
+     4→use crate::types::*;
+     5→
+     6→const CHARSET_LEN: usize = 24;
+     7→const NO_CHAR: u8 = 0;
+     8→const INVALID_INDEX: u8 = u8::MAX;
+     9→
+    10→const fn build_char_index() -> [u8; 256] {
+    11→    let mut table = [INVALID_INDEX; 256];
+    12→    table[b'0' as usize] = 0;
+    13→    table[b'1' as usize] = 1;
+    14→    table[b'2' as usize] = 2;
+    15→    table[b'3' as usize] = 3;
+    16→    table[b'4' as usize] = 4;
+    17→    table[b'5' as usize] = 5;
+    18→    table[b'6' as usize] = 6;
+    19→    table[b'7' as usize] = 7;
+    20→    table[b'8' as usize] = 8;
+    21→    table[b'9' as usize] = 9;
+    22→    table[b'+' as usize] = 10;
+    23→    table[b'-' as usize] = 11;
+    24→    table[b'*' as usize] = 12;
+    25→    table[b'/' as usize] = 13;
+    26→    table[b'%' as usize] = 14;
+    27→    table[b'^' as usize] = 15;
+    28→    table[b'=' as usize] = 16;
+    29→    table[b'(' as usize] = 17;
+    30→    table[b')' as usize] = 18;
+    31→    table[b'!' as usize] = 19;
+    32→    table[b'[' as usize] = 20;
+    33→    table[b']' as usize] = 21;
+    34→    table[b'>' as usize] = 22;
+    35→    table[b'A' as usize] = 23;
+    36→    table
+    37→}
+    38→
+    39→const CHAR_INDEX: [u8; 256] = build_char_index();
+    40→
+    41→/// Inverse of [`CHAR_INDEX`]: maps a charset index back to its ASCII byte.
+    42→/// Used to tie-break by character (ASCII) value so the top-N scoring matches
+    43→/// `server::compute_char_probabilities`, which orders ties by `char`.
+    44→const fn build_index_to_char() -> [u8; CHARSET_LEN] {
+    45→    let mut table = [0u8; CHARSET_LEN];
+    46→    let mut b = 0usize;
+    47→    while b < 256 {
+    48→        let idx = CHAR_INDEX[b];
+    49→        if idx != INVALID_INDEX {
+    50→            table[idx as usize] = b as u8;
+    51→        }
+    52→        b += 1;
+    53→    }
+    54→    table
+    55→}
+    56→
+    57→const CHAR_FROM_INDEX: [u8; CHARSET_LEN] = build_index_to_char();
+    58→
+    59→const FLOOR_NO_SLASH: &[u8] = b"0123456789/";
+    60→const FLOOR_WITH_SLASH: &[u8] = b"0123456789]";
+    61→const AFTER_EQ_START: &[u8] = b"-0123456789";
+    62→const AFTER_EQ: &[u8] = b"0123456789";
+    63→const FIRST_POSITION: &[u8] = b"123456789([";
+    64→const AFTER_DIGIT: &[u8] = b"0123456789+-*/%^A!)][=>";
+    65→const AFTER_BINARY_OR_OPEN: &[u8] = b"1234567890([";
+    66→const AFTER_CLOSE_OR_FACTORIAL: &[u8] = b"+-*/%^A!)][=>";
+    67→const DEFAULT_ORDER: &[u8] = b"1234567890+-*/=([)]%^!A>";
+    68→const END_CHARS: &[u8] = b"0123456789)]!";
+    69→const LENGTH_ONE_DIGITS: &[u8] = b"0123456789";
+    70→
+    71→/// A destination for solutions discovered by the search.
+    72→///
+    73→/// The hot recursive search is generic over this trait so the default
+    74→/// in-memory path (`Vec<String>`) compiles to exactly the previous code
+    75→/// (monomorphized + inlined), while alternative sinks let the same search
+    76→/// stream solutions to disk or score them for top-N without materializing the
+    77→/// full solution set in memory. `accept` receives the completed expression as
+    78→/// raw bytes (guaranteed valid ASCII/UTF-8 by construction).
+    79→pub trait SolutionSink {
+    80→    fn accept(&mut self, expr: &[u8]);
+    81→}
+    82→
+    83→impl SolutionSink for Vec<String> {
+    84→    #[inline]
+    85→    fn accept(&mut self, expr: &[u8]) {
+    86→        // Safety: the search only ever places bytes from the Sumzle charset,
+    87→        // all of which are valid single-byte UTF-8.
+    88→        let s = unsafe { std::str::from_utf8_unchecked(expr) };
+    89→        self.push(s.to_owned());
+    90→    }
+    91→}
+    92→
+    93→/// Bitmask of the distinct charset indices present in `expr`. CHARSET_LEN is
+    94→/// 24, so a `u32` holds one bit per possible character.
+    95→#[inline]
+    96→fn unique_char_mask(expr: &[u8]) -> u32 {
+    97→    let mut mask = 0u32;
+    98→    for &ch in expr {
+    99→        mask |= 1u32 << idx_of(ch);
+   100→    }
+   101→    mask
+   102→}
+   103→
+   104→/// Accumulates the statistics needed to compute character probabilities over
+   105→/// the full solution set without storing any solution: the total number of
+   106→/// solutions and, per charset index, how many solutions contain that character.
+   107→/// Mirrors `server::compute_char_probabilities`, which counts each character at
+   108→/// most once per solution.
+   109→#[derive(Clone)]
+   110→pub struct CountSink {
+   111→    pub total: u64,
+   112→    pub char_counts: [u64; CHARSET_LEN],
+   113→}
+   114→
+   115→impl Default for CountSink {
+   116→    fn default() -> Self {
+   117→        Self {
+   118→            total: 0,
+   119→            char_counts: [0; CHARSET_LEN],
+   120→        }
+   121→    }
+   122→}
+   123→
+   124→impl CountSink {
+   125→    pub fn new() -> Self {
+   126→        Self::default()
+   127→    }
+   128→
+   129→    /// Merge another sink's counts into this one (for parallel reduction).
+   130→    pub fn merge(&mut self, other: &CountSink) {
+   131→        self.total += other.total;
+   132→        for i in 0..CHARSET_LEN {
+   133→            self.char_counts[i] += other.char_counts[i];
+   134→        }
+   135→    }
+   136→
+   137→    /// Per-character probability (percentage of solutions containing the char),
+   138→    /// matching `server::compute_char_probabilities`.
+   139→    pub fn probabilities(&self) -> [f64; CHARSET_LEN] {
+   140→        let mut probs = [0.0f64; CHARSET_LEN];
+   141→        if self.total == 0 {
+   142→            return probs;
+   143→        }
+   144→        let total = self.total as f64;
+   145→        for (p, &c) in probs.iter_mut().zip(self.char_counts.iter()) {
+   146→            *p = (c as f64 / total) * 100.0;
+   147→        }
+   148→        probs
+   149→    }
+   150→
+   151→    /// Mask of the five most probable characters, ranked by probability
+   152→    /// descending then character (ASCII) ascending — matching the `take(5)`
+   153→    /// over the list sorted by `server::compute_char_probabilities`, which
+   154→    /// breaks ties by `char`. (Charset-index order is *not* ASCII order, so the
+   155→    /// tie-break must use the actual byte value to stay consistent.)
+   156→    pub fn top5_mask(&self) -> u32 {
+   157→        let mut order: Vec<usize> = (0..CHARSET_LEN)
+   158→            .filter(|&i| self.char_counts[i] > 0)
+   159→            .collect();
+   160→        order.sort_by(|&a, &b| {
+   161→            self.char_counts[b]
+   162→                .cmp(&self.char_counts[a])
+   163→                .then_with(|| CHAR_FROM_INDEX[a].cmp(&CHAR_FROM_INDEX[b]))
+   164→        });
+   165→        let mut mask = 0u32;
+   166→        for &i in order.iter().take(5) {
+   167→            mask |= 1u32 << i;
+   168→        }
+   169→        mask
+   170→    }
+   171→}
+   172→
+   173→impl SolutionSink for CountSink {
+   174→    #[inline]
+   175→    fn accept(&mut self, expr: &[u8]) {
+   176→        self.total += 1;
+   177→        let mut mask = unique_char_mask(expr);
+   178→        while mask != 0 {
+   179→            let i = mask.trailing_zeros() as usize;
+   180→            self.char_counts[i] += 1;
+   181→            mask &= mask - 1;
+   182→        }
+   183→    }
+   184→}
+   185→
+   186→/// Scores each solution with the probability-based score from
+   187→/// `server::compute_recommended` (sum of unique-character probabilities, plus
+   188→/// 50 per character among the global top-5) and keeps only the `n`
+   189→/// highest-scoring solutions in a bounded min-heap. Memory is O(n) regardless
+   190→/// of the total solution count.
+   191→pub struct TopNSink {
+   192→    n: usize,
+   193→    probs: [f64; CHARSET_LEN],
+   194→    top5_mask: u32,
+   195→    /// Min-heap keyed on (score, expr) so the lowest-scoring kept solution is
+   196→    /// the cheapest to evict. `Reverse` turns the max-heap into a min-heap.
+   197→    heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredSolution>>,
+   198→}
+   199→
+   200→/// A solution paired with its score. The `Ord` impl encodes *keep priority*
+   201→/// for the bounded min-heap: a solution is "greater" (more worth keeping) when
+   202→/// it has a higher score, or — on a tie — a lexicographically smaller
+   203→/// expression. The min-heap therefore evicts the lowest-scoring solution and,
+   204→/// among equal scores, the lexicographically largest one. The kept set is thus
+   205→/// the top `n` under "score descending, expression ascending", as documented
+   206→/// for `into_sorted`. (NaN is impossible — scores are finite sums.)
+   207→#[derive(Clone, PartialEq)]
+   208→struct ScoredSolution {
+   209→    score: f64,
+   210→    expr: String,
+   211→}
+   212→
+   213→impl Eq for ScoredSolution {}
+   214→
+   215→impl Ord for ScoredSolution {
+   216→    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+   217→        self.score
+   218→            .total_cmp(&other.score)
+   219→            // Tie: the smaller expression ranks higher (kept in preference to a
+   220→            // larger one), so the min-heap evicts the larger expression first.
+   221→            .then_with(|| other.expr.cmp(&self.expr))
+   222→    }
+   223→}
+   224→
+   225→impl PartialOrd for ScoredSolution {
+   226→    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+   227→        Some(self.cmp(other))
+   228→    }
+   229→}
+   230→
+   231→impl TopNSink {
+   232→    pub fn new(n: usize, probs: [f64; CHARSET_LEN], top5_mask: u32) -> Self {
+   233→        Self {
+   234→            n,
+   235→            probs,
+   236→            top5_mask,
+   237→            heap: std::collections::BinaryHeap::new(),
+   238→        }
+   239→    }
+   240→
+   241→    #[inline]
+   242→    fn score(&self, expr: &[u8]) -> f64 {
+   243→        let mut mask = unique_char_mask(expr);
+   244→        let mut score = 0.0f64;
+   245→        while mask != 0 {
+   246→            let i = mask.trailing_zeros() as usize;
+   247→            score += self.probs[i];
+   248→            if self.top5_mask & (1u32 << i) != 0 {
+   249→                score += 50.0;
+   250→            }
+   251→            mask &= mask - 1;
+   252→        }
+   253→        score
+   254→    }
+   255→
+   256→    fn push_scored(&mut self, item: ScoredSolution) {
+   257→        if self.n == 0 {
+   258→            return;
+   259→        }
+   260→        if self.heap.len() < self.n {
+   261→            self.heap.push(std::cmp::Reverse(item));
+   262→        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek() {
+   263→            if item > *min {
+   264→                self.heap.pop();
+   265→                self.heap.push(std::cmp::Reverse(item));
+   266→            }
+   267→        }
+   268→    }
+   269→
+   270→    /// Merge another sink's kept solutions into this one (parallel reduction).
+   271→    pub fn merge(&mut self, other: TopNSink) {
+   272→        for std::cmp::Reverse(item) in other.heap.into_vec() {
+   273→            self.push_scored(item);
+   274→        }
+   275→    }
+   276→
+   277→    /// Consume the heap and return the kept solutions sorted by score
+   278→    /// descending, ties broken by expression ascending (deterministic).
+   279→    pub fn into_sorted(self) -> Vec<(f64, String)> {
+   280→        let mut items: Vec<ScoredSolution> =
+   281→            self.heap.into_vec().into_iter().map(|r| r.0).collect();
+   282→        // Sort explicitly by (score desc, expr asc) rather than relying on the
+   283→        // `Ord` impl, whose tie-break is reversed for the heap's eviction logic.
+   284→        items.sort_by(|a, b| {
+   285→            b.score
+   286→                .total_cmp(&a.score)
+   287→                .then_with(|| a.expr.cmp(&b.expr))
+   288→        });
+   289→        items.into_iter().map(|s| (s.score, s.expr)).collect()
+   290→    }
+   291→}
+   292→
+   293→impl SolutionSink for TopNSink {
+   294→    #[inline]
+   295→    fn accept(&mut self, expr: &[u8]) {
+   296→        if self.n == 0 {
+   297→            return;
+   298→        }
+   299→        let score = self.score(expr);
+   300→        let s = unsafe { std::str::from_utf8_unchecked(expr) };
+   301→        self.push_scored(ScoredSolution {
+   302→            score,
+   303→            expr: s.to_owned(),
+   304→        });
+   305→    }
+   306→}
+   307→
+   308→/// Streams solutions to a writer as JSON Lines (one `{"solution":"..."}` per
+   309→/// line) through a local byte buffer, flushing to the shared writer only when
+   310→/// the buffer fills. This keeps memory bounded and limits lock contention to
+   311→/// one acquisition per buffer flush rather than one per solution.
+   312→///
+   313→/// Write errors are captured rather than panicked on (the crate builds with
+   314→/// `panic = "abort"`, so a panic mid-search would kill the process): the first
+   315→/// error is stored and surfaced by [`finish`](Self::finish), and further
+   316→/// solutions are dropped so the buffer cannot grow without bound after a
+   317→/// failure (e.g. a full disk).
+   318→pub struct JsonlSink<'a, W: std::io::Write> {
+   319→    writer: &'a std::sync::Mutex<W>,
+   320→    buf: Vec<u8>,
+   321→    flush_at: usize,
+   322→    count: u64,
+   323→    error: Option<std::io::Error>,
+   324→}
+   325→
+   326→impl<'a, W: std::io::Write> JsonlSink<'a, W> {
+   327→    pub fn new(writer: &'a std::sync::Mutex<W>) -> Self {
+   328→        Self {
+   329→            writer,
+   330→            buf: Vec::with_capacity(256 * 1024),
+   331→            flush_at: 256 * 1024,
+   332→            count: 0,
+   333→            error: None,
+   334→        }
+   335→    }
+   336→
+   337→    fn flush_buf(&mut self) {
+   338→        if self.error.is_some() || self.buf.is_empty() {
+   339→            return;
+   340→        }
+   341→        match self.writer.lock() {
+   342→            Ok(mut guard) => {
+   343→                if let Err(e) = guard.write_all(&self.buf) {
+   344→                    self.error = Some(e);
+   345→                }
+   346→            }
+   347→            Err(_) => {
+   348→                self.error = Some(std::io::Error::other("solution writer mutex poisoned"));
+   349→            }
+   350→        }
+   351→        self.buf.clear();
+   352→    }
+   353→
+   354→    /// Flush any remaining buffered bytes and return the number of solutions
+   355→    /// written by this sink, or the first write error encountered. Call once
+   356→    /// after the search ends.
+   357→    pub fn finish(mut self) -> std::io::Result<u64> {
+   358→        self.flush_buf();
+   359→        match self.error.take() {
+   360→            Some(e) => Err(e),
+   361→            None => Ok(self.count),
+   362→        }
+   363→    }
+   364→}
+   365→
+   366→impl<W: std::io::Write> SolutionSink for JsonlSink<'_, W> {
+   367→    #[inline]
+   368→    fn accept(&mut self, expr: &[u8]) {
+   369→        // Once a write has failed, stop buffering so memory stays bounded; the
+   370→        // error is reported by `finish`.
+   371→        if self.error.is_some() {
+   372→            return;
+   373→        }
+   374→        // No Sumzle charset character requires JSON string escaping, so the
+   375→        // expression can be embedded verbatim between quotes.
+   376→        self.buf.extend_from_slice(b"{\"solution\":\"");
+   377→        self.buf.extend_from_slice(expr);
+   378→        self.buf.extend_from_slice(b"\"}\n");
+   379→        self.count += 1;
+   380→        if self.buf.len() >= self.flush_at {
+   381→            self.flush_buf();
+   382→        }
+   383→    }
+   384→}
+   385→
+   386→#[derive(Debug, Clone)]
+   387→struct PreparedKnowledge {
+   388→    fixed_chars: Vec<u8>,
+   389→    cannot_be_at_masks: Vec<u32>,
+   390→    globally_forbidden_mask: u32,
+   391→    min_counts: [u8; CHARSET_LEN],
+   392→    exact_counts: [u8; CHARSET_LEN],
+   393→    exact_mask: u32,
+   394→    constrained_indices: Vec<usize>,
+   395→    unconstrained: bool,
+   396→}
+   397→
+   398→impl PreparedKnowledge {
+   399→    fn new(length: usize, gk: &GlobalKnowledge) -> Self {
+   400→        let mut fixed_chars = vec![NO_CHAR; length];
+   401→        for (i, fixed) in gk.fixed_chars.iter().enumerate() {
+   402→            fixed_chars[i] = fixed.map(|c| c as u8).unwrap_or(NO_CHAR);
+   403→        }
+   404→
+   405→        let mut cannot_be_at_masks = vec![0u32; length];
+   406→        for (i, set) in gk.cannot_be_at.iter().enumerate() {
+   407→            let mut mask = 0u32;
+   408→            for &ch in set {
+   409→                if let Some(idx) = idx_of_char(ch) {
+   410→                    mask |= 1u32 << idx;
+   411→                }
+   412→            }
+   413→            cannot_be_at_masks[i] = mask;
+   414→        }
+   415→
+   416→        let mut globally_forbidden_mask = 0u32;
+   417→        for &ch in &gk.globally_forbidden {
+   418→            if let Some(idx) = idx_of_char(ch) {
+   419→                globally_forbidden_mask |= 1u32 << idx;
+   420→            }
+   421→        }
+   422→
+   423→        let mut min_counts = [0u8; CHARSET_LEN];
+   424→        let mut exact_counts = [0u8; CHARSET_LEN];
+   425→        let mut exact_mask = 0u32;
+   426→        let mut constrained_mask = 0u32;
+   427→
+   428→        for (&ch, &count) in &gk.must_appear_min_count {
+   429→            if let Some(idx) = idx_of_char(ch) {
+   430→                min_counts[idx] = count as u8;
+   431→                constrained_mask |= 1u32 << idx;
+   432→            }
+   433→        }
+   434→
+   435→        for (&ch, &count) in &gk.must_appear_exact_count {
+   436→            if let Some(idx) = idx_of_char(ch) {
+   437→                exact_counts[idx] = count as u8;
+   438→                exact_mask |= 1u32 << idx;
+   439→                constrained_mask |= 1u32 << idx;
+   440→            }
+   441→        }
+   442→
+   443→        let mut constrained_indices = Vec::new();
+   444→        for idx in 0..CHARSET_LEN {
+   445→            if constrained_mask & (1u32 << idx) != 0 {
+   446→                constrained_indices.push(idx);
+   447→            }
+   448→        }
+   449→
+   450→        let unconstrained = fixed_chars.iter().all(|&ch| ch == NO_CHAR)
+   451→            && cannot_be_at_masks.iter().all(|&mask| mask == 0)
+   452→            && globally_forbidden_mask == 0
+   453→            && constrained_indices.is_empty();
+   454→
+   455→        Self {
+   456→            fixed_chars,
+   457→            cannot_be_at_masks,
+   458→            globally_forbidden_mask,
+   459→            min_counts,
+   460→            exact_counts,
+   461→            exact_mask,
+   462→            constrained_indices,
+   463→            unconstrained,
+   464→        }
+   465→    }
+   466→
+   467→    #[inline]
+   468→    fn is_globally_forbidden(&self, ch: u8) -> bool {
+   469→        self.globally_forbidden_mask & char_mask(ch) != 0
+   470→    }
+   471→
+   472→    #[inline]
+   473→    fn cannot_be_at(&self, index: usize, ch: u8) -> bool {
+   474→        self.cannot_be_at_masks[index] & char_mask(ch) != 0
+   475→    }
+   476→
+   477→    #[inline]
+   478→    fn counts_can_still_succeed(&self, counts: &[u8; CHARSET_LEN], remaining_slots: usize) -> bool {
+   479→        for &idx in &self.constrained_indices {
+   480→            let current = counts[idx] as usize;
+   481→            if self.exact_mask & (1u32 << idx) != 0 {
+   482→                let exact = self.exact_counts[idx] as usize;
+   483→                if current > exact || current + remaining_slots < exact {
+   484→                    return false;
+   485→                }
+   486→            } else {
+   487→                let min = self.min_counts[idx] as usize;
+   488→                if current + remaining_slots < min {
+   489→                    return false;
+   490→                }
+   491→            }
+   492→        }
+   493→        true
+   494→    }
+   495→}
+   496→
+   497→#[inline]
+   498→fn idx_of(ch: u8) -> usize {
+   499→    let idx = CHAR_INDEX[ch as usize];
+   500→    debug_assert_ne!(idx, INVALID_INDEX, "invalid Sumzle character: {ch}");
+   501→    idx as usize
+   502→}
+   503→
+   504→#[inline]
+   505→fn idx_of_char(ch: char) -> Option<usize> {
+   506→    // Preserve the previous behavior for unexpected ASCII symbols: they are
+   507→    // programmer/input errors and should not be silently ignored.
+   508→    if ch.is_ascii() {
+   509→        Some(match ch as u8 {
+   510→            b'0' => 0,
+   511→            b'1' => 1,
+   512→            b'2' => 2,
+   513→            b'3' => 3,
+   514→            b'4' => 4,
+   515→            b'5' => 5,
+   516→            b'6' => 6,
+   517→            b'7' => 7,
+   518→            b'8' => 8,
+   519→            b'9' => 9,
+   520→            b'+' => 10,
+   521→            b'-' => 11,
+   522→            b'*' => 12,
+   523→            b'/' => 13,
+   524→            b'%' => 14,
+   525→            b'^' => 15,
+   526→            b'=' => 16,
+   527→            b'(' => 17,
+   528→            b')' => 18,
+   529→            b'!' => 19,
+   530→            b'[' => 20,
+   531→            b']' => 21,
+   532→            b'>' => 22,
+   533→            b'A' => 23,
+   534→            _ => unreachable!("invalid Sumzle character: {ch}"),
+   535→        })
+   536→    } else {
+   537→        None
+   538→    }
+   539→}
+   540→
+   541→#[inline]
+   542→fn char_mask(ch: u8) -> u32 {
+   543→    1u32 << idx_of(ch)
+   544→}
+   545→
+   546→#[inline]
+   547→fn unconstrained_solution_capacity(length: usize) -> usize {
+   548→    match length {
+   549→        3 => 64,
+   550→        4 => 320,
+   551→        5 => 6_500,
+   552→        6 => 50_000,
+   553→        7 => 650_000,
+   554→        8 => 8_000_000,
+   555→        _ => 0,
+   556→    }
+   557→}
+   558→
+   559→#[inline]
+   560→fn write_i64_decimal(n: i64, out: &mut [u8; 20]) -> usize {
+   561→    let mut value = n.unsigned_abs();
+   562→    let mut tmp = [0u8; 20];
+   563→    let mut idx = tmp.len();
+   564→
+   565→    if value == 0 {
+   566→        idx -= 1;
+   567→        tmp[idx] = b'0';
+   568→    } else {
+   569→        while value > 0 {
+   570→            idx -= 1;
+   571→            tmp[idx] = b'0' + (value % 10) as u8;
+   572→            value /= 10;
+   573→        }
+   574→    }
+   575→
+   576→    let mut len = 0;
+   577→    if n < 0 {
+   578→        out[0] = b'-';
+   579→        len = 1;
+   580→    }
+   581→    let digits = &tmp[idx..];
+   582→    out[len..len + digits.len()].copy_from_slice(digits);
+   583→    len + digits.len()
+   584→}
+   585→
+   586→#[inline]
+   587→const fn is_digit_b(c: u8) -> bool {
+   588→    c >= b'0' && c <= b'9'
+   589→}
+   590→
+   591→#[inline]
+   592→const fn is_binary_operator_b(c: u8) -> bool {
+   593→    matches!(c, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'A')
+   594→}
+   595→
+   596→#[inline]
+   597→const fn is_unary_post_operator_b(c: u8) -> bool {
+   598→    c == b'!'
+   599→}
+   600→
+   601→#[inline]
+   602→const fn is_operator_b(c: u8) -> bool {
+   603→    is_binary_operator_b(c) || is_unary_post_operator_b(c)
+   604→}
+   605→
+   606→#[inline]
+   607→const fn is_open_bracket_b(c: u8) -> bool {
+   608→    matches!(c, b'(' | b'[')
+   609→}
+   610→
+   611→#[inline]
+   612→const fn is_close_bracket_b(c: u8) -> bool {
+   613→    matches!(c, b')' | b']')
+   614→}
+   615→
+   616→#[inline]
+   617→const fn is_main_operator_b(c: u8) -> bool {
+   618→    matches!(c, b'=' | b'>')
+   619→}
+   620→
+   621→#[inline]
+   622→const fn is_end_char_b(c: u8) -> bool {
+   623→    is_digit_b(c) || matches!(c, b')' | b']' | b'!')
+   624→}
+   625→
+   626→#[inline]
+   627→const fn matches_bracket(open: u8, close: u8) -> bool {
+   628→    matches!((open, close), (b'(', b')') | (b'[', b']'))
+   629→}
+   630→
+   631→#[inline]
+   632→fn update_floor_context(ch: u8, ctx: FloorContext) -> FloorContext {
+   633→    match ch {
+   634→        b'[' => FloorContext {
+   635→            in_floor: true,
+   636→            has_slash_in_current_floor: false,
+   637→        },
+   638→        b']' if ctx.in_floor => FloorContext {
+   639→            in_floor: false,
+   640→            has_slash_in_current_floor: false,
+   641→        },
+   642→        b'/' if ctx.in_floor => FloorContext {
+   643→            in_floor: true,
+   644→            has_slash_in_current_floor: true,
+   645→        },
+   646→        _ => ctx,
+   647→    }
+   648→}
+   649→
+   650→#[inline]
+   651→fn base_candidates(
+   652→    index: usize,
+   653→    prev_char: Option<u8>,
+   654→    main_op_so_far: Option<u8>,
+   655→    floor_ctx: FloorContext,
+   656→) -> &'static [u8] {
+   657→    if floor_ctx.in_floor {
+   658→        if floor_ctx.has_slash_in_current_floor {
+   659→            FLOOR_WITH_SLASH
+   660→        } else {
+   661→            FLOOR_NO_SLASH
+   662→        }
+   663→    } else if main_op_so_far == Some(b'=') {
+   664→        if prev_char == Some(b'=') {
+   665→            AFTER_EQ_START
+   666→        } else {
+   667→            AFTER_EQ
+   668→        }
+   669→    } else if index == 0 {
+   670→        FIRST_POSITION
+   671→    } else if let Some(pc) = prev_char {
+   672→        if is_digit_b(pc) {
+   673→            AFTER_DIGIT
+   674→        } else if is_binary_operator_b(pc) || is_open_bracket_b(pc) {
+   675→            AFTER_BINARY_OR_OPEN
+   676→        } else if is_close_bracket_b(pc) || is_unary_post_operator_b(pc) {
+   677→            AFTER_CLOSE_OR_FACTORIAL
+   678→        } else if is_main_operator_b(pc) {
+   679→            AFTER_BINARY_OR_OPEN
+   680→        } else {
+   681→            DEFAULT_ORDER
+   682→        }
+   683→    } else {
+   684→        DEFAULT_ORDER
+   685→    }
+   686→}
+   687→
+   688→#[inline]
+   689→fn push_filtered(
+   690→    slice: &[u8],
+   691→    index: usize,
+   692→    prepared: &PreparedKnowledge,
+   693→    out: &mut [u8; CHARSET_LEN],
+   694→) -> usize {
+   695→    let mut len = 0;
+   696→    for &ch in slice {
+   697→        if !prepared.is_globally_forbidden(ch) && !prepared.cannot_be_at(index, ch) {
+   698→            out[len] = ch;
+   699→            len += 1;
+   700→        }
+   701→    }
+   702→    len
+   703→}
+   704→
+   705→#[inline]
+   706→fn push_filtered_end_chars(
+   707→    slice: &[u8],
+   708→    index: usize,
+   709→    prepared: &PreparedKnowledge,
+   710→    out: &mut [u8; CHARSET_LEN],
+   711→) -> usize {
+   712→    let mut len = 0;
+   713→    for &ch in slice {
+   714→        if is_end_char_b(ch)
+   715→            && !prepared.is_globally_forbidden(ch)
+   716→            && !prepared.cannot_be_at(index, ch)
+   717→        {
+   718→            out[len] = ch;
+   719→            len += 1;
+   720→        }
+   721→    }
+   722→    len
+   723→}
+   724→
+   725→/// Get optimized character order for a given position and context.
+   726→#[inline]
+   727→fn fill_candidate_chars(
+   728→    index: usize,
+   729→    prev_char: Option<u8>,
+   730→    length: usize,
+   731→    main_op_so_far: Option<u8>,
+   732→    floor_ctx: FloorContext,
+   733→    prepared: &PreparedKnowledge,
+   734→    out: &mut [u8; CHARSET_LEN],
+   735→) -> usize {
+   736→    let fixed = prepared.fixed_chars[index];
+   737→    if fixed != NO_CHAR {
+   738→        if prepared.is_globally_forbidden(fixed) || prepared.cannot_be_at(index, fixed) {
+   739→            return 0;
+   740→        }
+   741→        out[0] = fixed;
+   742→        return 1;
+   743→    }
+   744→
+   745→    let ordered = base_candidates(index, prev_char, main_op_so_far, floor_ctx);
+   746→
+   747→    if index == length - 1 && !floor_ctx.in_floor {
+   748→        let filtered_len = push_filtered_end_chars(ordered, index, prepared, out);
+   749→        if filtered_len > 0 {
+   750→            return filtered_len;
+   751→        }
+   752→        if prev_char.is_some() {
+   753→            return push_filtered(END_CHARS, index, prepared, out);
+   754→        }
+   755→        if index == 0 && length == 1 {
+   756→            return push_filtered(LENGTH_ONE_DIGITS, index, prepared, out);
+   757→        }
+   758→    }
+   759→
+   760→    push_filtered(ordered, index, prepared, out)
+   761→}
+   762→
+   763→/// Check if a character can be placed at a given position
+   764→#[allow(clippy::too_many_arguments)]
+   765→fn can_place_char(
+   766→    ch: u8,
+   767→    ch_idx: usize,
+   768→    index: usize,
+   769→    prev_char: Option<u8>,
+   770→    main_op_so_far: Option<u8>,
+   771→    char_counts: &[u8; CHARSET_LEN],
+   772→    floor_ctx: FloorContext,
+   773→    bracket_stack: &[u8],
+   774→    stack_len: usize,
+   775→    prepared: &PreparedKnowledge,
+   776→    length: usize,
+   777→    current_num_len: u8,
+   778→    current_num_value: i64,
+   779→    current_num_leading_zero: bool,
+   780→) -> bool {
+   781→    // Candidates are pre-filtered for fixed-position and cannot-be-at constraints.
+   782→    // Only count-dependent constraints remain here.
+   783→
+   784→    // Exact count constraint
+   785→    if prepared.exact_mask & (1u32 << ch_idx) != 0
+   786→        && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
+   787→    {
+   788→        return false;
+   789→    }
+   790→
+   791→    // Floor context constraints
+   792→    if floor_ctx.in_floor {
+   793→        if ch == b'[' || ch == b'(' || ch == b'A' || ch == b'!' {
+   794→            return false;
+   795→        }
+   796→        if is_operator_b(ch) && ch != b'/' {
+   797→            return false;
+   798→        }
+   799→        if is_main_operator_b(ch) {
+   800→            return false;
+   801→        }
+   802→
+   803→        if ch == b'/' {
+   804→            if floor_ctx.has_slash_in_current_floor {
+   805→                return false;
+   806→            }
+   807→            if !prev_char.is_some_and(is_digit_b) || index == 0 {
+   808→                return false;
+   809→            }
+   810→        } else if ch == b']' {
+   811→            if !prev_char.is_some_and(is_digit_b) {
+   812→                return false;
+   813→            }
+   814→            if !floor_ctx.has_slash_in_current_floor {
+   815→                return false;
+   816→            }
+   817→        } else if !is_digit_b(ch) {
+   818→            return false;
+   819→        }
+   820→    }
+   821→
+   822→    // Floor bracket constraints
+   823→    if ch == b'[' && floor_ctx.in_floor {
+   824→        return false;
+   825→    }
+   826→    if ch == b']' && !floor_ctx.in_floor {
+   827→        return false;
+   828→    }
+   829→    if ch == b'[' && index >= length.saturating_sub(3) {
+   830→        return false;
+   831→    }
+   832→
+   833→    // Leading zero check and operand value check.  Left-side operands are capped;
+   834→    // after '=' the RHS is a simple number, so only its leading-zero rule matters.
+   835→    if is_digit_b(ch) {
+   836→        let digit = (ch - b'0') as i64;
+   837→        let continuing_number = prev_char.is_some_and(is_digit_b);
+   838→        let new_len = if continuing_number {
+   839→            current_num_len as usize + 1
+   840→        } else {
+   841→            1
+   842→        };
+   843→        let new_value = if continuing_number {
+   844→            current_num_value * 10 + digit
+   845→        } else {
+   846→            digit
+   847→        };
+   848→        let leading_zero = if continuing_number {
+   849→            current_num_leading_zero
+   850→        } else {
+   851→            ch == b'0'
+   852→        };
+   853→
+   854→        if new_len > 1 && leading_zero {
+   855→            return false;
+   856→        }
+   857→        if main_op_so_far != Some(b'=') && new_value > MAX_OPERAND_VALUE {
+   858→            return false;
+   859→        }
+   860→    }
+   861→
+   862→    // First position rules
+   863→    if index == 0
+   864→        && (is_binary_operator_b(ch)
+   865→            || is_close_bracket_b(ch)
+   866→            || is_main_operator_b(ch)
+   867→            || is_unary_post_operator_b(ch))
+   868→    {
+   869→        return false;
+   870→    }
+   871→
+   872→    // Previous character-based rules
+   873→    if let Some(pc) = prev_char {
+   874→        if is_digit_b(pc) {
+   875→            if is_open_bracket_b(ch) && ch != b'[' {
+   876→                return false;
+   877→            }
+   878→            if ch == b'[' && floor_ctx.in_floor {
+   879→                return false;
+   880→            }
+   881→        } else if is_operator_b(pc) {
+   882→            if is_binary_operator_b(ch)
+   883→                && !(pc == b'A' && (is_open_bracket_b(ch) || is_digit_b(ch)))
+   884→                && !is_unary_post_operator_b(pc)
+   885→            {
+   886→                return false;
+   887→            }
+   888→            if is_close_bracket_b(ch) && !is_unary_post_operator_b(pc) {
+   889→                return false;
+   890→            }
+   891→            if is_main_operator_b(ch) && !is_unary_post_operator_b(pc) {
+   892→                return false;
+   893→            }
+   894→            if is_unary_post_operator_b(pc) && (is_digit_b(ch) || is_open_bracket_b(ch)) {
+   895→                return false;
+   896→            }
+   897→        } else if is_open_bracket_b(pc) {
+   898→            if pc == b'[' && ch == b'(' {
+   899→                return false;
+   900→            }
+   901→            if is_binary_operator_b(ch) {
+   902→                return false;
+   903→            }
+   904→            if is_close_bracket_b(ch) && !matches_bracket(pc, ch) {
+   905→                return false;
+   906→            }
+   907→            if is_main_operator_b(ch) {
+   908→                return false;
+   909→            }
+   910→            if is_unary_post_operator_b(ch) {
+   911→                return false;
+   912→            }
+   913→        } else if is_close_bracket_b(pc) {
+   914→            if is_digit_b(ch) || is_open_bracket_b(ch) {
+   915→                return false;
+   916→            }
+   917→        } else if is_main_operator_b(pc) {
+   918→            if pc == b'=' {
+   919→                if !is_digit_b(ch) && ch != b'-' {
+   920→                    return false;
+   921→                }
+   922→            } else if is_main_operator_b(ch) || is_close_bracket_b(ch) {
+   923→                return false;
+   924→            }
+   925→        }
+   926→    }
+   927→
+   928→    // After main operator =, only digits and minus
+   929→    if main_op_so_far == Some(b'=') {
+   930→        if !is_digit_b(ch) && ch != b'-' {
+   931→            return false;
+   932→        }
+   933→        if ch == b'-' && prev_char == Some(b'=') && index >= length - 1 {
+   934→            return false;
+   935→        }
+   936→    }
+   937→
+   938→    // Last position rules
+   939→    if index == length - 1
+   940→        && (is_binary_operator_b(ch) || is_open_bracket_b(ch) || is_main_operator_b(ch))
+   941→    {
+   942→        return false;
+   943→    }
+   944→
+   945→    // Incremental bracket balance check
+   946→    let new_stack_len = match ch {
+   947→        b'(' | b'[' => stack_len + 1,
+   948→        b')' | b']' => {
+   949→            if stack_len == 0 {
+   950→                return false;
+   951→            }
+   952→            let last_open = bracket_stack[stack_len - 1];
+   953→            if !matches_bracket(last_open, ch) {
+   954→                return false;
+   955→            }
+   956→            stack_len - 1
+   957→        }
+   958→        _ => stack_len,
+   959→    };
+   960→
+   961→    if index == length - 1 && new_stack_len != 0 {
+   962→        return false;
+   963→    }
+   964→
+   965→    // Main operator rules
+   966→    if is_main_operator_b(ch) {
+   967→        if main_op_so_far.is_some() {
+   968→            return false;
+   969→        }
+   970→        if index == 0 || index >= length - 1 {
+   971→            return false;
+   972→        }
+   973→    }
+   974→
+   975→    // Permutation A rules
+   976→    if ch == b'A' && !prev_char.is_some_and(|pc| is_digit_b(pc) || is_close_bracket_b(pc)) {
+   977→        return false;
+   978→    }
+   979→    if prev_char == Some(b'A') && !is_digit_b(ch) && !is_open_bracket_b(ch) {
+   980→        return false;
+   981→    }
+   982→
+   983→    // Factorial ! rules
+   984→    if ch == b'!' {
+   985→        if prev_char.is_none() {
+   986→            return false;
+   987→        }
+   988→        if let Some(pc) = prev_char {
+   989→            if !is_digit_b(pc) && pc != b')' {
+   990→                return false;
+   991→            }
+   992→        }
+   993→    }
+   994→
+   995→    true
+   996→}
+   997→
+   998→#[allow(clippy::too_many_arguments)]
+   999→fn complete_eq_rhs<S: SolutionSink>(
+  1000→    length: usize,
+  1001→    main_op_index: usize,
+  1002→    expr: &mut [u8],
+  1003→    char_counts: &mut [u8; CHARSET_LEN],
+  1004→    prepared: &PreparedKnowledge,
+  1005→    rhs: &[u8],
+  1006→    sink: &mut S,
+  1007→    searched_count: &mut u64,
+  1008→) {
+  1009→    debug_assert_eq!(rhs.len(), length - main_op_index - 1);
+  1010→
+  1011→    let mut filled = 0usize;
+  1012→    let mut valid = true;
+  1013→    for (offset, &ch) in rhs.iter().enumerate() {
+  1014→        let pos = main_op_index + 1 + offset;
+  1015→        if prepared.is_globally_forbidden(ch)
+  1016→            || prepared.cannot_be_at(pos, ch)
+  1017→            || (prepared.fixed_chars[pos] != NO_CHAR && prepared.fixed_chars[pos] != ch)
+  1018→        {
+  1019→            valid = false;
+  1020→            break;
+  1021→        }
+  1022→
+  1023→        let ch_idx = idx_of(ch);
+  1024→        if prepared.exact_mask & (1u32 << ch_idx) != 0
+  1025→            && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
+  1026→        {
+  1027→            valid = false;
+  1028→            break;
+  1029→        }
+  1030→
+  1031→        expr[pos] = ch;
+  1032→        char_counts[ch_idx] += 1;
+  1033→        filled += 1;
+  1034→    }
+  1035→
+  1036→    if valid && prepared.counts_can_still_succeed(char_counts, 0) {
+  1037→        *searched_count += 1;
+  1038→        sink.accept(expr);
+  1039→    }
+  1040→
+  1041→    for &ch in &rhs[..filled] {
+  1042→        char_counts[idx_of(ch)] -= 1;
+  1043→    }
+  1044→    for b in expr.iter_mut().take(length).skip(main_op_index + 1) {
+  1045→        *b = NO_CHAR;
+  1046→    }
+  1047→}
+  1048→
+  1049→/// A captured search node at a fixed prefix depth, used to distribute work
+  1050→/// across threads at a finer granularity than the ~11 top-level branches.
+  1051→/// It records everything needed to resume `recursive_search` from `prefix.len()`.
+  1052→#[derive(Clone)]
+  1053→pub struct Branch {
+  1054→    prefix: Vec<u8>,
+  1055→    main_op: Option<u8>,
+  1056→    main_op_index: usize,
+  1057→    main_lhs_value: Option<i64>,
+  1058→    floor_ctx: FloorContext,
+  1059→    bracket_stack: Vec<u8>,
+  1060→    num_len: u8,
+  1061→    num_value: i64,
+  1062→    num_leading_zero: bool,
+  1063→}
+  1064→
+  1065→/// The main solver struct
+  1066→pub struct Solver {
+  1067→    pub length: usize,
+  1068→    pub gk: GlobalKnowledge,
+  1069→    prepared: PreparedKnowledge,
+  1070→}
+  1071→
+  1072→impl Solver {
+  1073→    pub fn new(length: usize, gk: GlobalKnowledge) -> Self {
+  1074→        let prepared = PreparedKnowledge::new(length, &gk);
+  1075→        Self {
+  1076→            length,
+  1077→            gk,
+  1078→            prepared,
+  1079→        }
+  1080→    }
+  1081→
+  1082→    /// Solve with single-threaded brute force
+  1083→    pub fn solve(&self) -> (Vec<String>, u64) {
+  1084→        let mut results: Vec<String> = if self.prepared.unconstrained {
+  1085→            Vec::with_capacity(unconstrained_solution_capacity(self.length))
+  1086→        } else {
+  1087→            Vec::new()
+  1088→        };
+  1089→        let searched_count = self.solve_into(&mut results);
+  1090→        (results, searched_count)
+  1091→    }
+  1092→
+  1093→    /// Run the full single-threaded search, delivering every solution to
+  1094→    /// `sink`. Returns the number of complete expressions evaluated. This is
+  1095→    /// the generic engine behind `solve`; alternative sinks stream to disk or
+  1096→    /// score for top-N without building a `Vec<String>`.
+  1097→    pub fn solve_into<S: SolutionSink>(&self, sink: &mut S) -> u64 {
+  1098→        let mut searched_count: u64 = 0;
+  1099→        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+  1100→        let mut char_counts = [0u8; CHARSET_LEN];
+  1101→        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+  1102→        let mut no_branches: Vec<Branch> = Vec::new();
+  1103→
+  1104→        self.recursive_search(
+  1105→            0,
+  1106→            &mut expr,
+  1107→            None,
+  1108→            None,
+  1109→            0,
+  1110→            None,
+  1111→            &mut char_counts,
+  1112→            FloorContext::new(),
+  1113→            &mut bracket_stack,
+  1114→            0,
+  1115→            &self.prepared,
+  1116→            0,
+  1117→            0,
+  1118→            false,
+  1119→            sink,
+  1120→            &mut searched_count,
+  1121→            usize::MAX,
+  1122→            &mut no_branches,
+  1123→        );
+  1124→
+  1125→        searched_count
+  1126→    }
+  1127→
+  1128→    #[allow(clippy::too_many_arguments)]
+  1129→    fn recursive_search<S: SolutionSink>(
+  1130→        &self,
+  1131→        index: usize,
+  1132→        expr: &mut [u8],
+  1133→        prev_char: Option<u8>,
+  1134→        main_op_so_far: Option<u8>,
+  1135→        main_op_index: usize,
+  1136→        main_lhs_value: Option<i64>,
+  1137→        char_counts: &mut [u8; CHARSET_LEN],
+  1138→        floor_ctx: FloorContext,
+  1139→        bracket_stack: &mut [u8],
+  1140→        stack_len: usize,
+  1141→        prepared: &PreparedKnowledge,
+  1142→        current_num_len: u8,
+  1143→        current_num_value: i64,
+  1144→        current_num_leading_zero: bool,
+  1145→        sink: &mut S,
+  1146→        searched_count: &mut u64,
+  1147→        // Branch-collection cutoff: when `index == branch_depth`, snapshot the
+  1148→        // current node into `branches` and stop. Normal solves pass
+  1149→        // `usize::MAX`, so this is a single never-taken comparison per call.
+  1150→        branch_depth: usize,
+  1151→        branches: &mut Vec<Branch>,
+  1152→    ) {
+  1153→        if index == branch_depth {
+  1154→            branches.push(Branch {
+  1155→                prefix: expr[..index].to_vec(),
+  1156→                main_op: main_op_so_far,
+  1157→                main_op_index,
+  1158→                main_lhs_value,
+  1159→                floor_ctx,
+  1160→                bracket_stack: bracket_stack[..stack_len].to_vec(),
+  1161→                num_len: current_num_len,
+  1162→                num_value: current_num_value,
+  1163→                num_leading_zero: current_num_leading_zero,
+  1164→            });
+  1165→            return;
+  1166→        }
+  1167→        let remaining_slots = self.length - index;
+  1168→        if !prepared.counts_can_still_succeed(char_counts, remaining_slots) {
+  1169→            return;
+  1170→        }
+  1171→
+  1172→        if main_op_so_far.is_none() {
+  1173→            let min_needed = if floor_ctx.in_floor {
+  1174→                // Slots still required: close the floor, then the main operator
+  1175→                // and at least one RHS digit (2). To close the floor we need at
+  1176→                // least `]` (1) when the denominator digit is already placed; the
+  1177→                // numerator/slash/denominator may still be pending, but this must
+  1178→                // stay a *lower* bound or valid completions (e.g. `[7/2]=3`) get
+  1179→                // pruned. has_slash ⇒ as few as 1 more char (`]`); otherwise at
+  1180→                // least `/d]` (3).
+  1181→                2 + if floor_ctx.has_slash_in_current_floor {
+  1182→                    1
+  1183→                } else {
+  1184→                    3
+  1185→                }
+  1186→            } else {
+  1187→                2 + stack_len
+  1188→                    + usize::from(
+  1189→                        prev_char
+  1190→                            .is_none_or(|pc| is_binary_operator_b(pc) || is_open_bracket_b(pc)),
+  1191→                    )
+  1192→            };
+  1193→            if remaining_slots < min_needed {
+  1194→                return;
+  1195→            }
+  1196→        } else if floor_ctx.in_floor {
+  1197→            // RHS of `>` may contain a floor (e.g. `5>[2/3]`). Same lower-bound
+  1198→            // reasoning: with a slash already present, as little as `]` (1) may
+  1199→            // remain; without one, at least `/d]` (3).
+  1200→            let min_needed = if floor_ctx.has_slash_in_current_floor {
+  1201→                1
+  1202→            } else {
+  1203→                3
+  1204→            };
+  1205→            if remaining_slots < min_needed {
+  1206→                return;
+  1207→            }
+  1208→        }
+  1209→
+  1210→        if index == self.length {
+  1211→            *searched_count += 1;
+  1212→
+  1213→            if main_op_so_far.is_none() {
+  1214→                return;
+  1215→            }
+  1216→
+  1217→            let main_op = main_op_so_far.expect("main operator missing");
+  1218→            let lhs_value = main_lhs_value.expect("main operator value missing");
+  1219→            let right_side = &expr[main_op_index + 1..];
+  1220→            let valid = match main_op {
+  1221→                b'=' => false,
+  1222→                b'>' => evaluate_expression_solver_bytes(right_side)
+  1223→                    .is_some_and(|rv| is_integer(rv) && lhs_value > rv as i64),
+  1224→                _ => false,
+  1225→            };
+  1226→
+  1227→            if valid {
+  1228→                sink.accept(expr);
+  1229→            }
+  1230→            return;
+  1231→        }
+  1232→
+  1233→        let mut candidates = [NO_CHAR; CHARSET_LEN];
+  1234→        let candidate_count = fill_candidate_chars(
+  1235→            index,
+  1236→            prev_char,
+  1237→            self.length,
+  1238→            main_op_so_far,
+  1239→            floor_ctx,
+  1240→            prepared,
+  1241→            &mut candidates,
+  1242→        );
+  1243→
+  1244→        for &ch in &candidates[..candidate_count] {
+  1245→            let ch_idx = idx_of(ch);
+  1246→            if !can_place_char(
+  1247→                ch,
+  1248→                ch_idx,
+  1249→                index,
+  1250→                prev_char,
+  1251→                main_op_so_far,
+  1252→                char_counts,
+  1253→                floor_ctx,
+  1254→                bracket_stack,
+  1255→                stack_len,
+  1256→                prepared,
+  1257→                self.length,
+  1258→                current_num_len,
+  1259→                current_num_value,
+  1260→                current_num_leading_zero,
+  1261→            ) {
+  1262→                continue;
+  1263→            }
+  1264→
+  1265→            expr[index] = ch;
+  1266→            char_counts[ch_idx] += 1;
+  1267→
+  1268→            let next_floor_ctx = update_floor_context(ch, floor_ctx);
+  1269→            let mut new_main_lhs_value = main_lhs_value;
+  1270→            let new_main_op = if is_main_operator_b(ch) {
+  1271→                let Some(lhs_value) = evaluate_expression_solver_bytes(&expr[..index]) else {
+  1272→                    char_counts[ch_idx] -= 1;
+  1273→                    expr[index] = NO_CHAR;
+  1274→                    continue;
+  1275→                };
+  1276→                if !is_integer(lhs_value) {
+  1277→                    char_counts[ch_idx] -= 1;
+  1278→                    expr[index] = NO_CHAR;
+  1279→                    continue;
+  1280→                }
+  1281→                let lhs_value = lhs_value as i64;
+  1282→                if ch == b'=' {
+  1283→                    let rhs_slots = self.length - index - 1;
+  1284→                    let mut rhs_buf = [0u8; 20];
+  1285→                    let rhs_len = if lhs_value == 0 && rhs_slots == 2 {
+  1286→                        rhs_buf[0] = b'-';
+  1287→                        rhs_buf[1] = b'0';
+  1288→                        2
+  1289→                    } else {
+  1290→                        write_i64_decimal(lhs_value, &mut rhs_buf)
+  1291→                    };
+  1292→                    if rhs_len == rhs_slots {
+  1293→                        complete_eq_rhs(
+  1294→                            self.length,
+  1295→                            index,
+  1296→                            expr,
+  1297→                            char_counts,
+  1298→                            prepared,
+  1299→                            &rhs_buf[..rhs_len],
+  1300→                            sink,
+  1301→                            searched_count,
+  1302→                        );
+  1303→                    }
+  1304→                    char_counts[ch_idx] -= 1;
+  1305→                    expr[index] = NO_CHAR;
+  1306→                    continue;
+  1307→                }
+  1308→                new_main_lhs_value = Some(lhs_value);
+  1309→                Some(ch)
+  1310→            } else {
+  1311→                main_op_so_far
+  1312→            };
+  1313→            let (next_num_len, next_num_value, next_num_leading_zero) = if is_digit_b(ch) {
+  1314→                if prev_char.is_some_and(is_digit_b) {
+  1315→                    (
+  1316→                        current_num_len + 1,
+  1317→                        current_num_value * 10 + (ch - b'0') as i64,
+  1318→                        current_num_leading_zero,
+  1319→                    )
+  1320→                } else {
+  1321→                    (1, (ch - b'0') as i64, ch == b'0')
+  1322→                }
+  1323→            } else {
+  1324→                (0, 0, false)
+  1325→            };
+  1326→
+  1327→            // Bracket stack is a shared scratch buffer reused across sibling
+  1328→            // branches. A push writes bracket_stack[stack_len]; a deeper branch
+  1329→            // that later closes this bracket and opens a different one can
+  1330→            // overwrite this slot, so we must save the previous occupant and
+  1331→            // restore it on backtrack — otherwise a sibling explored afterwards
+  1332→            // (e.g. the `0`/`(`/`[` candidates, which come last) would read a
+  1333→            // stale bracket type and wrongly reject a matching close bracket.
+  1334→            let pushed_bracket = matches!(ch, b'(' | b'[');
+  1335→            let saved_bracket_slot = if pushed_bracket {
+  1336→                bracket_stack[stack_len]
+  1337→            } else {
+  1338→                NO_CHAR
+  1339→            };
+  1340→            let next_stack_len = match ch {
+  1341→                b'(' | b'[' => {
+  1342→                    bracket_stack[stack_len] = ch;
+  1343→                    stack_len + 1
+  1344→                }
+  1345→                b')' | b']' => stack_len - 1,
+  1346→                _ => stack_len,
+  1347→            };
+  1348→
+  1349→            self.recursive_search(
+  1350→                index + 1,
+  1351→                expr,
+  1352→                Some(ch),
+  1353→                new_main_op,
+  1354→                if is_main_operator_b(ch) {
+  1355→                    index
+  1356→                } else {
+  1357→                    main_op_index
+  1358→                },
+  1359→                new_main_lhs_value,
+  1360→                char_counts,
+  1361→                next_floor_ctx,
+  1362→                bracket_stack,
+  1363→                next_stack_len,
+  1364→                prepared,
+  1365→                next_num_len,
+  1366→                next_num_value,
+  1367→                next_num_leading_zero,
+  1368→                sink,
+  1369→                searched_count,
+  1370→                branch_depth,
+  1371→                branches,
+  1372→            );
+  1373→
+  1374→            if pushed_bracket {
+  1375→                bracket_stack[stack_len] = saved_bracket_slot;
+  1376→            }
+  1377→
+  1378→            char_counts[ch_idx] -= 1;
+  1379→            expr[index] = NO_CHAR;
+  1380→        }
+  1381→    }
+  1382→
+  1383→    /// Get the top-level character branches for parallel execution
+  1384→    pub fn get_top_level_branches(&self) -> Vec<(char, Option<char>, FloorContext)> {
+  1385→        let char_counts = [0u8; CHARSET_LEN];
+  1386→        let bracket_stack: Vec<u8> = Vec::new();
+  1387→
+  1388→        let mut candidates = [NO_CHAR; CHARSET_LEN];
+  1389→        let count = fill_candidate_chars(
+  1390→            0,
+  1391→            None,
+  1392→            self.length,
+  1393→            None,
+  1394→            FloorContext::new(),
+  1395→            &self.prepared,
+  1396→            &mut candidates,
+  1397→        );
+  1398→
+  1399→        candidates[..count]
+  1400→            .iter()
+  1401→            .copied()
+  1402→            .filter(|&ch| {
+  1403→                can_place_char(
+  1404→                    ch,
+  1405→                    idx_of(ch),
+  1406→                    0,
+  1407→                    None,
+  1408→                    None,
+  1409→                    &char_counts,
+  1410→                    FloorContext::new(),
+  1411→                    &bracket_stack,
+  1412→                    0,
+  1413→                    &self.prepared,
+  1414→                    self.length,
+  1415→                    0,
+  1416→                    0,
+  1417→                    false,
+  1418→                )
+  1419→            })
+  1420→            .map(|ch| {
+  1421→                let main_op = if is_main_operator_b(ch) {
+  1422→                    Some(ch as char)
+  1423→                } else {
+  1424→                    None
+  1425→                };
+  1426→                let floor_ctx = update_floor_context(ch, FloorContext::new());
+  1427→                (ch as char, main_op, floor_ctx)
+  1428→            })
+  1429→            .collect()
+  1430→    }
+  1431→
+  1432→    /// Solve a single branch starting from a given first character
+  1433→    pub fn solve_branch(
+  1434→        &self,
+  1435→        first_char: char,
+  1436→        main_op: Option<char>,
+  1437→        floor_ctx: FloorContext,
+  1438→    ) -> (Vec<String>, u64) {
+  1439→        let first = first_char as u8;
+  1440→        if self.prepared.is_globally_forbidden(first)
+  1441→            || self.prepared.cannot_be_at(0, first)
+  1442→            || (self.prepared.fixed_chars[0] != NO_CHAR && self.prepared.fixed_chars[0] != first)
+  1443→        {
+  1444→            return (Vec::new(), 0);
+  1445→        }
+  1446→
+  1447→        let mut results: Vec<String> = Vec::new();
+  1448→        let mut searched_count: u64 = 0;
+  1449→        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+  1450→        let mut char_counts = [0u8; CHARSET_LEN];
+  1451→        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+  1452→        let mut no_branches: Vec<Branch> = Vec::new();
+  1453→
+  1454→        expr[0] = first;
+  1455→        char_counts[idx_of(first)] += 1;
+  1456→        let stack_len = match first {
+  1457→            b'(' | b'[' => {
+  1458→                bracket_stack[0] = first;
+  1459→                1
+  1460→            }
+  1461→            _ => 0,
+  1462→        };
+  1463→
+  1464→        self.recursive_search(
+  1465→            1,
+  1466→            &mut expr,
+  1467→            Some(first),
+  1468→            main_op.map(|c| c as u8),
+  1469→            0,
+  1470→            None,
+  1471→            &mut char_counts,
+  1472→            floor_ctx,
+  1473→            &mut bracket_stack,
+  1474→            stack_len,
+  1475→            &self.prepared,
+  1476→            if is_digit_b(first) { 1 } else { 0 },
+  1477→            if is_digit_b(first) {
+  1478→                (first - b'0') as i64
+  1479→            } else {
+  1480→                0
+  1481→            },
+  1482→            first == b'0',
+  1483→            &mut results,
+  1484→            &mut searched_count,
+  1485→            usize::MAX,
+  1486→            &mut no_branches,
+  1487→        );
+  1488→
+  1489→        (results, searched_count)
+  1490→    }
+  1491→
+  1492→    /// Traverse the search tree, recording every node reached at `depth` as a
+  1493→    /// `Branch` for parallel execution. Solutions whose main operator lands
+  1494→    /// before `depth` (the directly-enumerated `=` equations) are found here
+  1495→    /// and returned alongside, since those paths terminate before `depth`.
+  1496→    ///
+  1497→    /// Returns `(branches, eager_results, eager_searched)`.
+  1498→    pub fn collect_branches_at_depth(&self, depth: usize) -> (Vec<Branch>, Vec<String>, u64) {
+  1499→        let mut results: Vec<String> = Vec::new();
+  1500→        let (branches, searched_count) = self.collect_branches_into(depth, &mut results);
+  1501→        (branches, results, searched_count)
+  1502→    }
+  1503→
+  1504→    /// Like `collect_branches_at_depth`, but delivers the eagerly-found `=`
+  1505→    /// solutions (those whose main operator lands before `depth`) to `sink`
+  1506→    /// instead of a `Vec`. Returns `(branches, eager_searched)`.
+  1507→    pub fn collect_branches_into<S: SolutionSink>(
+  1508→        &self,
+  1509→        depth: usize,
+  1510→        sink: &mut S,
+  1511→    ) -> (Vec<Branch>, u64) {
+  1512→        let mut branches: Vec<Branch> = Vec::new();
+  1513→        let mut searched_count: u64 = 0;
+  1514→        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+  1515→        let mut char_counts = [0u8; CHARSET_LEN];
+  1516→        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+  1517→
+  1518→        self.recursive_search(
+  1519→            0,
+  1520→            &mut expr,
+  1521→            None,
+  1522→            None,
+  1523→            0,
+  1524→            None,
+  1525→            &mut char_counts,
+  1526→            FloorContext::new(),
+  1527→            &mut bracket_stack,
+  1528→            0,
+  1529→            &self.prepared,
+  1530→            0,
+  1531→            0,
+  1532→            false,
+  1533→            sink,
+  1534→            &mut searched_count,
+  1535→            depth,
+  1536→            &mut branches,
+  1537→        );
+  1538→
+  1539→        (branches, searched_count)
+  1540→    }
+  1541→
+  1542→    /// Resume the search from a `Branch` captured by `collect_branches_at_depth`,
+  1543→    /// reconstructing the exact state `recursive_search` had at that node.
+  1544→    pub fn solve_from_prefix(&self, branch: &Branch) -> (Vec<String>, u64) {
+  1545→        let mut results: Vec<String> = Vec::new();
+  1546→        let searched_count = self.solve_from_prefix_into(branch, &mut results);
+  1547→        (results, searched_count)
+  1548→    }
+  1549→
+  1550→    /// Like `solve_from_prefix`, but delivers solutions to `sink`. Returns the
+  1551→    /// number of complete expressions evaluated within this branch.
+  1552→    pub fn solve_from_prefix_into<S: SolutionSink>(&self, branch: &Branch, sink: &mut S) -> u64 {
+  1553→        let depth = branch.prefix.len();
+  1554→        let mut searched_count: u64 = 0;
+  1555→        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+  1556→        expr[..depth].copy_from_slice(&branch.prefix);
+  1557→        let mut char_counts = [0u8; CHARSET_LEN];
+  1558→        for &ch in &branch.prefix {
+  1559→            char_counts[idx_of(ch)] += 1;
+  1560→        }
+  1561→        let stack_len = branch.bracket_stack.len();
+  1562→        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+  1563→        bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
+  1564→        let prev_char = branch.prefix.last().copied();
+  1565→        let mut no_branches: Vec<Branch> = Vec::new();
+  1566→
+  1567→        self.recursive_search(
+  1568→            depth,
+  1569→            &mut expr,
+  1570→            prev_char,
+  1571→            branch.main_op,
+  1572→            branch.main_op_index,
+  1573→            branch.main_lhs_value,
+  1574→            &mut char_counts,
+  1575→            branch.floor_ctx,
+  1576→            &mut bracket_stack,
+  1577→            stack_len,
+  1578→            &self.prepared,
+  1579→            branch.num_len,
+  1580→            branch.num_value,
+  1581→            branch.num_leading_zero,
+  1582→            sink,
+  1583→            &mut searched_count,
+  1584→            usize::MAX,
+  1585→            &mut no_branches,
+  1586→        );
+  1587→
+  1588→        searched_count
+  1589→    }
+  1590→}
+  1591→
