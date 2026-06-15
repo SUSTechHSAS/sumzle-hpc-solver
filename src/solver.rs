@@ -50,6 +50,279 @@ const DEFAULT_ORDER: &[u8] = b"1234567890+-*/=([)]%^!A>";
 const END_CHARS: &[u8] = b"0123456789)]!";
 const LENGTH_ONE_DIGITS: &[u8] = b"0123456789";
 
+/// A destination for solutions discovered by the search.
+///
+/// The hot recursive search is generic over this trait so the default
+/// in-memory path (`Vec<String>`) compiles to exactly the previous code
+/// (monomorphized + inlined), while alternative sinks let the same search
+/// stream solutions to disk or score them for top-N without materializing the
+/// full solution set in memory. `accept` receives the completed expression as
+/// raw bytes (guaranteed valid ASCII/UTF-8 by construction).
+pub trait SolutionSink {
+    fn accept(&mut self, expr: &[u8]);
+}
+
+impl SolutionSink for Vec<String> {
+    #[inline]
+    fn accept(&mut self, expr: &[u8]) {
+        // Safety: the search only ever places bytes from the Sumzle charset,
+        // all of which are valid single-byte UTF-8.
+        let s = unsafe { std::str::from_utf8_unchecked(expr) };
+        self.push(s.to_owned());
+    }
+}
+
+/// Bitmask of the distinct charset indices present in `expr`. CHARSET_LEN is
+/// 24, so a `u32` holds one bit per possible character.
+#[inline]
+fn unique_char_mask(expr: &[u8]) -> u32 {
+    let mut mask = 0u32;
+    for &ch in expr {
+        mask |= 1u32 << idx_of(ch);
+    }
+    mask
+}
+
+/// Accumulates the statistics needed to compute character probabilities over
+/// the full solution set without storing any solution: the total number of
+/// solutions and, per charset index, how many solutions contain that character.
+/// Mirrors `server::compute_char_probabilities`, which counts each character at
+/// most once per solution.
+#[derive(Clone)]
+pub struct CountSink {
+    pub total: u64,
+    pub char_counts: [u64; CHARSET_LEN],
+}
+
+impl Default for CountSink {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            char_counts: [0; CHARSET_LEN],
+        }
+    }
+}
+
+impl CountSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Merge another sink's counts into this one (for parallel reduction).
+    pub fn merge(&mut self, other: &CountSink) {
+        self.total += other.total;
+        for i in 0..CHARSET_LEN {
+            self.char_counts[i] += other.char_counts[i];
+        }
+    }
+
+    /// Per-character probability (percentage of solutions containing the char),
+    /// matching `server::compute_char_probabilities`.
+    pub fn probabilities(&self) -> [f64; CHARSET_LEN] {
+        let mut probs = [0.0f64; CHARSET_LEN];
+        if self.total == 0 {
+            return probs;
+        }
+        let total = self.total as f64;
+        for (p, &c) in probs.iter_mut().zip(self.char_counts.iter()) {
+            *p = (c as f64 / total) * 100.0;
+        }
+        probs
+    }
+
+    /// Mask of the five most probable characters, ranked by probability
+    /// descending then charset index ascending — matching the `take(5)` over
+    /// the sorted list in `server::compute_recommended`.
+    pub fn top5_mask(&self) -> u32 {
+        let mut order: Vec<usize> = (0..CHARSET_LEN).filter(|&i| self.char_counts[i] > 0).collect();
+        order.sort_by(|&a, &b| {
+            self.char_counts[b]
+                .cmp(&self.char_counts[a])
+                .then(a.cmp(&b))
+        });
+        let mut mask = 0u32;
+        for &i in order.iter().take(5) {
+            mask |= 1u32 << i;
+        }
+        mask
+    }
+}
+
+impl SolutionSink for CountSink {
+    #[inline]
+    fn accept(&mut self, expr: &[u8]) {
+        self.total += 1;
+        let mut mask = unique_char_mask(expr);
+        while mask != 0 {
+            let i = mask.trailing_zeros() as usize;
+            self.char_counts[i] += 1;
+            mask &= mask - 1;
+        }
+    }
+}
+
+/// Scores each solution with the probability-based score from
+/// `server::compute_recommended` (sum of unique-character probabilities, plus
+/// 50 per character among the global top-5) and keeps only the `n`
+/// highest-scoring solutions in a bounded min-heap. Memory is O(n) regardless
+/// of the total solution count.
+pub struct TopNSink {
+    n: usize,
+    probs: [f64; CHARSET_LEN],
+    top5_mask: u32,
+    /// Min-heap keyed on (score, expr) so the lowest-scoring kept solution is
+    /// the cheapest to evict. `Reverse` turns the max-heap into a min-heap.
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredSolution>>,
+}
+
+/// A solution paired with its score, ordered by (score, expr) for a total,
+/// deterministic ordering (NaN is impossible here — scores are finite sums).
+#[derive(Clone, PartialEq)]
+struct ScoredSolution {
+    score: f64,
+    expr: String,
+}
+
+impl Eq for ScoredSolution {}
+
+impl Ord for ScoredSolution {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| self.expr.cmp(&other.expr))
+    }
+}
+
+impl PartialOrd for ScoredSolution {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl TopNSink {
+    pub fn new(n: usize, probs: [f64; CHARSET_LEN], top5_mask: u32) -> Self {
+        Self {
+            n,
+            probs,
+            top5_mask,
+            heap: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    #[inline]
+    fn score(&self, expr: &[u8]) -> f64 {
+        let mut mask = unique_char_mask(expr);
+        let mut score = 0.0f64;
+        while mask != 0 {
+            let i = mask.trailing_zeros() as usize;
+            score += self.probs[i];
+            if self.top5_mask & (1u32 << i) != 0 {
+                score += 50.0;
+            }
+            mask &= mask - 1;
+        }
+        score
+    }
+
+    fn push_scored(&mut self, item: ScoredSolution) {
+        if self.n == 0 {
+            return;
+        }
+        if self.heap.len() < self.n {
+            self.heap.push(std::cmp::Reverse(item));
+        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek() {
+            if item > *min {
+                self.heap.pop();
+                self.heap.push(std::cmp::Reverse(item));
+            }
+        }
+    }
+
+    /// Merge another sink's kept solutions into this one (parallel reduction).
+    pub fn merge(&mut self, other: TopNSink) {
+        for std::cmp::Reverse(item) in other.heap.into_vec() {
+            self.push_scored(item);
+        }
+    }
+
+    /// Consume the heap and return the kept solutions sorted by score
+    /// descending, ties broken by expression ascending (deterministic).
+    pub fn into_sorted(self) -> Vec<(f64, String)> {
+        let mut items: Vec<ScoredSolution> =
+            self.heap.into_vec().into_iter().map(|r| r.0).collect();
+        items.sort_by(|a, b| b.cmp(a));
+        items.into_iter().map(|s| (s.score, s.expr)).collect()
+    }
+}
+
+impl SolutionSink for TopNSink {
+    #[inline]
+    fn accept(&mut self, expr: &[u8]) {
+        if self.n == 0 {
+            return;
+        }
+        let score = self.score(expr);
+        let s = unsafe { std::str::from_utf8_unchecked(expr) };
+        self.push_scored(ScoredSolution {
+            score,
+            expr: s.to_owned(),
+        });
+    }
+}
+
+/// Streams solutions to a writer as JSON Lines (one `{"solution":"..."}` per
+/// line) through a local byte buffer, flushing to the shared writer only when
+/// the buffer fills. This keeps memory bounded and limits lock contention to
+/// one acquisition per buffer flush rather than one per solution.
+pub struct JsonlSink<'a, W: std::io::Write> {
+    writer: &'a std::sync::Mutex<W>,
+    buf: Vec<u8>,
+    flush_at: usize,
+    count: u64,
+}
+
+impl<'a, W: std::io::Write> JsonlSink<'a, W> {
+    pub fn new(writer: &'a std::sync::Mutex<W>) -> Self {
+        Self {
+            writer,
+            buf: Vec::with_capacity(256 * 1024),
+            flush_at: 256 * 1024,
+            count: 0,
+        }
+    }
+
+    fn flush_buf(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let mut guard = self.writer.lock().expect("solution writer poisoned");
+        guard.write_all(&self.buf).expect("failed writing solutions");
+        self.buf.clear();
+    }
+
+    /// Flush any remaining buffered bytes and return the number of solutions
+    /// written by this sink. Call once after the search ends.
+    pub fn finish(mut self) -> u64 {
+        self.flush_buf();
+        self.count
+    }
+}
+
+impl<W: std::io::Write> SolutionSink for JsonlSink<'_, W> {
+    #[inline]
+    fn accept(&mut self, expr: &[u8]) {
+        // No Sumzle charset character requires JSON string escaping, so the
+        // expression can be embedded verbatim between quotes.
+        self.buf.extend_from_slice(b"{\"solution\":\"");
+        self.buf.extend_from_slice(expr);
+        self.buf.extend_from_slice(b"\"}\n");
+        self.count += 1;
+        if self.buf.len() >= self.flush_at {
+            self.flush_buf();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PreparedKnowledge {
     fixed_chars: Vec<u8>,
@@ -662,14 +935,14 @@ fn can_place_char(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn complete_eq_rhs(
+fn complete_eq_rhs<S: SolutionSink>(
     length: usize,
     main_op_index: usize,
     expr: &mut [u8],
     char_counts: &mut [u8; CHARSET_LEN],
     prepared: &PreparedKnowledge,
     rhs: &[u8],
-    results: &mut Vec<String>,
+    sink: &mut S,
     searched_count: &mut u64,
 ) {
     debug_assert_eq!(rhs.len(), length - main_op_index - 1);
@@ -701,8 +974,7 @@ fn complete_eq_rhs(
 
     if valid && prepared.counts_can_still_succeed(char_counts, 0) {
         *searched_count += 1;
-        let expr_str = unsafe { std::str::from_utf8_unchecked(expr) };
-        results.push(expr_str.to_owned());
+        sink.accept(expr);
     }
 
     for &ch in &rhs[..filled] {
@@ -753,6 +1025,15 @@ impl Solver {
         } else {
             Vec::new()
         };
+        let searched_count = self.solve_into(&mut results);
+        (results, searched_count)
+    }
+
+    /// Run the full single-threaded search, delivering every solution to
+    /// `sink`. Returns the number of complete expressions evaluated. This is
+    /// the generic engine behind `solve`; alternative sinks stream to disk or
+    /// score for top-N without building a `Vec<String>`.
+    pub fn solve_into<S: SolutionSink>(&self, sink: &mut S) -> u64 {
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
@@ -774,17 +1055,17 @@ impl Solver {
             0,
             0,
             false,
-            &mut results,
+            sink,
             &mut searched_count,
             usize::MAX,
             &mut no_branches,
         );
 
-        (results, searched_count)
+        searched_count
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn recursive_search(
+    fn recursive_search<S: SolutionSink>(
         &self,
         index: usize,
         expr: &mut [u8],
@@ -800,7 +1081,7 @@ impl Solver {
         current_num_len: u8,
         current_num_value: i64,
         current_num_leading_zero: bool,
-        results: &mut Vec<String>,
+        sink: &mut S,
         searched_count: &mut u64,
         // Branch-collection cutoff: when `index == branch_depth`, snapshot the
         // current node into `branches` and stop. Normal solves pass
@@ -883,8 +1164,7 @@ impl Solver {
             };
 
             if valid {
-                let expr_str = unsafe { std::str::from_utf8_unchecked(expr) };
-                results.push(expr_str.to_owned());
+                sink.accept(expr);
             }
             return;
         }
@@ -956,7 +1236,7 @@ impl Solver {
                             char_counts,
                             prepared,
                             &rhs_buf[..rhs_len],
-                            results,
+                            sink,
                             searched_count,
                         );
                     }
@@ -1024,7 +1304,7 @@ impl Solver {
                 next_num_len,
                 next_num_value,
                 next_num_leading_zero,
-                results,
+                sink,
                 searched_count,
                 branch_depth,
                 branches,
@@ -1155,8 +1435,20 @@ impl Solver {
     ///
     /// Returns `(branches, eager_results, eager_searched)`.
     pub fn collect_branches_at_depth(&self, depth: usize) -> (Vec<Branch>, Vec<String>, u64) {
-        let mut branches: Vec<Branch> = Vec::new();
         let mut results: Vec<String> = Vec::new();
+        let (branches, searched_count) = self.collect_branches_into(depth, &mut results);
+        (branches, results, searched_count)
+    }
+
+    /// Like `collect_branches_at_depth`, but delivers the eagerly-found `=`
+    /// solutions (those whose main operator lands before `depth`) to `sink`
+    /// instead of a `Vec`. Returns `(branches, eager_searched)`.
+    pub fn collect_branches_into<S: SolutionSink>(
+        &self,
+        depth: usize,
+        sink: &mut S,
+    ) -> (Vec<Branch>, u64) {
+        let mut branches: Vec<Branch> = Vec::new();
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
@@ -1177,20 +1469,31 @@ impl Solver {
             0,
             0,
             false,
-            &mut results,
+            sink,
             &mut searched_count,
             depth,
             &mut branches,
         );
 
-        (branches, results, searched_count)
+        (branches, searched_count)
     }
 
     /// Resume the search from a `Branch` captured by `collect_branches_at_depth`,
     /// reconstructing the exact state `recursive_search` had at that node.
     pub fn solve_from_prefix(&self, branch: &Branch) -> (Vec<String>, u64) {
-        let depth = branch.prefix.len();
         let mut results: Vec<String> = Vec::new();
+        let searched_count = self.solve_from_prefix_into(branch, &mut results);
+        (results, searched_count)
+    }
+
+    /// Like `solve_from_prefix`, but delivers solutions to `sink`. Returns the
+    /// number of complete expressions evaluated within this branch.
+    pub fn solve_from_prefix_into<S: SolutionSink>(
+        &self,
+        branch: &Branch,
+        sink: &mut S,
+    ) -> u64 {
+        let depth = branch.prefix.len();
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         expr[..depth].copy_from_slice(&branch.prefix);
@@ -1219,12 +1522,12 @@ impl Solver {
             branch.num_len,
             branch.num_value,
             branch.num_leading_zero,
-            &mut results,
+            sink,
             &mut searched_count,
             usize::MAX,
             &mut no_branches,
         );
 
-        (results, searched_count)
+        searched_count
     }
 }
