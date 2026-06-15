@@ -205,6 +205,36 @@
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
+/* Per-solution score pill (top-N mode). Sits at the right edge; the badge,
+   when also present, tucks in beside it instead of grabbing its own space. */
+.result-score {
+  margin-left: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--fluent-blue);
+  background: color-mix(in srgb, var(--fluent-blue) 14%, transparent);
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+
+.result-item:has(.result-score) .result-recommended-badge {
+  margin-left: 6px;
+}
+
+/* Top-N indicator next to the result count. */
+.top-n-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 9px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--fluent-blue);
+  border-radius: 10px;
+  vertical-align: middle;
+}
+
 .no-solutions {
   text-align: center;
   color: var(--color-text-secondary);

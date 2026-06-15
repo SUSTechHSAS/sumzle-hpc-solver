@@ -30,6 +30,8 @@ describe('Results', () => {
         { char: '1', display: '1', count: 1, probability: 50 },
       ],
       recommended: '1+2=3',
+      top: 0,
+      scores: [],
     };
     const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -49,6 +51,8 @@ describe('Results', () => {
         { char: '*', display: '×', count: 1, probability: 100 },
       ],
       recommended: '1+2=3',
+      top: 0,
+      scores: [],
     };
     const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -62,6 +66,8 @@ describe('Results', () => {
       stats: { searched_count: 1000, found_count: 2, elapsed_ms: 50, speed: 20000 },
       char_probabilities: [],
       recommended: '1+2=3',
+      top: 0,
+      scores: [],
     };
     const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -75,6 +81,8 @@ describe('Results', () => {
       stats: { searched_count: 100, found_count: 0, elapsed_ms: 5, speed: 20000 },
       char_probabilities: [],
       recommended: null,
+      top: 0,
+      scores: [],
     };
     render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
@@ -87,11 +95,32 @@ describe('Results', () => {
       stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
       char_probabilities: [],
       recommended: '1+2=3',
+      top: 0,
+      scores: [],
     };
     render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
     expect(screen.getByText('JSON')).toBeInTheDocument();
     expect(screen.getByText('CSV')).toBeInTheDocument();
     expect(screen.getByText('TXT')).toBeInTheDocument();
+  });
+
+  it('renders per-solution scores and a Top-N badge in top-N mode', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3', '2+3=5'],
+      stats: { searched_count: 1000, found_count: 2, elapsed_ms: 50, speed: 20000 },
+      char_probabilities: [],
+      recommended: '1+2=3',
+      top: 2,
+      scores: [245.5, 180.25],
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
+
+    // Top-N badge present and scores shown (rounded to one decimal).
+    expect(screen.getByText('Top-2')).toBeInTheDocument();
+    const scoreEls = container.querySelectorAll('.result-score');
+    expect(scoreEls).toHaveLength(2);
+    expect(scoreEls[0]).toHaveTextContent('245.5');
+    expect(scoreEls[1]).toHaveTextContent('180.3');
   });
 });

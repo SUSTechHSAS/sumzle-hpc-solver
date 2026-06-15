@@ -86,6 +86,10 @@ pub struct SolveQuery {
     /// Number of threads (0 = auto, 1 = single-threaded)
     #[serde(default)]
     pub threads: usize,
+    /// Return only the top-N highest-scoring solutions (0 = return every
+    /// solution). N > 0 uses the memory-bounded two-pass `solve_top_n`.
+    #[serde(default)]
+    pub top: usize,
 }
 
 /// Character probability entry
@@ -104,7 +108,8 @@ pub struct CharProbability {
 /// Response body for the solve endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveResponse {
-    /// All valid solutions found
+    /// Valid solutions found — every solution, or the top-N ranked by score
+    /// (descending) when `top` was requested.
     pub solutions: Vec<String>,
     /// Solver statistics
     pub stats: SolverStats,
@@ -112,6 +117,13 @@ pub struct SolveResponse {
     pub char_probabilities: Vec<CharProbability>,
     /// Recommended solution (highest probability score)
     pub recommended: Option<String>,
+    /// The top-N value used (0 means all solutions were returned).
+    #[serde(default)]
+    pub top: usize,
+    /// Score of each entry in `solutions`, aligned by index. Empty unless
+    /// `top` > 0 (in which case `solutions` is sorted by it, descending).
+    #[serde(default)]
+    pub scores: Vec<f64>,
 }
 
 /// Query parameters for the download endpoint
@@ -325,6 +337,7 @@ async fn solve_handler(
     } else {
         query.threads
     };
+    let top = query.top;
 
     // Convert API rows to internal GuessRow format
     let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
@@ -347,8 +360,29 @@ async fn solve_handler(
 
     let start = std::time::Instant::now();
 
-    let (results, searched_count) = if threads == 1 {
-        solver.solve()
+    // `scores` is populated (aligned with `solutions`) only in top-N mode.
+    let (results, scores, searched_count) = if top > 0 {
+        // Top-N: bounded-memory two-pass scoring through the shared, tested
+        // `solve_top_n` — identical scoring to `compute_recommended`. Routing
+        // both the single- and multi-threaded cases through it keeps the
+        // ranking from diverging between them.
+        let num_threads = if threads == 0 {
+            num_cpus::get()
+        } else {
+            threads
+        };
+        let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
+        let (scored, searched) = parallel_solver.solve_top_n(top);
+        let mut exprs = Vec::with_capacity(scored.len());
+        let mut scs = Vec::with_capacity(scored.len());
+        for (score, expr) in scored {
+            exprs.push(expr);
+            scs.push(score);
+        }
+        (exprs, scs, searched)
+    } else if threads == 1 {
+        let (r, s) = solver.solve();
+        (r, Vec::new(), s)
     } else {
         let num_threads = if threads == 0 {
             num_cpus::get()
@@ -356,7 +390,8 @@ async fn solve_handler(
             threads
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        parallel_solver.solve()
+        let (r, s) = parallel_solver.solve();
+        (r, Vec::new(), s)
     };
 
     let elapsed = start.elapsed();
@@ -364,9 +399,15 @@ async fn solve_handler(
     let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
     let found_count = results.len();
 
-    // Compute character probabilities and recommended solution
+    // Compute character probabilities and recommended solution.
     let char_probabilities = compute_char_probabilities(&results);
-    let recommended = compute_recommended(&results, &char_probabilities);
+    // In top-N mode `results` is already ranked by (full-set) score, so the
+    // first entry is the recommendation; otherwise scan for the best.
+    let recommended = if top > 0 {
+        results.first().cloned()
+    } else {
+        compute_recommended(&results, &char_probabilities)
+    };
 
     let response = SolveResponse {
         solutions: results,
@@ -378,6 +419,8 @@ async fn solve_handler(
         },
         char_probabilities,
         recommended,
+        top,
+        scores,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -460,6 +503,8 @@ async fn download_handler(
                 stats: body.stats,
                 char_probabilities: body.char_probabilities,
                 recommended: body.recommended,
+                top: 0,
+                scores: Vec::new(),
             };
             let json_bytes = serde_json::to_string_pretty(&response).unwrap_or_default();
             let filename = format!("sumzle_solutions_{}.json", timestamp);
@@ -674,6 +719,94 @@ mod tests {
         // Check new fields
         assert!(!resp.char_probabilities.is_empty());
         assert!(resp.recommended.is_some());
+        // Non-top-N mode: `top` echoes 0 and no per-solution scores are sent.
+        assert_eq!(resp.top, 0);
+        assert!(resp.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_single_thread() {
+        let mut app = test_app();
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=3",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.top, 3);
+        assert!(resp.solutions.len() <= 3);
+        // Scores align with solutions and are sorted descending.
+        assert_eq!(resp.scores.len(), resp.solutions.len());
+        for w in resp.scores.windows(2) {
+            assert!(w[0] >= w[1], "scores must be sorted descending");
+        }
+        // The top-ranked solution is the recommendation.
+        assert_eq!(
+            resp.recommended.as_deref(),
+            resp.solutions.first().map(|s| s.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_zero_returns_all() {
+        let mut app = test_app();
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=0",
+            serde_json::to_string(&req_body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.top, 0);
+        assert!(resp.scores.is_empty());
+        assert!(resp.solutions.len() > 3);
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_single_and_parallel_agree() {
+        // The ranking must be identical regardless of thread count — the whole
+        // point of routing both paths through `solve_top_n`.
+        let req_body = SolveRequest {
+            length: 6,
+            rows: vec![],
+        };
+        let body_str = serde_json::to_string(&req_body).unwrap();
+
+        let mut app = test_app();
+        let (_, b1) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=10",
+            body_str.clone(),
+        )
+        .await;
+        let single: SolveResponse = serde_json::from_slice(&b1).unwrap();
+
+        let mut app = test_app();
+        let (_, b2) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=0&top=10",
+            body_str,
+        )
+        .await;
+        let parallel: SolveResponse = serde_json::from_slice(&b2).unwrap();
+
+        assert_eq!(single.solutions, parallel.solutions);
+        assert_eq!(single.scores, parallel.scores);
     }
 
     #[tokio::test]

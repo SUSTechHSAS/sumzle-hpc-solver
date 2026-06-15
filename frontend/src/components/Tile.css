@@ -5,7 +5,8 @@
   justify-content: center;
   width: 50px;
   height: 62px;
-  border-radius: 6px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-xs);
   transition: background-color 0.3s ease, transform 0.15s ease, box-shadow 0.2s ease;
   user-select: none;
   position: relative;
@@ -13,7 +14,8 @@
 }
 
 .tile:hover {
-  transform: scale(1.05);
+  transform: translateY(-2px) scale(1.04);
+  box-shadow: var(--shadow-m);
 }
 
 .tile-selected {

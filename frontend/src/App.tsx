@@ -20,6 +20,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedTile, setSelectedTile] = useState<{ row: number; col: number } | null>(null);
+  // Solver options: threads (0 = auto) and top-N (0 = return every solution).
+  const [threads, setThreads] = useState(0);
+  const [topN, setTopN] = useState(0);
 
   const handleLengthChange = useCallback((newLength: number) => {
     const clamped = Math.min(8, Math.max(3, newLength));
@@ -114,7 +117,7 @@ export default function App() {
     setError(null);
     setSolutions(null);
     try {
-      const res = await solvePuzzle(length, rows);
+      const res = await solvePuzzle(length, rows, { threads, top: topN });
       if (generation === solveGenerationRef.current) {
         setSolutions(res);
       }
@@ -127,7 +130,7 @@ export default function App() {
         setLoading(false);
       }
     }
-  }, [length, rows]);
+  }, [length, rows, threads, topN]);
 
   const handleDownload = useCallback(
     (format: DownloadFormat) => {
@@ -195,6 +198,36 @@ export default function App() {
                   <button className="btn btn-danger" onClick={clearAll}>
                     清空
                   </button>
+                </div>
+              </div>
+
+              <div className="solve-options">
+                <div className="option-control">
+                  <label htmlFor="threads-input">线程数:</label>
+                  <input
+                    id="threads-input"
+                    type="number"
+                    min={0}
+                    max={256}
+                    value={threads}
+                    onChange={(e) =>
+                      setThreads(Math.max(0, Math.min(256, parseInt(e.target.value, 10) || 0)))
+                    }
+                    className="option-input"
+                  />
+                  <span className="option-hint">0 = 自动</span>
+                </div>
+                <div className="option-control">
+                  <label htmlFor="topn-input">最优解 Top-N:</label>
+                  <input
+                    id="topn-input"
+                    type="number"
+                    min={0}
+                    value={topN}
+                    onChange={(e) => setTopN(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                    className="option-input"
+                  />
+                  <span className="option-hint">0 = 全部</span>
                 </div>
               </div>
 

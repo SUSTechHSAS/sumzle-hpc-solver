@@ -10,12 +10,25 @@ import type {
 
 const API_BASE = '/api';
 
+export interface SolveOptions {
+  /** Number of threads (0 = auto, 1 = single-threaded). Default: 0. */
+  threads?: number;
+  /** Return only the top-N highest-scoring solutions (0 = return all). Default: 0. */
+  top?: number;
+}
+
 export async function solvePuzzle(
   length: number,
   rows: SolveRequest['rows'],
-  threads = 0,
+  options: SolveOptions = {},
 ): Promise<SolveResponse> {
-  const res = await fetch(`${API_BASE}/solve?threads=${threads}`, {
+  const threads = options.threads ?? 0;
+  const top = options.top ?? 0;
+  const params = new URLSearchParams({ threads: String(threads) });
+  if (top > 0) {
+    params.set('top', String(top));
+  }
+  const res = await fetch(`${API_BASE}/solve?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ length, rows }),
@@ -33,15 +46,17 @@ export function downloadResults(
   format: DownloadFormat = 'json',
 ): void {
   const timestamp = Math.floor(Date.now() / 1000);
+  const hasScores =
+    data.scores.length === data.solutions.length && data.scores.length > 0;
   let content: string;
   let mimeType: string;
   let extension: string;
 
   switch (format) {
     case 'csv': {
-      const lines = ['index,expression'];
+      const lines = [hasScores ? 'index,expression,score' : 'index,expression'];
       data.solutions.forEach((sol, i) => {
-        lines.push(`${i + 1},${sol}`);
+        lines.push(hasScores ? `${i + 1},${sol},${data.scores[i]}` : `${i + 1},${sol}`);
       });
       content = lines.join('\n');
       mimeType = 'text/csv;charset=utf-8';
@@ -57,12 +72,17 @@ export function downloadResults(
         `Time elapsed: ${data.stats.elapsed_ms}ms`,
         `Search speed: ${data.stats.speed} expr/s`,
       ];
+      if (data.top > 0) {
+        lines.push(`Top-N: ${data.top}`);
+      }
       if (data.recommended) {
         lines.push(`Recommended: ${data.recommended}`);
       }
       lines.push('', '--- Solutions ---');
       data.solutions.forEach((sol, i) => {
-        lines.push(`${i + 1}. ${sol}`);
+        lines.push(
+          hasScores ? `${i + 1}. ${sol} (score: ${data.scores[i].toFixed(2)})` : `${i + 1}. ${sol}`,
+        );
       });
       content = lines.join('\n');
       mimeType = 'text/plain;charset=utf-8';
