@@ -69,6 +69,9 @@ enum Commands {
         /// Expression lengths to benchmark
         #[arg(short, long, default_value = "6")]
         lengths: Vec<usize>,
+        /// Run parallel solver benchmark (auto-detect thread count)
+        #[arg(short, long)]
+        parallel: bool,
     },
     /// Start the web API server
     Serve {
@@ -245,7 +248,8 @@ fn main() -> Result<()> {
             None => println!("Invalid expression"),
         },
 
-        Commands::Bench { lengths } => {
+        Commands::Bench { lengths, parallel } => {
+            let num_threads = num_cpus::get();
             for &len in &lengths {
                 let gk = GlobalKnowledge {
                     fixed_chars: vec![None; len],
@@ -254,19 +258,36 @@ fn main() -> Result<()> {
                     must_appear_exact_count: std::collections::HashMap::new(),
                     globally_forbidden: std::collections::HashSet::new(),
                 };
-                let solver = Solver::new(len, gk);
 
-                let start = std::time::Instant::now();
-                let (results, searched_count) = solver.solve();
-                let elapsed = start.elapsed();
+                if parallel {
+                    let solver = Solver::new(len, gk);
+                    let ps = ParallelSolver::new(solver, Some(num_threads));
+                    let start = std::time::Instant::now();
+                    let (results, searched_count) = ps.solve();
+                    let elapsed = start.elapsed();
 
-                println!(
-                    "Length {}: {} solutions, {} searched, {:?}",
-                    len,
-                    results.len(),
-                    searched_count,
-                    elapsed
-                );
+                    println!(
+                        "Length {} [parallel, {} threads]: {} solutions, {} searched, {:?}",
+                        len,
+                        num_threads,
+                        results.len(),
+                        searched_count,
+                        elapsed
+                    );
+                } else {
+                    let solver = Solver::new(len, gk);
+                    let start = std::time::Instant::now();
+                    let (results, searched_count) = solver.solve();
+                    let elapsed = start.elapsed();
+
+                    println!(
+                        "Length {}: {} solutions, {} searched, {:?}",
+                        len,
+                        results.len(),
+                        searched_count,
+                        elapsed
+                    );
+                }
             }
         }
 
