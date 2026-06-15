@@ -71,8 +71,7 @@ impl ParallelSolver {
                 .collect()
         });
 
-        let total_len =
-            eager_results.len() + outcomes.iter().map(|(r, _)| r.len()).sum::<usize>();
+        let total_len = eager_results.len() + outcomes.iter().map(|(r, _)| r.len()).sum::<usize>();
         let mut results: Vec<String> = Vec::with_capacity(total_len);
         results.append(&mut eager_results);
         for (branch_results, branch_searched) in outcomes {

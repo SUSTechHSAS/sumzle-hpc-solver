@@ -237,8 +237,7 @@ fn main() -> Result<()> {
                         elapsed_ms
                     );
                 } else {
-                    let solutions: Vec<String> =
-                        scored.into_iter().map(|(_, sol)| sol).collect();
+                    let solutions: Vec<String> = scored.into_iter().map(|(_, sol)| sol).collect();
                     print_result(&format, solutions, searched_count, elapsed_ms, speed)?;
                 }
             } else if let Some(path) = output {

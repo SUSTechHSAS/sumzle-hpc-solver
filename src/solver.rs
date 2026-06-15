@@ -134,7 +134,9 @@ impl CountSink {
     /// descending then charset index ascending — matching the `take(5)` over
     /// the sorted list in `server::compute_recommended`.
     pub fn top5_mask(&self) -> u32 {
-        let mut order: Vec<usize> = (0..CHARSET_LEN).filter(|&i| self.char_counts[i] > 0).collect();
+        let mut order: Vec<usize> = (0..CHARSET_LEN)
+            .filter(|&i| self.char_counts[i] > 0)
+            .collect();
         order.sort_by(|&a, &b| {
             self.char_counts[b]
                 .cmp(&self.char_counts[a])
@@ -296,7 +298,9 @@ impl<'a, W: std::io::Write> JsonlSink<'a, W> {
             return;
         }
         let mut guard = self.writer.lock().expect("solution writer poisoned");
-        guard.write_all(&self.buf).expect("failed writing solutions");
+        guard
+            .write_all(&self.buf)
+            .expect("failed writing solutions");
         self.buf.clear();
     }
 
@@ -1488,11 +1492,7 @@ impl Solver {
 
     /// Like `solve_from_prefix`, but delivers solutions to `sink`. Returns the
     /// number of complete expressions evaluated within this branch.
-    pub fn solve_from_prefix_into<S: SolutionSink>(
-        &self,
-        branch: &Branch,
-        sink: &mut S,
-    ) -> u64 {
+    pub fn solve_from_prefix_into<S: SolutionSink>(&self, branch: &Branch, sink: &mut S) -> u64 {
         let depth = branch.prefix.len();
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
