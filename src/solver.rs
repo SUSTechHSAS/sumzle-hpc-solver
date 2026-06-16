@@ -434,7 +434,16 @@ impl PreparedKnowledge {
     fn new(length: usize, gk: &GlobalKnowledge) -> Self {
         let mut fixed_chars = vec![NO_CHAR; length];
         for (i, fixed) in gk.fixed_chars.iter().enumerate() {
-            fixed_chars[i] = fixed.map(|c| c as u8).unwrap_or(NO_CHAR);
+            // A fixed char comes from a `Correct` tile, which is untrusted
+            // API/CLI input and may carry a byte outside the Sumzle charset.
+            // Such a byte must never reach the search: `idx_of`/`char_mask`
+            // would map it to `INVALID_INDEX` (255) and index out of bounds.
+            // Drop it (no constraint) to match how the other constraint paths
+            // skip unrepresentable characters.
+            fixed_chars[i] = fixed
+                .filter(|&c| idx_of_char(c).is_some())
+                .map(|c| c as u8)
+                .unwrap_or(NO_CHAR);
         }
 
         let mut cannot_be_at_masks = vec![0u32; length];
@@ -1472,6 +1481,13 @@ impl Solver {
         main_op: Option<char>,
         floor_ctx: FloorContext,
     ) -> (Vec<String>, u64) {
+        // `solve_branch` is public and `first_char` may be arbitrary. Reject any
+        // character outside the Sumzle charset before it reaches `idx_of`, which
+        // would otherwise yield `INVALID_INDEX` (255) and index `char_counts`
+        // out of bounds.
+        if idx_of_char(first_char).is_none() {
+            return (Vec::new(), 0);
+        }
         let first = first_char as u8;
         if self.prepared.is_globally_forbidden(first)
             || self.prepared.cannot_be_at(0, first)

@@ -154,6 +154,14 @@ pub struct DownloadRequest {
     /// Recommended solution
     #[serde(default)]
     pub recommended: Option<String>,
+    /// The top-N value used (0 means all solutions). Preserved so a JSON
+    /// download round-trips the `SolveResponse` it was given.
+    #[serde(default)]
+    pub top: usize,
+    /// Per-solution scores aligned with `solutions`. Preserved so top-N JSON
+    /// downloads keep the scores from the original solve response.
+    #[serde(default)]
+    pub scores: Vec<f64>,
 }
 
 /// Request body for the validate endpoint
@@ -497,14 +505,16 @@ async fn download_handler(
                 .into_response()
         }
         _ => {
-            // Default: JSON format — return the full SolveResponse
+            // Default: JSON format — return the full SolveResponse, preserving
+            // the top-N value and per-solution scores so the download round-trips
+            // the response the client received from `/api/solve`.
             let response = SolveResponse {
                 solutions: body.solutions,
                 stats: body.stats,
                 char_probabilities: body.char_probabilities,
                 recommended: body.recommended,
-                top: 0,
-                scores: Vec::new(),
+                top: body.top,
+                scores: body.scores,
             };
             let json_bytes = serde_json::to_string_pretty(&response).unwrap_or_default();
             let filename = format!("sumzle_solutions_{}.json", timestamp);
@@ -900,6 +910,8 @@ mod tests {
             },
             char_probabilities: vec![],
             recommended: Some("1+2=3".to_string()),
+            top: 2,
+            scores: vec![9.5, 8.0],
         };
         let (status, body) = send_request(
             &mut app,
@@ -909,8 +921,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, HttpStatusCode::OK);
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["solutions"].is_array());
+        // The JSON download round-trips the response, including top-N metadata.
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            resp.solutions,
+            vec!["1+2=3".to_string(), "2+1=3".to_string()]
+        );
+        assert_eq!(resp.top, 2);
+        assert_eq!(resp.scores, vec![9.5, 8.0]);
     }
 
     #[tokio::test]
@@ -926,6 +944,8 @@ mod tests {
             },
             char_probabilities: vec![],
             recommended: None,
+            top: 0,
+            scores: vec![],
         };
         let (status, body) = send_request(
             &mut app,
@@ -953,6 +973,8 @@ mod tests {
             },
             char_probabilities: vec![],
             recommended: Some("1+2=3".to_string()),
+            top: 0,
+            scores: vec![],
         };
         let (status, body) = send_request(
             &mut app,

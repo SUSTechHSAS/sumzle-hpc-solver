@@ -46,8 +46,10 @@ export function downloadResults(
   format: DownloadFormat = 'json',
 ): void {
   const timestamp = Math.floor(Date.now() / 1000);
+  // Guard against an older backend that omits `scores`: reading `.length` on
+  // an undefined field would throw a TypeError.
   const hasScores =
-    data.scores.length === data.solutions.length && data.scores.length > 0;
+    !!data.scores && data.scores.length === data.solutions.length && data.scores.length > 0;
   let content: string;
   let mimeType: string;
   let extension: string;

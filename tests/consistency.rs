@@ -1257,3 +1257,31 @@ fn non_finite_numeric_rhs_is_rejected() {
     let huge = "9".repeat(320);
     assert!(!is_valid_equation(&format!("9^20={huge}")));
 }
+
+#[test]
+fn correct_invalid_guess_char_does_not_panic() {
+    // A `Correct` tile fixes an exact character at a position. When that
+    // character is outside the Sumzle charset (e.g. `x`), its raw byte must not
+    // reach the search: `idx_of` would map it to `INVALID_INDEX` (255) and index
+    // `char_counts` out of bounds (a DoS on the API/CLI). The fixed constraint is
+    // dropped during preparation. The companion `cannot_be_at` set still forbids
+    // every valid char at that position, so no solution can be placed there.
+    let gk = gk_from_row(5, &[('x', TileState::Correct)]);
+    let solver = Solver::new(5, gk);
+    let (results, _searched) = solver.solve();
+    assert!(
+        results.is_empty(),
+        "position fixed to an unrepresentable char admits no solutions"
+    );
+}
+
+#[test]
+fn solve_branch_invalid_first_char_does_not_panic() {
+    // `solve_branch` is public and may be called with an arbitrary `first_char`.
+    // A character outside the Sumzle charset must be rejected before it reaches
+    // `idx_of`, which would otherwise index `char_counts` out of bounds.
+    let solver = Solver::new(5, empty_gk(5));
+    let (results, searched) = solver.solve_branch('x', None, FloorContext::new());
+    assert!(results.is_empty());
+    assert_eq!(searched, 0);
+}
