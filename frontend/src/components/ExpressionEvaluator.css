@@ -1,54 +1,59 @@
 .eval-section {
-  padding: 16px;
-  background: var(--color-surface);
-  border-radius: 10px;
+  min-width: 0;
+  padding: var(--space-md);
   border: 1px solid var(--color-border);
+  border-radius: var(--radius-m, 12px);
+  background: var(--color-surface);
   box-shadow: var(--shadow-xs);
 }
 
 .eval-section h3 {
-  margin: 0 0 10px 0;
-  font-size: 1rem;
+  margin: 0 0 10px;
   color: var(--color-text);
+  font-size: 0.98rem;
 }
 
 .eval-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-xs);
 }
 
 .eval-input {
   flex: 1;
   min-width: 0;
-  padding: 8px 12px;
-  border: 2px solid var(--color-border);
-  border-radius: 6px;
-  font-size: 1rem;
-  font-family: 'Courier New', monospace;
-  outline: none;
-  transition: border-color 0.2s;
-  background: var(--color-background);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-s, 8px);
+  background: var(--color-surface-raised, var(--color-surface));
   color: var(--color-text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
 }
 
 .eval-input:focus {
   border-color: var(--fluent-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fluent-blue) 16%, transparent);
 }
 
 .eval-btn {
-  padding: 8px 16px;
+  min-width: 42px;
+  min-height: 38px;
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--fluent-blue);
+  border-radius: var(--radius-s, 8px);
   background: var(--fluent-blue);
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  font-size: 1.1rem;
-  font-weight: 700;
+  color: var(--color-on-accent);
   cursor: pointer;
-  transition: background-color 0.2s;
+  font-size: 1rem;
+  font-weight: var(--weight-bold);
+  transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease;
 }
 
 .eval-btn:hover:not(:disabled) {
-  background: #0056b3;
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
 }
 
 .eval-btn:disabled {
@@ -57,10 +62,11 @@
 }
 
 .eval-result {
-  margin-top: 8px;
-  font-family: 'Courier New', monospace;
-  font-size: 1.1rem;
+  margin-top: var(--space-xs);
   color: var(--color-text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1rem;
+  overflow-wrap: anywhere;
 }
 
 .eval-result strong {
@@ -69,11 +75,11 @@
 
 .eval-no-result {
   color: var(--color-text-secondary);
-  font-style: italic;
 }
 
 .eval-error {
-  margin-top: 8px;
+  margin-top: var(--space-xs);
   color: var(--color-danger);
-  font-size: 0.9rem;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
 }

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { evaluateExpression } from '../api';
+import Icon from './Icon';
 import './ExpressionEvaluator.css';
 
 export default function ExpressionEvaluator() {
@@ -17,7 +18,8 @@ export default function ExpressionEvaluator() {
       const res = await evaluateExpression(expression.trim());
       setResult(res.result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Evaluation failed');
+      const message = e instanceof Error ? e.message : '未知错误';
+      setError(`求值失败：${message}`);
     } finally {
       setLoading(false);
     }
@@ -29,7 +31,7 @@ export default function ExpressionEvaluator() {
 
   return (
     <div className="eval-section" data-testid="expression-evaluator">
-      <h3 className="section-title">🔢 表达式求值</h3>
+      <h3 className="section-title"><Icon name="sigma" />表达式求值</h3>
       <div className="eval-row">
         <input
           type="text"
@@ -40,7 +42,7 @@ export default function ExpressionEvaluator() {
           onKeyDown={handleKeyDown}
         />
         <button className="eval-btn" onClick={handleEvaluate} disabled={loading}>
-          {loading ? '...' : '='}
+          {loading ? '求值中…' : '='}
         </button>
       </div>
       {result !== null && (

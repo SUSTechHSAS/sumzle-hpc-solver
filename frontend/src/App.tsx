@@ -8,13 +8,26 @@ import { createBlankRow, cycleState } from './utils';
 import Results from './components/Results';
 import ExpressionEvaluator from './components/ExpressionEvaluator';
 import EquationValidator from './components/EquationValidator';
+import Icon from './components/Icon';
 import './App.css';
 
 const DEFAULT_LENGTH = 5;
 
+const adjustRowLength = (row: GuessRow, len: number): GuessRow => {
+  const tiles = [...row.tiles];
+  while (tiles.length < len) {
+    tiles.push({ char: '', state: 'empty' as TileState });
+  }
+  while (tiles.length > len) {
+    tiles.pop();
+  }
+  return { tiles };
+};
+
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [length, setLength] = useState(DEFAULT_LENGTH);
+  const [lengthDraft, setLengthDraft] = useState(String(DEFAULT_LENGTH));
   const [rows, setRows] = useState<GuessRow[]>([createBlankRow(DEFAULT_LENGTH)]);
   const [solutions, setSolutions] = useState<SolveResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -24,25 +37,31 @@ export default function App() {
   const [threads, setThreads] = useState(0);
   const [topN, setTopN] = useState(0);
 
-  const handleLengthChange = useCallback((newLength: number) => {
+  const commitLength = useCallback((newLength: number) => {
     // Only a lower bound: the solver supports arbitrary expression lengths.
     const clamped = Math.max(3, newLength);
     setLength(clamped);
+    setLengthDraft(String(clamped));
     setRows((prev) => prev.map((row) => adjustRowLength(row, clamped)));
     setSolutions(null);
     setError(null);
   }, []);
 
-  const adjustRowLength = (row: GuessRow, len: number): GuessRow => {
-    const tiles = [...row.tiles];
-    while (tiles.length < len) {
-      tiles.push({ char: '', state: 'empty' as TileState });
-    }
-    while (tiles.length > len) {
-      tiles.pop();
-    }
-    return { tiles };
-  };
+  const handleLengthDraftChange = useCallback(
+    (value: string) => {
+      setLengthDraft(value);
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed >= 3) {
+        commitLength(parsed);
+      }
+    },
+    [commitLength],
+  );
+
+  const handleLengthBlur = useCallback(() => {
+    const parsed = Number.parseInt(lengthDraft, 10);
+    commitLength(Number.isFinite(parsed) ? parsed : length);
+  }, [commitLength, length, lengthDraft]);
 
   const handleTileCharChange = useCallback(
     (rowIndex: number, tileIndex: number, char: string) => {
@@ -124,7 +143,8 @@ export default function App() {
       }
     } catch (e) {
       if (generation === solveGenerationRef.current) {
-        setError(e instanceof Error ? e.message : 'An error occurred');
+        const message = e instanceof Error ? e.message : '未知错误';
+        setError(`求解失败：${message}`);
       }
     } finally {
       if (generation === solveGenerationRef.current) {
@@ -139,7 +159,8 @@ export default function App() {
       try {
         downloadResults(solutions, format);
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Download failed');
+        const message = e instanceof Error ? e.message : '未知错误';
+        setError(`下载失败：${message}`);
       }
     },
     [solutions],
@@ -148,6 +169,7 @@ export default function App() {
   const handleImport = useCallback(
     (importedLength: number, importedRows: GuessRow[]) => {
       setLength(importedLength);
+      setLengthDraft(String(importedLength));
       setRows(importedRows);
       setSolutions(null);
       setError(null);
@@ -165,7 +187,7 @@ export default function App() {
           onClick={() => setDarkMode(!darkMode)}
           title={darkMode ? '切换到亮色模式' : '切换到暗色模式'}
         >
-          {darkMode ? '☀️' : '🌙'}
+          <Icon name={darkMode ? 'sun' : 'moon'} />
         </button>
       </header>
 
@@ -174,7 +196,7 @@ export default function App() {
           {/* Left Column: Configuration */}
           <div className="column column-left">
             <div className="panel">
-              <h2 className="section-title">🎯 求解配置</h2>
+              <h2 className="section-title"><Icon name="settings" />求解配置</h2>
 
               <div className="puzzle-controls">
                 <div className="length-control">
@@ -183,8 +205,10 @@ export default function App() {
                     id="length-input"
                     type="number"
                     min={3}
-                    value={length}
-                    onChange={(e) => handleLengthChange(parseInt(e.target.value, 10) || 3)}
+                    value={lengthDraft}
+                    inputMode="numeric"
+                    onChange={(e) => handleLengthDraftChange(e.target.value)}
+                    onBlur={handleLengthBlur}
                     className="length-input"
                   />
                 </div>
@@ -215,10 +239,10 @@ export default function App() {
                     }
                     className="option-input"
                   />
-                  <span className="option-hint">0 = 自动</span>
+                  <span className="option-hint">0 表示自动选择</span>
                 </div>
                 <div className="option-control">
-                  <label htmlFor="topn-input">最优解 Top-N:</label>
+                  <label htmlFor="topn-input">返回最优解数量:</label>
                   <input
                     id="topn-input"
                     type="number"
@@ -227,7 +251,7 @@ export default function App() {
                     onChange={(e) => setTopN(Math.max(0, parseInt(e.target.value, 10) || 0))}
                     className="option-input"
                   />
-                  <span className="option-hint">0 = 全部</span>
+                  <span className="option-hint">0 表示返回全部</span>
                 </div>
               </div>
 
@@ -253,10 +277,10 @@ export default function App() {
                   onClick={handleSolve}
                   disabled={loading}
                 >
-                  {loading ? '求解中...' : '🧩 开始求解'}
+                  {loading ? '正在求解…' : <><Icon name="play" />开始求解</>}
                 </button>
                 <p className="solve-hint">
-                  点击方块角标切换颜色：绿色（正确位置）→ 黄色（存在但位置错误）→ 灰色（不存在）
+                  先输入猜测，再按反馈标记方块：绿色=正确位置，黄色=存在但错位，灰色=不存在。
                 </p>
               </div>
 
@@ -264,12 +288,12 @@ export default function App() {
 
               {/* Help section */}
               <div className="help-section">
-                <h4 className="help-title">💡 操作提示</h4>
+                <h4 className="help-title"><Icon name="help" />操作提示</h4>
                 <ul className="help-list">
-                  <li>点击方块输入字符，点击角标切换状态</li>
-                  <li>使用虚拟键盘或直接输入字符</li>
-                  <li>绿色 = 正确位置，黄色 = 存在但错位，灰色 = 不存在</li>
-                  <li>支持运算符：+ - × ÷ % ^ ! A ( ) [ ] = &gt;</li>
+                  <li>选中方块后可直接输入，也可使用下方键盘。</li>
+                  <li>角标按正确 → 错位 → 不存在循环切换。</li>
+                  <li>线程数填 0 让后端自动选择；最优解数量填 0 返回全部解。</li>
+                  <li>支持字符：+ - × ÷ % ^ ! A ( ) [ ] = &gt;</li>
                 </ul>
               </div>
             </div>
@@ -283,6 +307,7 @@ export default function App() {
                 loading={loading}
                 error={error}
                 onDownload={handleDownload}
+                onRetry={handleSolve}
               />
             </div>
 

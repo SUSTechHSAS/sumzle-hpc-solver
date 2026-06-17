@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect } from 'vitest';
 import App from './App';
 
@@ -24,6 +25,21 @@ describe('App', () => {
     expect(screen.getByText('清空')).toBeInTheDocument();
   });
 
+  it('allows entering a multi-digit expression length without clamping the first digit', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const input = screen.getByLabelText('表达式长度:');
+
+    await user.clear(input);
+    await user.type(input, '1');
+    expect(input).toHaveValue(1);
+    expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(5);
+
+    await user.type(input, '1');
+    expect(input).toHaveValue(11);
+    expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(11);
+  });
+
   it('renders expression evaluator', () => {
     render(<App />);
     expect(screen.getByTestId('expression-evaluator')).toBeInTheDocument();
@@ -47,7 +63,7 @@ describe('App', () => {
 
   it('renders the import game state button', () => {
     render(<App />);
-    expect(screen.getByText('📥 导入局面')).toBeInTheDocument();
+    expect(screen.getByText('导入局面')).toBeInTheDocument();
   });
 
   it('renders the theme toggle button', () => {
@@ -57,6 +73,6 @@ describe('App', () => {
 
   it('renders the help section', () => {
     render(<App />);
-    expect(screen.getByText('💡 操作提示')).toBeInTheDocument();
+    expect(screen.getByText('操作提示')).toBeInTheDocument();
   });
 });
