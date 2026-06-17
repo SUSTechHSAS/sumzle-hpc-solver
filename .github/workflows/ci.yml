@@ -1648,6 +1648,30 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
 
+      - name: Build frontend dist (explicit, before Tauri build)
+        run: npm run build --prefix frontend
+
+      - name: Copy frontend dist into Android assets
+        # Tauri 2's Android build does NOT auto-copy frontendDist into
+        # app/src/main/assets/ on every code path; without this step the
+        # APK ships with only `assets/tauri.conf.json` and the WebView
+        # shows a blank white screen when the app starts.
+        #
+        # The Android WebViewAssetLoader serves `https://tauri.localhost/`
+        # from `app/src/main/assets/`, so:
+        #   frontend/dist/index.html        -> assets/index.html
+        #   frontend/dist/assets/*.js,css   -> assets/assets/*.js,css
+        #   frontend/dist/favicon.svg       -> assets/favicon.svg
+        run: |
+          set -euo pipefail
+          ASSETS_DIR="src-tauri/gen/android/app/src/main/assets"
+          mkdir -p "$ASSETS_DIR"
+          # Mirror frontend/dist/* into the Android assets dir, preserving
+          # the nested `assets/` subdir (the JS bundle lives there).
+          cp -r frontend/dist/. "$ASSETS_DIR/"
+          echo "=== Android assets directory after copy ==="
+          find "$ASSETS_DIR" -type f | sort
+
       - name: Build debug APK (arm64-v8a)
         run: npx tauri android build --debug --apk --target aarch64
         env:
@@ -1659,18 +1683,27 @@ jobs:
           # root, so it needs the root package.json with the `tauri` script
           # (added in this PR).
 
-      - name: Inject frontend dist into APK assets
+      - name: Verify APK contains frontend assets before signing
+        # Sanity check: if the APK doesn't have index.html and assets/,
+        # the app will white-screen on launch. Fail fast instead of shipping
+        # a broken APK.
         run: |
+          set -euo pipefail
           APK=$(find src-tauri/gen/android -name "*.apk" -path "*debug*" | head -1)
-          echo "Found APK: $APK"
-          # Copy frontend dist to Android assets dir (Tauri 2 sometimes
-          # misses this on certain build paths)
-          ASSETS_DIR="src-tauri/gen/android/app/src/main/assets"
-          cp -r frontend/dist/* "$ASSETS_DIR/"
-          # Add assets to the existing APK
-          cd "$ASSETS_DIR"
-          zip -r "$GITHUB_WORKSPACE/$APK" index.html assets/ 2>/dev/null || true
-          cd "$GITHUB_WORKSPACE"
+          echo "APK: $APK"
+          echo "=== Frontend assets in APK ==="
+          unzip -l "$APK" | grep -E "assets/(index\.html|assets/|favicon)" || true
+          # Hard-fail if index.html is missing
+          if ! unzip -l "$APK" | grep -q "assets/index.html"; then
+            echo "::error::APK is missing assets/index.html — app will white-screen"
+            exit 1
+          fi
+          # Hard-fail if the JS bundle is missing
+          if ! unzip -l "$APK" | grep -qE "assets/assets/index-.*\.js"; then
+            echo "::error::APK is missing assets/assets/index-*.js — app will white-screen"
+            exit 1
+          fi
+          echo "✓ APK has required frontend assets"
 
       - name: Zipalign + sign APK
         id: sign
@@ -1705,9 +1738,9 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           unzip -l "$APK" | grep -E "lib/.*\.so" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "### Frontend assets" >> $GITHUB_STEP_SUMMARY
+          echo "### Frontend assets (must include index.html + assets/)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          unzip -l "$APK" | grep -E "(index\.html|assets/.*\.(js|css|svg))" >> $GITHUB_STEP_SUMMARY
+          unzip -l "$APK" | grep -E "assets/(index\.html|assets/|favicon|tauri\.conf)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "### Signature" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
