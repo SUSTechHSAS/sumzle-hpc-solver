@@ -1294,7 +1294,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> ℹ️ Benchmarks run on GitHub Actions \`ubuntu-latest\` runner. Results may vary due to shared hardware." >> $GITHUB_STEP_SUMMARY
 
-  # Release builds only run on push (not PRs)
+  # Release builds only run on push (not PRs).
+  # Each target produces a single combined archive containing the backend
+  # binary AND the pre-built frontend (frontend/dist), so end users can
+  # download one file and run the full app — no separate frontend build
+  # or reverse proxy required. The server's get_frontend_dir() resolution
+  # looks for <exe_dir>/frontend/dist automatically, so unpacking the
+  # archive and running the binary "just works".
   build-release:
     name: Build Release ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -1308,22 +1314,32 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: sumzle-solver
             asset_name: sumzle-solver-linux-x86_64
+            archive_ext: tar.gz
+            archive_cmd: tar -czf
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: sumzle-solver
             asset_name: sumzle-solver-linux-aarch64
+            archive_ext: tar.gz
+            archive_cmd: tar -czf
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: sumzle-solver.exe
-            asset_name: sumzle-solver-windows-x86_64.exe
+            asset_name: sumzle-solver-windows-x86_64
+            archive_ext: zip
+            archive_cmd: 7z a -tzip
           - os: macOS-latest
             target: x86_64-apple-darwin
             artifact_name: sumzle-solver
             asset_name: sumzle-solver-macos-x86_64
+            archive_ext: tar.gz
+            archive_cmd: tar -czf
           - os: macOS-latest
             target: aarch64-apple-darwin
             artifact_name: sumzle-solver
             asset_name: sumzle-solver-macos-aarch64
+            archive_ext: tar.gz
+            archive_cmd: tar -czf
 
     steps:
       - uses: actions/checkout@v4
@@ -1341,14 +1357,191 @@ jobs:
           echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
-      - name: Build release
+      - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      # ---------------------------------------------------------------------
+      #  Build the frontend. The output (frontend/dist) is platform-
+      #  independent static HTML/JS/CSS, so we build it once per target
+      #  inside the matrix (parallelized by GitHub) and bundle it next to
+      #  the binary. The Rust server auto-discovers <exe_dir>/frontend/dist.
+      # ---------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # ---------------------------------------------------------------------
+      #  Stage the combined package: binary + frontend/dist + README +
+      #  launcher. Layout matches what get_frontend_dir() expects so the
+      #  server serves the UI out of the box.
+      # ---------------------------------------------------------------------
+      - name: Stage combined package (Unix)
+        if: matrix.archive_ext == 'tar.gz'
+        run: |
+          set -euo pipefail
+          STAGE="staging/${{ matrix.asset_name }}"
+          mkdir -p "$STAGE/frontend"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "$STAGE/"
+          cp -r frontend/dist "$STAGE/frontend/"
+          # Per-platform launcher + README
+          cat > "$STAGE/run.sh" << 'LAUNCHER'
+          #!/usr/bin/env bash
+          # Launch the Sumzle HPC Solver backend, which also serves the
+          # bundled frontend at http://localhost:3000
+          set -euo pipefail
+          cd "$(dirname "$0")"
+          PORT="${PORT:-3000}"
+          HOST="${HOST:-0.0.0.0}"
+          exec ./sumzle-solver serve --host "$HOST" --port "$PORT"
+          LAUNCHER
+          chmod +x "$STAGE/run.sh"
+          cat > "$STAGE/README.md" << 'README'
+          # Sumzle HPC Solver
+
+          A high-performance solver for the Sumzle equation puzzle, with a
+          built-in web frontend. This archive contains everything you need —
+          no build step required.
+
+          ## Quick start (Unix)
+
+          ```bash
+          ./run.sh
+          # or directly:
+          ./sumzle-solver serve --host 0.0.0.0 --port 3000
+          ```
+
+          Then open http://localhost:3000 in your browser. The backend
+          automatically serves the bundled frontend from `frontend/dist`.
+
+          ## Contents
+
+          | File | Purpose |
+          |------|---------|
+          | `sumzle-solver` | The backend binary (Rust release build) |
+          | `frontend/dist/` | Pre-built web frontend (static HTML/JS/CSS) |
+          | `run.sh` / `run.bat` | Launcher script |
+          | `README.md` | This file |
+
+          ## CLI usage
+
+          ```bash
+          ./sumzle-solver solve -i puzzle.json -t 0 -f json
+          ./sumzle-solver validate "1+2=3"
+          ./sumzle-solver eval "5!"
+          ./sumzle-solver bench -l 5 6 7
+          ```
+
+          ## Custom frontend location
+
+          Set the `STATIC_DIR` environment variable to serve the frontend
+          from a custom directory:
+
+          ```bash
+          STATIC_DIR=/path/to/dist ./sumzle-solver serve
+          ```
+
+          ## License
+
+          MIT
+          README
+
+      - name: Stage combined package (Windows)
+        if: matrix.archive_ext == 'zip'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="staging/${{ matrix.asset_name }}"
+          mkdir -p "$STAGE/frontend"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "$STAGE/"
+          cp -r frontend/dist "$STAGE/frontend/"
+          cat > "$STAGE/run.bat" << 'LAUNCHER'
+          @echo off
+          REM Launch the Sumzle HPC Solver backend, which also serves the
+          REM bundled frontend at http://localhost:3000
+          cd /d "%~dp0"
+          if "%PORT%"=="" set PORT=3000
+          if "%HOST%"=="" set HOST=0.0.0.0
+          sumzle-solver.exe serve --host %HOST% --port %PORT%
+          LAUNCHER
+          cat > "$STAGE/README.md" << 'README'
+          # Sumzle HPC Solver
+
+          A high-performance solver for the Sumzle equation puzzle, with a
+          built-in web frontend. This archive contains everything you need —
+          no build step required.
+
+          ## Quick start (Windows)
+
+          ```cmd
+          run.bat
+          :: or directly:
+          sumzle-solver.exe serve --host 0.0.0.0 --port 3000
+          ```
+
+          Then open http://localhost:3000 in your browser. The backend
+          automatically serves the bundled frontend from `frontend\dist`.
+
+          ## Contents
+
+          | File | Purpose |
+          |------|---------|
+          | `sumzle-solver.exe` | The backend binary (Rust release build) |
+          | `frontend\dist\` | Pre-built web frontend (static HTML/JS/CSS) |
+          | `run.bat` | Launcher script |
+          | `README.md` | This file |
+
+          ## CLI usage
+
+          ```cmd
+          sumzle-solver.exe solve -i puzzle.json -t 0 -f json
+          sumzle-solver.exe validate "1+2=3"
+          sumzle-solver.exe eval "5!"
+          sumzle-solver.exe bench -l 5 6 7
+          ```
+
+          ## Custom frontend location
+
+          Set the `STATIC_DIR` environment variable to serve the frontend
+          from a custom directory:
+
+          ```cmd
+          set STATIC_DIR=C:\path\to\dist
+          sumzle-solver.exe serve
+          ```
+
+          ## License
+
+          MIT
+          README
+
+      - name: Create combined archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd staging
+          ARCHIVE="${{ matrix.asset_name }}.${{ matrix.archive_ext }}"
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            7z a -tzip "$ARCHIVE" "${{ matrix.asset_name }}"
+          else
+            tar -czf "$ARCHIVE" "${{ matrix.asset_name }}"
+          fi
+          echo "Created $ARCHIVE"
+          ls -la "$ARCHIVE"
+
+      - name: Upload combined artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          path: staging/${{ matrix.asset_name }}.${{ matrix.archive_ext }}
 
   release:
     name: Create Release
@@ -1364,10 +1557,80 @@ jobs:
         with:
           path: artifacts
 
+      - name: List release assets
+        run: |
+          echo "## 📦 Release Assets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Each archive bundles the backend binary AND the pre-built frontend (frontend/dist). Unpack and run — no build step required." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Asset | Platform |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|----------|" >> $GITHUB_STEP_SUMMARY
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort | while read -r f; do
+            base=$(basename "$f")
+            case "$base" in
+              *linux-x86_64*)   platform="Linux x86_64" ;;
+              *linux-aarch64*)  platform="Linux ARM64" ;;
+              *windows-x86_64*) platform="Windows x86_64" ;;
+              *macos-x86_64*)   platform="macOS x86_64" ;;
+              *macos-aarch64*)  platform="macOS ARM64" ;;
+              *)                platform="Other" ;;
+            esac
+            size=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null || echo 0)
+            if [ "$size" -ge 1048576 ]; then
+              size_hr="$(awk "BEGIN {printf \"%.1f MB\", $size/1048576}")"
+            elif [ "$size" -ge 1024 ]; then
+              size_hr="$(awk "BEGIN {printf \"%.1f KB\", $size/1024}")"
+            else
+              size_hr="$size B"
+            fi
+            echo "| \`$base\` ($size_hr) | $platform |" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
+          find artifacts -type f | sort >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+          body: |
+            ## Combined release archives
+
+            Each archive bundles the backend binary AND the pre-built web
+            frontend — **unpack and run, no build step required**.
+
+            | Platform | Archive |
+            |----------|---------|
+            | Linux x86_64 | `sumzle-solver-linux-x86_64.tar.gz` |
+            | Linux ARM64 | `sumzle-solver-linux-aarch64.tar.gz` |
+            | Windows x86_64 | `sumzle-solver-windows-x86_64.zip` |
+            | macOS x86_64 | `sumzle-solver-macos-x86_64.tar.gz` |
+            | macOS ARM64 | `sumzle-solver-macos-aarch64.tar.gz` |
+
+            ## Quick start
+
+            **Unix** (Linux / macOS):
+            ```bash
+            tar -xzf sumzle-solver-<platform>.tar.gz
+            cd sumzle-solver-<platform>
+            ./run.sh
+            ```
+
+            **Windows**:
+            ```cmd
+            Expand-Archive sumzle-solver-windows-x86_64.zip
+            cd sumzle-solver-windows-x86_64
+            run.bat
+            ```
+
+            Then open http://localhost:3000 in your browser. The backend
+            automatically serves the bundled frontend from `frontend/dist`.
+
+            See the in-archive `README.md` for CLI usage and advanced options.
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
