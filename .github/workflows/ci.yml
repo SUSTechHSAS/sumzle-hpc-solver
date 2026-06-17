@@ -1543,6 +1543,185 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: staging/${{ matrix.asset_name }}.${{ matrix.archive_ext }}
 
+  # ---------------------------------------------------------------------------
+  # Tauri mobile verification — runs the Rust-side solver test suite that
+  # exercises the exact same code bundled into the Android APK's
+  # libsumzle_tauri_lib.so. Does NOT require Tauri runtime or Android SDK,
+  # so it runs fast on a plain ubuntu-latest runner.
+  # ---------------------------------------------------------------------------
+  tauri-verify-solver:
+    name: Tauri / Solver Logic Verify
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-verify-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-verify-
+            ${{ runner.os }}-cargo-
+
+      - name: Run solver logic verification
+        run: bash scripts/verify-solver-logic.sh
+
+      - name: Upload verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-solver-verify-log
+          path: |
+            target/release/sumzle-solver
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Tauri Android APK build — cross-compiles libsumzle_tauri_lib.so for
+  # arm64-v8a (the most common Android phone ABI) and assembles a signed
+  # debug APK. Uses a single ABI to stay within the 30-min CI job limit;
+  # full 4-ABI release builds should be done manually via release workflow.
+  # ---------------------------------------------------------------------------
+  tauri-android-build:
+    name: Tauri / Android APK (arm64-v8a debug)
+    runs-on: ubuntu-latest
+    needs: check
+    # Skip on tags — release workflow handles tagged releases
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+            ndk;27.0.12077973
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install root dependencies (Tauri CLI)
+        run: npm install --no-audit --no-fund
+
+      - name: Install frontend dependencies
+        run: npm install --prefix frontend --no-audit --no-fund
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-tauri-android-${{ hashFiles('**/Cargo.lock', 'src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tauri-android-
+            ${{ runner.os }}-cargo-
+
+      - name: Initialize Tauri Android project
+        run: npx tauri android init
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+
+      - name: Build debug APK (arm64-v8a)
+        run: npx tauri android build --debug --apk --target aarch64
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+          # Tauri Gradle BuildTask invokes `npm run tauri ...` from repo
+          # root, so it needs the root package.json with the `tauri` script
+          # (added in this PR).
+
+      - name: Inject frontend dist into APK assets
+        run: |
+          APK=$(find src-tauri/gen/android -name "*.apk" -path "*debug*" | head -1)
+          echo "Found APK: $APK"
+          # Copy frontend dist to Android assets dir (Tauri 2 sometimes
+          # misses this on certain build paths)
+          ASSETS_DIR="src-tauri/gen/android/app/src/main/assets"
+          cp -r frontend/dist/* "$ASSETS_DIR/"
+          # Add assets to the existing APK
+          cd "$ASSETS_DIR"
+          zip -r "$GITHUB_WORKSPACE/$APK" index.html assets/ 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Zipalign + sign APK
+        id: sign
+        run: |
+          APK=$(find src-tauri/gen/android -name "*.apk" -path "*debug*" | head -1)
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          ALIGNED="/tmp/apk-aligned.apk"
+          SIGNED="sumzle-tauri-arm64-debug.apk"
+          "$BUILD_TOOLS/zipalign" -f 4 "$APK" "$ALIGNED"
+          KS="$HOME/.android/debug.keystore"
+          mkdir -p "$(dirname "$KS")"
+          if [ ! -f "$KS" ]; then
+            keytool -genkey -v -keystore "$KS" -storepass android -alias androiddebugkey \
+              -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+            --out "$SIGNED" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED" | head -5
+          echo "apk_path=$PWD/$SIGNED" >> $GITHUB_OUTPUT
+          ls -lh "$SIGNED"
+
+      - name: Verify APK contents
+        run: |
+          APK="${{ steps.sign.outputs.apk_path }}"
+          echo "## 📱 Tauri Android APK — Verification" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Size: \`$(du -h "$APK" | cut -f1)\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Native libraries" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          unzip -l "$APK" | grep -E "lib/.*\.so" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### Frontend assets" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          unzip -l "$APK" | grep -E "(index\.html|assets/.*\.(js|css|svg))" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### Signature" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$APK" | head -5 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sumzle-tauri-arm64-debug-apk
+          path: sumzle-tauri-arm64-debug.apk
+          retention-days: 14
+
   release:
     name: Create Release
     runs-on: ubuntu-latest
