@@ -168,12 +168,22 @@ impl ParallelSolver {
     /// sorted by score descending (ties broken by expression ascending) and the
     /// total searched count.
     pub fn solve_top_n(&self, n: usize) -> (Vec<(f64, String)>, u64) {
+        let (scored, _counts, searched) = self.solve_top_n_with_counts(n);
+        (scored, searched)
+    }
+
+    /// Like [`solve_top_n`](Self::solve_top_n), but also returns the
+    /// character-frequency statistics gathered in pass one over the *entire*
+    /// solution set — not just the kept top-N. The web API uses these to report
+    /// character probabilities across all solutions while returning only the
+    /// ranked top-N subset (the top-N's own frequencies would be misleading).
+    pub fn solve_top_n_with_counts(&self, n: usize) -> (Vec<(f64, String)>, CountSink, u64) {
         let (branches, eager_results, eager_searched) = self.collect_branches();
 
         // Both passes share a single pool acquisition. The sequential glue
         // between them (folding eager solutions, deriving probabilities and the
         // top-5 mask) is cheap and just runs on the calling thread.
-        let (base_top, searched) = self.run_in_pool(|| {
+        let (base_top, base_counts, searched) = self.run_in_pool(|| {
             // ---- Pass 1: character-frequency statistics over all solutions. ----
             let mut base_counts = CountSink::new();
             for sol in &eager_results {
@@ -223,9 +233,9 @@ impl ParallelSolver {
                 );
             base_top.merge(merged);
 
-            (base_top, searched)
+            (base_top, base_counts, searched)
         });
 
-        (base_top.into_sorted(), searched)
+        (base_top.into_sorted(), base_counts, searched)
     }
 }
