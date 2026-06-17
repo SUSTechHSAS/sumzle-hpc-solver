@@ -1,0 +1,20 @@
+{
+  "name": "Sumzle Tauri Mobile Builder",
+  "image": "mcr.microsoft.com/devcontainers/base:debian-12",
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "stable",
+      "profile": "minimal"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+  "forwardPorts": [3000, 1420],
+  "postCreateCommand": "bash scripts/codespace-full-build.sh || true",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tauri-apps.tauri-vscode"]
+    }
+  }
+}
