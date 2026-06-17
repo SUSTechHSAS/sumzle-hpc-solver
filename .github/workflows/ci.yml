@@ -320,7 +320,7 @@ jobs:
 
       - name: Run Top-N benchmarks (lengths 6–9, N=100 and N=1000)
         run: |
-          echo "## 📊 Top-N Solver Benchmarks (PR9)" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Top-N Solver Benchmarks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> Bounded min-heap of the N highest-probability solutions. Memory is O(threads·N) regardless of total solution count." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -362,7 +362,7 @@ jobs:
 
       - name: Run Streaming benchmarks (lengths 6–9)
         run: |
-          echo "## 📊 Streaming Solver Benchmarks (PR9)" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Streaming Solver Benchmarks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> All solutions streamed to a JSONL file. Memory is bounded (~constant RSS) regardless of total solution count." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -477,7 +477,7 @@ jobs:
 
       - name: Run memory benchmarks (default / streaming / top-N, lengths 6–8)
         run: |
-          echo "## 📊 Memory Benchmarks — Peak RSS by Mode (PR9)" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Memory Benchmarks — Peak RSS by Mode" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> Peak resident set size (VmHWM) per (length, mode). Lengths 6–8 chosen so the default in-memory path stays feasible on the runner." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -971,10 +971,10 @@ jobs:
               lines.append("")
 
           # =============================================================
-          #  Section 4: Top-N Benchmark Comparison (PR9)
+          #  Section 4: Top-N Benchmark Comparison
           # =============================================================
           if current_topn:
-              lines.append("## 📊 Top-N Benchmark Comparison with Main Branch (PR9)")
+              lines.append("## 📊 Top-N Benchmark Comparison with Main Branch")
               lines.append("")
               lines.append(f"Comparing **{pr_branch}** (PR) vs **{base_branch}** (baseline)")
               lines.append("")
@@ -1021,10 +1021,10 @@ jobs:
               lines.append("")
 
           # =============================================================
-          #  Section 5: Streaming Benchmark Comparison (PR9)
+          #  Section 5: Streaming Benchmark Comparison
           # =============================================================
           if current_stream:
-              lines.append("## 📊 Streaming Benchmark Comparison with Main Branch (PR9)")
+              lines.append("## 📊 Streaming Benchmark Comparison with Main Branch")
               lines.append("")
               lines.append(f"Comparing **{pr_branch}** (PR) vs **{base_branch}** (baseline)")
               lines.append("")
@@ -1072,10 +1072,10 @@ jobs:
               lines.append("")
 
           # =============================================================
-          #  Section 6: Memory Benchmark Comparison (PR9)
+          #  Section 6: Memory Benchmark Comparison
           # =============================================================
           if current_mem:
-              lines.append("## 📊 Memory Benchmark Comparison with Main Branch (PR9)")
+              lines.append("## 📊 Memory Benchmark Comparison with Main Branch")
               lines.append("")
               lines.append("Peak resident set size (VmHWM) per (length, mode). Larger RSS than main is a memory regression.")
               lines.append("")
@@ -1115,10 +1115,10 @@ jobs:
               lines.append("")
 
           # =============================================================
-          #  Section 7: Cross-Mode searched_count Consistency Check (PR9)
+          #  Section 7: Cross-Mode searched_count Consistency Check
           # =============================================================
           if current_stream or current_topn:
-              lines.append("## ✅ Cross-Mode searched_count Consistency Check (PR9)")
+              lines.append("## ✅ Cross-Mode searched_count Consistency Check")
               lines.append("")
               lines.append("Verifies that default, streaming, and top-N modes all enumerate the same expression space (searched_count must match across modes).")
               lines.append("")
@@ -1197,7 +1197,7 @@ jobs:
           lines.append("</details>")
 
           lines.append("<details>")
-          lines.append("<summary>📝 Raw Baseline Top-N Benchmark Output (PR9)</summary>")
+          lines.append("<summary>📝 Raw Baseline Top-N Benchmark Output</summary>")
           lines.append("")
           lines.append("```")
           try:
@@ -1210,7 +1210,7 @@ jobs:
           lines.append("</details>")
 
           lines.append("<details>")
-          lines.append("<summary>📝 Raw Baseline Streaming Benchmark Output (PR9)</summary>")
+          lines.append("<summary>📝 Raw Baseline Streaming Benchmark Output</summary>")
           lines.append("")
           lines.append("```")
           try:
@@ -1223,7 +1223,7 @@ jobs:
           lines.append("</details>")
 
           lines.append("<details>")
-          lines.append("<summary>📝 Raw Baseline Memory Benchmark Output (PR9)</summary>")
+          lines.append("<summary>📝 Raw Baseline Memory Benchmark Output</summary>")
           lines.append("")
           lines.append("```")
           try:
