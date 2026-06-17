@@ -1612,10 +1612,9 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-            ndk;27.0.12077973
+          # `packages` is a space-separated list (not multi-line YAML).
+          # See https://github.com/android-actions/setup-android#usage
+          packages: 'platforms;android-34 build-tools;34.0.0 ndk;27.0.12077973'
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

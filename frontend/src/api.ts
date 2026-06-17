@@ -13,7 +13,7 @@ import type {
 // absent and we fall through to the regular HTTP API.
 const isTauri =
   typeof window !== 'undefined' &&
-  // @ts-ignore - injected by Tauri runtime
+  // @ts-expect-error - __TAURI_INTERNALS__ is injected by the Tauri runtime at runtime; not declared on Window.
   (window.__TAURI_INTERNALS__ !== undefined || window.__TAURI__ !== undefined);
 
 // Lazily import the Tauri invoke bridge only when running inside Tauri, so the
