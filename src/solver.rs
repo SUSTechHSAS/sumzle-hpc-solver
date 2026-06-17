@@ -134,6 +134,19 @@ impl CountSink {
         }
     }
 
+    /// Per-character `(char, count)` pairs over the full solution set, one
+    /// entry for each character that appears in at least one solution. The
+    /// count is the number of solutions containing that character (counted at
+    /// most once per solution), matching `server::compute_char_probabilities`.
+    /// Used to report character probabilities across *all* solutions in top-N
+    /// mode, where the individual solutions are never materialized.
+    pub fn char_count_pairs(&self) -> Vec<(char, usize)> {
+        (0..CHARSET_LEN)
+            .filter(|&i| self.char_counts[i] > 0)
+            .map(|i| (CHAR_FROM_INDEX[i] as char, self.char_counts[i] as usize))
+            .collect()
+    }
+
     /// Per-character probability (percentage of solutions containing the char),
     /// matching `server::compute_char_probabilities`.
     pub fn probabilities(&self) -> [f64; CHARSET_LEN] {

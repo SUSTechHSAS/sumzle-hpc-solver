@@ -93,7 +93,7 @@ pub struct SolveQuery {
 }
 
 /// Character probability entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CharProbability {
     /// The character
     pub char: String,
@@ -211,29 +211,24 @@ fn display_char(ch: char) -> String {
     }
 }
 
-/// Compute character probabilities from a list of solutions.
+/// Build the sorted [`CharProbability`] list from per-character solution counts
+/// and the total number of solutions.
 ///
-/// For each unique character that appears in any solution, we count how many
-/// solutions contain that character and express it as a percentage of total
-/// solutions. Results are sorted by probability descending, then alphabetically.
-pub fn compute_char_probabilities(solutions: &[String]) -> Vec<CharProbability> {
-    if solutions.is_empty() {
+/// `char_counts` yields `(char, count)` pairs where `count` is how many of the
+/// `total` solutions contain that character. Shared by
+/// [`compute_char_probabilities`] (which derives the counts from a materialized
+/// solution list) and the top-N path (which gets them from the solver's
+/// `CountSink`, computed over the full solution set rather than the kept
+/// top-N). Sorted by probability descending, then character ascending.
+fn char_probabilities_from_counts(
+    char_counts: impl IntoIterator<Item = (char, usize)>,
+    total: usize,
+) -> Vec<CharProbability> {
+    if total == 0 {
         return Vec::new();
     }
 
-    let total = solutions.len() as f64;
-    let mut char_counts: HashMap<char, usize> = HashMap::new();
-
-    let mut seen = std::collections::HashSet::new();
-    for sol in solutions {
-        seen.clear();
-        for ch in sol.chars() {
-            if seen.insert(ch) {
-                *char_counts.entry(ch).or_insert(0) += 1;
-            }
-        }
-    }
-
+    let total = total as f64;
     let mut probs: Vec<CharProbability> = char_counts
         .into_iter()
         .map(|(ch, count)| CharProbability {
@@ -253,6 +248,31 @@ pub fn compute_char_probabilities(solutions: &[String]) -> Vec<CharProbability> 
     });
 
     probs
+}
+
+/// Compute character probabilities from a list of solutions.
+///
+/// For each unique character that appears in any solution, we count how many
+/// solutions contain that character and express it as a percentage of total
+/// solutions. Results are sorted by probability descending, then alphabetically.
+pub fn compute_char_probabilities(solutions: &[String]) -> Vec<CharProbability> {
+    if solutions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut char_counts: HashMap<char, usize> = HashMap::new();
+
+    let mut seen = std::collections::HashSet::new();
+    for sol in solutions {
+        seen.clear();
+        for ch in sol.chars() {
+            if seen.insert(ch) {
+                *char_counts.entry(ch).or_insert(0) += 1;
+            }
+        }
+    }
+
+    char_probabilities_from_counts(char_counts, solutions.len())
 }
 
 /// Compute the recommended solution based on character probability scores.
@@ -313,10 +333,10 @@ pub fn compute_recommended(solutions: &[String], probs: &[CharProbability]) -> O
 // API handlers
 // ---------------------------------------------------------------------------
 
-/// Minimum expression length supported by the solver
+/// Minimum expression length supported by the solver. There is intentionally
+/// no maximum: the search engine handles any length, so the web API enforces
+/// only this lower bound (very large lengths can be slow and memory-hungry).
 const MIN_SOLVE_LENGTH: usize = 3;
-/// Maximum expression length supported by the solver
-const MAX_SOLVE_LENGTH: usize = 8;
 /// Maximum number of threads allowed for a single solve request
 const MAX_THREADS: usize = 256;
 
@@ -325,14 +345,15 @@ async fn solve_handler(
     Query(query): Query<SolveQuery>,
     Json(body): Json<SolveRequest>,
 ) -> Response {
-    // Validate length bounds
-    if body.length < MIN_SOLVE_LENGTH || body.length > MAX_SOLVE_LENGTH {
+    // Validate length: only a lower bound is enforced — the search engine
+    // supports arbitrary expression lengths, so there is no upper limit.
+    if body.length < MIN_SOLVE_LENGTH {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: format!(
-                    "Length must be between {} and {}, got {}",
-                    MIN_SOLVE_LENGTH, MAX_SOLVE_LENGTH, body.length
+                    "Length must be at least {}, got {}",
+                    MIN_SOLVE_LENGTH, body.length
                 ),
             }),
         )
@@ -369,7 +390,12 @@ async fn solve_handler(
     let start = std::time::Instant::now();
 
     // `scores` is populated (aligned with `solutions`) only in top-N mode.
-    let (results, scores, searched_count) = if top > 0 {
+    // `full_char_probs` is `Some` only in top-N mode, where the character
+    // probabilities must be computed over the *entire* solution set — the
+    // returned `solutions` are just the ranked top-N subset, so their own
+    // frequencies would be misleading. In the other modes `results` already
+    // holds every solution, so the probabilities are derived from it below.
+    let (results, scores, full_char_probs, searched_count) = if top > 0 {
         // Top-N: bounded-memory two-pass scoring through the shared, tested
         // `solve_top_n` — identical scoring to `compute_recommended`. Routing
         // both the single- and multi-threaded cases through it keeps the
@@ -380,17 +406,21 @@ async fn solve_handler(
             threads
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        let (scored, searched) = parallel_solver.solve_top_n(top);
+        let (scored, counts, searched) = parallel_solver.solve_top_n_with_counts(top);
         let mut exprs = Vec::with_capacity(scored.len());
         let mut scs = Vec::with_capacity(scored.len());
         for (score, expr) in scored {
             exprs.push(expr);
             scs.push(score);
         }
-        (exprs, scs, searched)
+        // Character probabilities over ALL solutions (from pass-1 counts), not
+        // just the kept top-N.
+        let char_probs =
+            char_probabilities_from_counts(counts.char_count_pairs(), counts.total as usize);
+        (exprs, scs, Some(char_probs), searched)
     } else if threads == 1 {
         let (r, s) = solver.solve();
-        (r, Vec::new(), s)
+        (r, Vec::new(), None, s)
     } else {
         let num_threads = if threads == 0 {
             num_cpus::get()
@@ -399,7 +429,7 @@ async fn solve_handler(
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
         let (r, s) = parallel_solver.solve();
-        (r, Vec::new(), s)
+        (r, Vec::new(), None, s)
     };
 
     let elapsed = start.elapsed();
@@ -407,8 +437,10 @@ async fn solve_handler(
     let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
     let found_count = results.len();
 
-    // Compute character probabilities and recommended solution.
-    let char_probabilities = compute_char_probabilities(&results);
+    // Character probabilities: in top-N mode they were computed over the full
+    // solution set above; otherwise derive them from the complete `results`.
+    let char_probabilities =
+        full_char_probs.unwrap_or_else(|| compute_char_probabilities(&results));
     // In top-N mode `results` is already ranked by (full-set) score, so the
     // first entry is the recommendation; otherwise scan for the best.
     let recommended = if top > 0 {
@@ -817,6 +849,93 @@ mod tests {
 
         assert_eq!(single.solutions, parallel.solutions);
         assert_eq!(single.scores, parallel.scores);
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_char_probabilities_use_full_set() {
+        // In top-N mode the returned `solutions` are only the ranked top-N, but
+        // the character probabilities must reflect the ENTIRE solution set —
+        // identical to what a top=0 (all-solutions) solve reports.
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        let body_str = serde_json::to_string(&req_body).unwrap();
+
+        let mut app = test_app();
+        let (_, all_body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=0",
+            body_str.clone(),
+        )
+        .await;
+        let all: SolveResponse = serde_json::from_slice(&all_body).unwrap();
+
+        let mut app = test_app();
+        let (_, top_body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=3",
+            body_str,
+        )
+        .await;
+        let topn: SolveResponse = serde_json::from_slice(&top_body).unwrap();
+
+        // Only the top-N subset is returned...
+        assert_eq!(topn.solutions.len(), 3);
+        assert!(all.solutions.len() > 3);
+        // ...yet the character probabilities match the full-set probabilities.
+        assert!(!topn.char_probabilities.is_empty());
+        assert_eq!(
+            topn.char_probabilities, all.char_probabilities,
+            "top-N char probabilities must be computed over all solutions, not the top-N subset"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_solve_length_above_old_cap_accepted() {
+        // The previous hard cap of 8 has been removed; longer expressions are
+        // now accepted. Fixing every tile to a known length-9 equation keeps
+        // the search instant and deterministic.
+        let mut app = test_app();
+        let json_body = r#"{
+            "length": 9,
+            "rows": [
+                {
+                    "tiles": [
+                        {"char": "1", "state": "correct"},
+                        {"char": "0", "state": "correct"},
+                        {"char": "+", "state": "correct"},
+                        {"char": "2", "state": "correct"},
+                        {"char": "+", "state": "correct"},
+                        {"char": "3", "state": "correct"},
+                        {"char": "=", "state": "correct"},
+                        {"char": "1", "state": "correct"},
+                        {"char": "5", "state": "correct"}
+                    ]
+                }
+            ]
+        }"#;
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1",
+            json_body.to_string(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            HttpStatusCode::OK,
+            "length 9 must be accepted, got body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let resp: SolveResponse = serde_json::from_slice(&body).unwrap();
+        assert!(
+            resp.solutions.contains(&"10+2+3=15".to_string()),
+            "expected solver to find 10+2+3=15 at length 9, got {:?}",
+            resp.solutions
+        );
     }
 
     #[tokio::test]
@@ -1471,27 +1590,13 @@ mod tests {
         .await;
         assert_eq!(status, HttpStatusCode::BAD_REQUEST);
         let resp: ErrorResponse = serde_json::from_slice(&body).unwrap();
-        assert!(resp.error.contains("Length must be between"));
+        assert!(resp.error.contains("Length must be at least"));
     }
 
     #[tokio::test]
     async fn test_solve_length_too_small_rejected() {
         let mut app = test_app();
         let json_body = r#"{"length": 2, "rows": []}"#;
-        let (status, _body) = send_request(
-            &mut app,
-            http::Method::POST,
-            "/api/solve?threads=1",
-            json_body.to_string(),
-        )
-        .await;
-        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn test_solve_length_too_large_rejected() {
-        let mut app = test_app();
-        let json_body = r#"{"length": 20, "rows": []}"#;
         let (status, _body) = send_request(
             &mut app,
             http::Method::POST,

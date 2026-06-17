@@ -25,7 +25,8 @@ export default function App() {
   const [topN, setTopN] = useState(0);
 
   const handleLengthChange = useCallback((newLength: number) => {
-    const clamped = Math.min(8, Math.max(3, newLength));
+    // Only a lower bound: the solver supports arbitrary expression lengths.
+    const clamped = Math.max(3, newLength);
     setLength(clamped);
     setRows((prev) => prev.map((row) => adjustRowLength(row, clamped)));
     setSolutions(null);
@@ -182,7 +183,6 @@ export default function App() {
                     id="length-input"
                     type="number"
                     min={3}
-                    max={8}
                     value={length}
                     onChange={(e) => handleLengthChange(parseInt(e.target.value, 10) || 3)}
                     className="length-input"
