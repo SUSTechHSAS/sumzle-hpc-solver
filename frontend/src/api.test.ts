@@ -16,13 +16,17 @@ describe('API functions', () => {
           { char: '1', display: '1', count: 1, probability: 100 },
         ],
         recommended: '1+2=3',
+        top: 0,
+        scores: [],
       };
       vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve(mockResponse),
       } as Response);
 
-      const result = await solvePuzzle(5, [{ tiles: [{ char: '1', state: 'correct' }] }], 2);
+      const result = await solvePuzzle(5, [{ tiles: [{ char: '1', state: 'correct' }] }], {
+        threads: 2,
+      });
       expect(fetch).toHaveBeenCalledWith('/api/solve?threads=2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -34,6 +38,42 @@ describe('API functions', () => {
       expect(result).toEqual(mockResponse);
       expect(result.char_probabilities).toBeDefined();
       expect(result.recommended).toBe('1+2=3');
+    });
+
+    it('adds the top parameter to the URL when requesting top-N', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            solutions: ['1+2=3'],
+            stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+            char_probabilities: [],
+            recommended: '1+2=3',
+            top: 3,
+            scores: [245.5],
+          }),
+      } as Response);
+
+      await solvePuzzle(5, [], { threads: 4, top: 3 });
+      expect(fetch).toHaveBeenCalledWith('/api/solve?threads=4&top=3', expect.any(Object));
+    });
+
+    it('omits the top parameter when top is 0', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            solutions: [],
+            stats: { searched_count: 0, found_count: 0, elapsed_ms: 0, speed: 0 },
+            char_probabilities: [],
+            recommended: null,
+            top: 0,
+            scores: [],
+          }),
+      } as Response);
+
+      await solvePuzzle(5, [], { top: 0 });
+      expect(fetch).toHaveBeenCalledWith('/api/solve?threads=0', expect.any(Object));
     });
 
     it('throws on non-ok response', async () => {
@@ -106,6 +146,8 @@ describe('API functions', () => {
       stats: { searched_count: 100, found_count: 2, elapsed_ms: 5, speed: 20000 },
       char_probabilities: [],
       recommended: '1+2=3',
+      top: 0,
+      scores: [],
     };
 
     it('generates JSON download content', () => {

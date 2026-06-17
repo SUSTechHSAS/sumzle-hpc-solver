@@ -18,7 +18,7 @@ fn empty_gk(length: usize) -> GlobalKnowledge {
 fn bench_sequential_solve(c: &mut Criterion) {
     let mut group = c.benchmark_group("sequential_solve");
 
-    for length in [3, 4, 5, 6] {
+    for length in [3, 4, 5, 6, 7, 8] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             let gk = empty_gk(len);
@@ -34,7 +34,7 @@ fn bench_sequential_solve(c: &mut Criterion) {
 fn bench_parallel_solve(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel_solve");
 
-    for length in [5, 6] {
+    for length in [5, 6, 7, 8] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             let gk = empty_gk(len);
@@ -122,7 +122,9 @@ fn bench_constraint_processing(c: &mut Criterion) {
                 state: TileState::Empty,
             },
         ];
-        b.iter(|| GlobalKnowledge::from_guess_rows(black_box(6), black_box(&[row.clone()])));
+        b.iter(|| {
+            GlobalKnowledge::from_guess_rows(black_box(6), black_box(std::slice::from_ref(&row)))
+        });
     });
 
     group.bench_function("multi_row", |b| {
@@ -187,14 +189,29 @@ fn bench_constraint_processing(c: &mut Criterion) {
 }
 
 fn bench_parallel_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parallel_scaling_length6");
+    let mut group = c.benchmark_group("parallel_scaling_length7");
 
     for threads in [1, 2, 4] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, &t| {
-            let gk = empty_gk(6);
+            let gk = empty_gk(7);
             b.iter(|| {
-                let solver = Solver::new(6, gk.clone());
+                let solver = Solver::new(7, gk.clone());
+                let ps = ParallelSolver::new(solver, Some(t));
+                ps.solve()
+            });
+        });
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("parallel_scaling_length8");
+
+    for threads in [1, 2, 4, 8] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(threads), &threads, |b, &t| {
+            let gk = empty_gk(8);
+            b.iter(|| {
+                let solver = Solver::new(8, gk.clone());
                 let ps = ParallelSolver::new(solver, Some(t));
                 ps.solve()
             });

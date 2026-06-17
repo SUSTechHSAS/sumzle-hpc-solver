@@ -6,7 +6,6 @@
 use crate::solver::Solver;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,13 +42,14 @@ pub enum CoordinatorMessage {
         main_op: Option<char>,
         floor_ctx: FloorContext,
         length: usize,
+        gk: GlobalKnowledge,
     },
     /// No more work available
     NoWork,
     /// Shutdown signal
     Shutdown,
     /// Configuration
-    Config { length: usize },
+    Config { length: usize, gk: GlobalKnowledge },
 }
 
 /// Distributed solver coordinator
@@ -76,32 +76,20 @@ impl Coordinator {
         log::info!("Coordinator listening on port {}", self.port);
         log::info!("Total branches to distribute: {}", total_branches);
 
-        // Also do local work
-        let local_branches: Vec<_> = branches.clone();
+        // Also do local work using the same constraints as the main solver.
+        let local_branches = branches.clone();
         let local_next_branch = next_branch.clone();
         let local_total_searched = total_searched.clone();
         let local_results = all_results.clone();
+        let local_solver = Solver::new(self.solver.length, self.solver.gk.clone());
 
-        let length = self.solver.length;
-
-        // Spawn a thread for local solving
         let local_handle = std::thread::spawn(move || loop {
             let branch_idx = local_next_branch.fetch_add(1, Ordering::SeqCst) as usize;
             if branch_idx >= local_branches.len() {
                 break;
             }
             let (first_char, main_op, floor_ctx) = local_branches[branch_idx];
-            let solver = Solver::new(
-                length,
-                GlobalKnowledge {
-                    fixed_chars: vec![None; length],
-                    cannot_be_at: vec![std::collections::HashSet::new(); length],
-                    must_appear_min_count: HashMap::new(),
-                    must_appear_exact_count: HashMap::new(),
-                    globally_forbidden: std::collections::HashSet::new(),
-                },
-            );
-            let (results, searched) = solver.solve_branch(first_char, main_op, floor_ctx);
+            let (results, searched) = local_solver.solve_branch(first_char, main_op, floor_ctx);
             local_total_searched.fetch_add(searched, Ordering::Relaxed);
             if !results.is_empty() {
                 let mut all = local_results.lock().unwrap();
@@ -109,7 +97,9 @@ impl Coordinator {
             }
         });
 
-        // Accept worker connections
+        // Accept worker connections. Track each spawned handler thread so we can
+        // wait for in-flight workers to report before reading the final totals.
+        let mut worker_handles = Vec::new();
         loop {
             if next_branch.load(Ordering::SeqCst) as usize >= total_branches {
                 break;
@@ -124,8 +114,9 @@ impl Coordinator {
                     let all_results_clone = all_results.clone();
                     let branches_clone = branches.clone();
                     let length_clone = self.solver.length;
+                    let gk_clone = self.solver.gk.clone();
 
-                    std::thread::spawn(move || {
+                    worker_handles.push(std::thread::spawn(move || {
                         if let Err(e) = handle_worker(
                             stream,
                             branches_clone,
@@ -133,10 +124,11 @@ impl Coordinator {
                             total_searched_clone,
                             all_results_clone,
                             length_clone,
+                            gk_clone,
                         ) {
                             log::error!("Worker error: {}", e);
                         }
-                    });
+                    }));
                 }
                 Err(_) => {
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -145,9 +137,16 @@ impl Coordinator {
         }
 
         local_handle.join().unwrap();
+        // The accept loop exits once every branch is *assigned*, but remote
+        // workers may still be solving their last branch. Join each handler so
+        // its final `Results` is recorded before we collect — otherwise results
+        // can be non-deterministically lost.
+        for handle in worker_handles {
+            let _ = handle.join();
+        }
 
         let mut results = all_results.lock().unwrap().clone();
-        results.sort();
+        results.sort_unstable();
         results.dedup();
 
         Ok((results, total_searched.load(Ordering::SeqCst)))
@@ -161,12 +160,12 @@ fn handle_worker(
     total_searched: Arc<AtomicU64>,
     all_results: Arc<Mutex<Vec<String>>>,
     length: usize,
+    gk: GlobalKnowledge,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(&stream);
     let mut writer = BufWriter::new(&stream);
 
     loop {
-        // Read worker message
         let mut len_buf = [0u8; 8];
         reader.read_exact(&mut len_buf)?;
         let len = u64::from_be_bytes(len_buf) as usize;
@@ -191,6 +190,7 @@ fn handle_worker(
                         main_op,
                         floor_ctx,
                         length,
+                        gk: gk.clone(),
                     },
                 )?;
             }
@@ -208,7 +208,15 @@ fn handle_worker(
             WorkerMessage::Disconnect { .. } => {
                 break;
             }
-            _ => {}
+            WorkerMessage::Register { .. } => {
+                send_message(
+                    &mut writer,
+                    &CoordinatorMessage::Config {
+                        length,
+                        gk: gk.clone(),
+                    },
+                )?;
+            }
         }
     }
 
@@ -246,7 +254,6 @@ impl Worker {
         let mut reader = BufReader::new(&stream);
         let mut writer = BufWriter::new(&stream);
 
-        // Register
         let reg = WorkerMessage::Register {
             worker_id: self.worker_id.clone(),
             num_threads: self.num_threads,
@@ -254,36 +261,26 @@ impl Worker {
         send_worker_message(&mut writer, &reg)?;
 
         loop {
-            // Request work
-            let req = WorkerMessage::RequestWork {
-                worker_id: self.worker_id.clone(),
-            };
-            send_worker_message(&mut writer, &req)?;
-
-            // Read response
-            let msg: CoordinatorMessage = read_coordinator_message(&mut reader)?;
-
+            let msg = read_coordinator_message(&mut reader)?;
             match msg {
+                CoordinatorMessage::Config { .. } => {}
+                CoordinatorMessage::NoWork | CoordinatorMessage::Shutdown => {
+                    // The coordinator has stopped serving this worker and is
+                    // closing the connection, so sending `Disconnect` here would
+                    // typically fail with BrokenPipe/ConnectionReset. Exit cleanly.
+                    break;
+                }
                 CoordinatorMessage::Work {
                     branch_index,
                     first_char,
                     main_op,
                     floor_ctx,
                     length,
+                    gk,
                 } => {
-                    // Create a minimal solver for this work
-                    // In a real implementation, we'd need the full GlobalKnowledge
-                    let gk = GlobalKnowledge {
-                        fixed_chars: vec![None; length],
-                        cannot_be_at: vec![std::collections::HashSet::new(); length],
-                        must_appear_min_count: HashMap::new(),
-                        must_appear_exact_count: HashMap::new(),
-                        globally_forbidden: std::collections::HashSet::new(),
-                    };
                     let solver = Solver::new(length, gk);
                     let (solutions, searched) = solver.solve_branch(first_char, main_op, floor_ctx);
 
-                    // Report results
                     let results = WorkerMessage::Results {
                         worker_id: self.worker_id.clone(),
                         solutions,
@@ -292,15 +289,12 @@ impl Worker {
                     };
                     send_worker_message(&mut writer, &results)?;
                 }
-                CoordinatorMessage::NoWork | CoordinatorMessage::Shutdown => {
-                    let disc = WorkerMessage::Disconnect {
-                        worker_id: self.worker_id.clone(),
-                    };
-                    send_worker_message(&mut writer, &disc)?;
-                    break;
-                }
-                _ => {}
             }
+
+            let req = WorkerMessage::RequestWork {
+                worker_id: self.worker_id.clone(),
+            };
+            send_worker_message(&mut writer, &req)?;
         }
 
         Ok(())
@@ -323,4 +317,46 @@ fn read_coordinator_message<R: Read>(reader: &mut R) -> anyhow::Result<Coordinat
     let mut data = vec![0u8; len];
     reader.read_exact(&mut data)?;
     Ok(serde_json::from_slice(&data)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coordinator_local_mode_preserves_constraints() {
+        let row: GuessRow = vec![
+            Tile {
+                char: '1',
+                state: TileState::Correct,
+            },
+            Tile {
+                char: '+',
+                state: TileState::Correct,
+            },
+            Tile {
+                char: '2',
+                state: TileState::Correct,
+            },
+            Tile {
+                char: '=',
+                state: TileState::Correct,
+            },
+            Tile {
+                char: '3',
+                state: TileState::Correct,
+            },
+        ];
+
+        let gk = GlobalKnowledge::from_guess_rows(5, &[row]).unwrap();
+        let solver = Solver::new(5, gk.clone());
+        let (expected_results, expected_searched) = solver.solve();
+
+        let coordinator = Coordinator::new(Solver::new(5, gk), 0);
+        let (distributed_results, distributed_searched) = coordinator.run().unwrap();
+
+        assert_eq!(distributed_results, expected_results);
+        assert_eq!(distributed_searched, expected_searched);
+        assert_eq!(distributed_results, vec!["1+2=3".to_string()]);
+    }
 }

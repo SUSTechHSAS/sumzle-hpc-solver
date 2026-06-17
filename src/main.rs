@@ -32,6 +32,14 @@ enum Commands {
         /// Output format: json or text
         #[arg(short, long, default_value = "json")]
         format: String,
+        /// Stream all solutions to this file as JSON Lines instead of holding
+        /// them in memory (order unspecified). Stdout shows only statistics.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Output only the N most probable solutions (by character-probability
+        /// score). Keeps memory bounded regardless of total solution count.
+        #[arg(long)]
+        top: Option<usize>,
     },
     /// Run as distributed coordinator
     Coordinate {
@@ -69,6 +77,9 @@ enum Commands {
         /// Expression lengths to benchmark
         #[arg(short, long, default_value = "6")]
         lengths: Vec<usize>,
+        /// Run parallel solver benchmark (auto-detect thread count)
+        #[arg(short, long)]
+        parallel: bool,
     },
     /// Start the web API server
     Serve {
@@ -107,6 +118,50 @@ fn parse_state(s: &str) -> TileState {
     }
 }
 
+/// Print a finished result set (statistics plus solutions) to stdout in the
+/// requested format. Shared by the default and top-N paths.
+fn print_result(
+    format: &str,
+    solutions: Vec<String>,
+    searched_count: u64,
+    elapsed_ms: u64,
+    speed: u64,
+) -> Result<()> {
+    let found_count = solutions.len();
+    let solver_result = SolverResult {
+        solutions,
+        stats: SolverStats {
+            searched_count,
+            found_count,
+            elapsed_ms,
+            speed,
+        },
+    };
+
+    match format {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&solver_result)?);
+        }
+        "text" => {
+            println!("Solutions found: {}", solver_result.stats.found_count);
+            println!(
+                "Expressions searched: {}",
+                solver_result.stats.searched_count
+            );
+            println!("Time: {}ms", solver_result.stats.elapsed_ms);
+            println!("Speed: {} expr/s", solver_result.stats.speed);
+            println!();
+            for (i, sol) in solver_result.solutions.iter().enumerate() {
+                println!("{}. {}", i + 1, sol);
+            }
+        }
+        _ => {
+            anyhow::bail!("Unknown format: {}", format);
+        }
+    }
+    Ok(())
+}
+
 fn build_solver_input(input: &CliInput) -> Result<(usize, GlobalKnowledge)> {
     let rows: Vec<GuessRow> = input
         .rows
@@ -136,6 +191,8 @@ fn main() -> Result<()> {
             input,
             threads,
             format,
+            output,
+            top,
         } => {
             let input_str = match input {
                 Some(path) => std::fs::read_to_string(path)?,
@@ -149,58 +206,68 @@ fn main() -> Result<()> {
 
             let cli_input: CliInput = serde_json::from_str(&input_str)?;
             let (length, gk) = build_solver_input(&cli_input)?;
+            let solver = Solver::new(length, gk);
+            let num_threads = if threads == 0 {
+                num_cpus::get()
+            } else {
+                threads
+            };
 
             let start = std::time::Instant::now();
 
-            let (results, searched_count) = if threads == 1 {
-                let solver = Solver::new(length, gk);
-                solver.solve()
-            } else {
-                let solver = Solver::new(length, gk);
-                let num_threads = if threads == 0 {
-                    num_cpus::get()
-                } else {
-                    threads
-                };
+            // Mode selection (top-N takes precedence over streaming, which takes
+            // precedence over the default in-memory path). The default path is
+            // left untouched so its solutions and ordering are unchanged.
+            if let Some(n) = top {
+                // Top-N: bounded memory, deterministic order (score desc, expr asc).
                 let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-                parallel_solver.solve()
-            };
+                let (scored, searched_count) = parallel_solver.solve_top_n(n);
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
 
-            let elapsed = start.elapsed();
-            let elapsed_ms = elapsed.as_millis() as u64;
-            let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
-
-            let found_count = results.len();
-            let solver_result = SolverResult {
-                solutions: results,
-                stats: SolverStats {
-                    searched_count,
-                    found_count,
-                    elapsed_ms,
-                    speed,
-                },
-            };
-
-            match format.as_str() {
-                "json" => {
-                    println!("{}", serde_json::to_string_pretty(&solver_result)?);
-                }
-                "text" => {
-                    println!("Solutions found: {}", solver_result.stats.found_count);
-                    println!(
-                        "Expressions searched: {}",
-                        solver_result.stats.searched_count
-                    );
-                    println!("Time: {}ms", solver_result.stats.elapsed_ms);
-                    println!("Speed: {} expr/s", solver_result.stats.speed);
-                    println!();
-                    for (i, sol) in solver_result.solutions.iter().enumerate() {
-                        println!("{}. {}", i + 1, sol);
+                if let Some(path) = output {
+                    use std::io::Write;
+                    let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+                    for (score, sol) in &scored {
+                        writeln!(w, "{{\"solution\":\"{sol}\",\"score\":{score}}}")?;
                     }
+                    w.flush()?;
+                    eprintln!(
+                        "Wrote {} solutions to {} ({} searched, {}ms)",
+                        scored.len(),
+                        path,
+                        searched_count,
+                        elapsed_ms
+                    );
+                } else {
+                    let solutions: Vec<String> = scored.into_iter().map(|(_, sol)| sol).collect();
+                    print_result(&format, solutions, searched_count, elapsed_ms, speed)?;
                 }
-                _ => {
-                    anyhow::bail!("Unknown format: {}", format);
-                }
+            } else if let Some(path) = output {
+                // Stream all solutions to file as JSONL; never held in memory.
+                use std::io::Write;
+                let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
+                let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+                let (found_count, searched_count) = parallel_solver.solve_to_writer(file)?;
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "Solutions found: {found_count}")?;
+                writeln!(out, "Expressions searched: {searched_count}")?;
+                writeln!(out, "Time: {elapsed_ms}ms")?;
+                writeln!(out, "Speed: {speed} expr/s")?;
+                writeln!(out, "Output: {path}")?;
+            } else {
+                // Default in-memory path — unchanged behavior.
+                let (results, searched_count) = if threads == 1 {
+                    solver.solve()
+                } else {
+                    let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
+                    parallel_solver.solve()
+                };
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
+                print_result(&format, results, searched_count, elapsed_ms, speed)?;
             }
         }
 
@@ -245,7 +312,8 @@ fn main() -> Result<()> {
             None => println!("Invalid expression"),
         },
 
-        Commands::Bench { lengths } => {
+        Commands::Bench { lengths, parallel } => {
+            let num_threads = num_cpus::get();
             for &len in &lengths {
                 let gk = GlobalKnowledge {
                     fixed_chars: vec![None; len],
@@ -254,19 +322,36 @@ fn main() -> Result<()> {
                     must_appear_exact_count: std::collections::HashMap::new(),
                     globally_forbidden: std::collections::HashSet::new(),
                 };
-                let solver = Solver::new(len, gk);
 
-                let start = std::time::Instant::now();
-                let (results, searched_count) = solver.solve();
-                let elapsed = start.elapsed();
+                if parallel {
+                    let solver = Solver::new(len, gk);
+                    let ps = ParallelSolver::new(solver, Some(num_threads));
+                    let start = std::time::Instant::now();
+                    let (results, searched_count) = ps.solve();
+                    let elapsed = start.elapsed();
 
-                println!(
-                    "Length {}: {} solutions, {} searched, {:?}",
-                    len,
-                    results.len(),
-                    searched_count,
-                    elapsed
-                );
+                    println!(
+                        "Length {} [parallel, {} threads]: {} solutions, {} searched, {:?}",
+                        len,
+                        num_threads,
+                        results.len(),
+                        searched_count,
+                        elapsed
+                    );
+                } else {
+                    let solver = Solver::new(len, gk);
+                    let start = std::time::Instant::now();
+                    let (results, searched_count) = solver.solve();
+                    let elapsed = start.elapsed();
+
+                    println!(
+                        "Length {}: {} solutions, {} searched, {:?}",
+                        len,
+                        results.len(),
+                        searched_count,
+                        elapsed
+                    );
+                }
             }
         }
 

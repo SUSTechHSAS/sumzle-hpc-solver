@@ -49,7 +49,11 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
   }
 
   const { solutions, stats, char_probabilities, recommended } = data;
+  // Tolerate responses from an older backend that omit these fields.
+  const top = data.top ?? 0;
+  const scores = data.scores ?? [];
   const truncated = solutions.length > MAX_DISPLAY_SOLUTIONS;
+  const hasScores = scores.length === solutions.length && scores.length > 0;
 
   return (
     <div className="results-section" data-testid="results-section">
@@ -86,8 +90,19 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
         <div className="results-list-header">
           <h3 className="section-title">📜 结果列表</h3>
           <span className="results-count">
-            找到 <strong>{stats.found_count.toLocaleString()}</strong> 个解
-            {truncated && <span className="truncation-notice"> (仅显示前{MAX_DISPLAY_SOLUTIONS})</span>}
+            {top > 0 ? (
+              <>
+                显示最优 <strong>{solutions.length.toLocaleString()}</strong> 个解
+                <span className="top-n-badge">Top-{top}</span>
+              </>
+            ) : (
+              <>
+                找到 <strong>{stats.found_count.toLocaleString()}</strong> 个解
+                {truncated && (
+                  <span className="truncation-notice"> (仅显示前{MAX_DISPLAY_SOLUTIONS})</span>
+                )}
+              </>
+            )}
           </span>
         </div>
         {solutions.length > 0 ? (
@@ -101,6 +116,7 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
                 <span className="result-expression">
                   {sol.split('').map(displayChar).join('')}
                 </span>
+                {hasScores && <span className="result-score">{scores[i].toFixed(1)}</span>}
                 {recommended === sol && <span className="result-recommended-badge">⭐推荐</span>}
               </div>
             ))}

@@ -38,7 +38,7 @@ pub struct Tile {
 pub type GuessRow = Vec<Tile>;
 
 /// Preprocessed global knowledge from all constraint rows
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalKnowledge {
     /// Characters fixed at each position (from "correct" tiles)
     pub fixed_chars: Vec<Option<char>>,

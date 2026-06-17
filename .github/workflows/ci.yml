@@ -226,7 +226,7 @@ jobs:
           # Run CLI benchmarks for all supported lengths and save results
           # in a machine-parseable format: length:solutions:searched:time_raw
           > current-bench-results.txt
-          for len in 3 4 5 6; do
+          for len in 3 4 5 6 7 8; do
             echo "Running CLI benchmark for length $len..."
             OUTPUT=$(./target/release/sumzle-solver bench -l $len 2>&1 || true)
             echo "$OUTPUT" >> cli-benchmark-output.txt
@@ -261,6 +261,47 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
+      - name: Run parallel CLI benchmarks
+        run: |
+          echo "## 📊 CLI Parallel Solver Benchmarks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Parallel solver uses auto-detected thread count (num_cpus)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          > current-parallel-bench-results.txt
+          for len in 3 4 5 6 7 8; do
+            echo "Running parallel CLI benchmark for length $len..."
+            OUTPUT=$(./target/release/sumzle-solver bench -l $len --parallel 2>&1 || true)
+            echo "$OUTPUT" >> cli-parallel-benchmark-output.txt
+
+            SOL=$(echo "$OUTPUT" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
+            SRC=$(echo "$OUTPUT" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
+            TIME_RAW=$(echo "$OUTPUT" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
+
+            if [ -n "$SOL" ]; then
+              echo "${len}:${SOL}:${SRC}:${TIME_RAW}" >> current-parallel-bench-results.txt
+            fi
+          done
+
+          # Build summary table
+          echo "| Length | Solutions | Expressions Searched | Time |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----------|---------------------|------|" >> $GITHUB_STEP_SUMMARY
+
+          while IFS=: read -r LEN SOL SRC TIME_RAW; do
+            echo "| $LEN | $SOL | $SRC | $TIME_RAW |" >> $GITHUB_STEP_SUMMARY
+          done < current-parallel-bench-results.txt
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw Parallel CLI Benchmark Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat cli-parallel-benchmark-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
       # ---------------------------------------------------------------
       #  Baseline (main branch) benchmarks – PR only
       # ---------------------------------------------------------------
@@ -282,7 +323,7 @@ jobs:
           BASELINE_BIN="$RUNNER_TEMP/baseline-target/release/sumzle-solver"
 
           > baseline-bench-results.txt
-          for len in 3 4 5 6; do
+          for len in 3 4 5 6 7 8; do
             echo "Running baseline CLI benchmark for length $len..."
             OUTPUT=$($BASELINE_BIN bench -l $len 2>&1 || true)
             echo "$OUTPUT" >> baseline-benchmark-output.txt
@@ -295,6 +336,26 @@ jobs:
               echo "${len}:${SOL}:${SRC}:${TIME_RAW}" >> baseline-bench-results.txt
             fi
           done
+
+          > baseline-parallel-bench-results.txt
+          # Check if baseline binary supports --parallel flag
+          if $BASELINE_BIN bench --help 2>&1 | grep -q -- '--parallel'; then
+            for len in 3 4 5 6 7 8; do
+              echo "Running baseline parallel CLI benchmark for length $len..."
+              OUTPUT=$($BASELINE_BIN bench -l $len --parallel 2>&1 || true)
+              echo "$OUTPUT" >> baseline-parallel-benchmark-output.txt
+
+              SOL=$(echo "$OUTPUT" | sed -n 's/.*: \([0-9]*\) solutions.*/\1/p')
+              SRC=$(echo "$OUTPUT" | sed -n 's/.* \([0-9]\+\) searched.*/\1/p')
+              TIME_RAW=$(echo "$OUTPUT" | sed -n 's/.*searched,[[:space:]]*\(.*\)/\1/p')
+
+              if [ -n "$SOL" ]; then
+                echo "${len}:${SOL}:${SRC}:${TIME_RAW}" >> baseline-parallel-bench-results.txt
+              fi
+            done
+          else
+            echo "Baseline binary does not support --parallel, skipping baseline parallel benchmarks."
+          fi
 
       # ---------------------------------------------------------------
       #  Benchmark comparison (PR only)
@@ -374,28 +435,29 @@ jobs:
               return results
 
           current = load_results("current-bench-results.txt")
+          current_par = load_results("current-parallel-bench-results.txt")
           baseline = load_results("baseline-bench-results.txt")
+          baseline_par = load_results("baseline-parallel-bench-results.txt")
 
           pr_branch = os.environ.get("PR_BRANCH", "PR")
           base_branch = os.environ.get("BASE_BRANCH", "main")
 
-          if not baseline:
-              print("No baseline results found. Skipping comparison.")
-              exit(0)
+          has_mismatch = False
+          has_regression = False
 
-          # Build comparison table
           lines = []
-          lines.append("## 📊 Benchmark Comparison with Main Branch")
+
+          # =============================================================
+          #  Section 1: Sequential Performance Comparison
+          # =============================================================
+          lines.append("## 📊 Sequential Benchmark Comparison with Main Branch")
           lines.append("")
           lines.append(f"Comparing **{pr_branch}** (PR) vs **{base_branch}** (baseline)")
           lines.append("")
           lines.append("| Length | Metric | PR | Main | Match | Diff |")
           lines.append("|--------|--------|-----|------|-------|------|")
 
-          has_mismatch = False
-          has_regression = False
-
-          for length in ["3", "4", "5", "6"]:
+          for length in ["3", "4", "5", "6", "7", "8"]:
               cur = current.get(length)
               base = baseline.get(length)
 
@@ -433,6 +495,93 @@ jobs:
 
           lines.append("")
 
+          # =============================================================
+          #  Section 2: Parallel Performance Comparison
+          # =============================================================
+          if baseline_par:
+              lines.append("## 📊 Parallel Benchmark Comparison with Main Branch")
+              lines.append("")
+              lines.append(f"Comparing **{pr_branch}** (PR) vs **{base_branch}** (baseline)")
+              lines.append("")
+              lines.append("| Length | Metric | PR | Main | Match | Diff |")
+              lines.append("|--------|--------|-----|------|-------|------|")
+
+              for length in ["3", "4", "5", "6", "7", "8"]:
+                  cur = current_par.get(length)
+                  base = baseline_par.get(length)
+
+                  if not cur or not base:
+                      lines.append(f"| {length} | — | — | — | ⚠️ Missing | — |")
+                      continue
+
+                  sol_match = cur["solutions"] == base["solutions"]
+                  sol_icon = "✅" if sol_match else "❌"
+                  if not sol_match:
+                      has_mismatch = True
+                      sol_diff = f'{cur["solutions"] - base["solutions"]:+d}'
+                  else:
+                      sol_diff = "="
+                  lines.append(f'| {length} | Solutions | {cur["solutions"]} | {base["solutions"]} | {sol_icon} | {sol_diff} |')
+
+                  src_match = cur["searched"] == base["searched"]
+                  src_icon = "✅" if src_match else "❌"
+                  if not src_match:
+                      has_mismatch = True
+                      src_diff = f'{cur["searched"] - base["searched"]:+d}'
+                  else:
+                      src_diff = "="
+                  lines.append(f'| {length} | Expr Searched | {cur["searched"]} | {base["searched"]} | {src_icon} | {src_diff} |')
+
+                  time_diff_pct, time_emoji = format_diff_pct(cur["time_ns"], base["time_ns"])
+                  if time_emoji in ("🔴", "🟡"):
+                      has_regression = True
+                  cur_time_str = format_time(cur["time_ns"]) if cur["time_ns"] is not None else cur["time_raw"]
+                  base_time_str = format_time(base["time_ns"]) if base["time_ns"] is not None else base["time_raw"]
+                  lines.append(f"| {length} | Time | {cur_time_str} | {base_time_str} | {time_emoji} | {time_diff_pct} |")
+
+              lines.append("")
+
+          # =============================================================
+          #  Section 3: Sequential vs Parallel Consistency Check
+          # =============================================================
+          if current_par:
+              lines.append("## ✅ Sequential vs Parallel Consistency Check")
+              lines.append("")
+              lines.append("Verifying that the parallel solver produces identical results to the sequential solver (auto thread count).")
+              lines.append("")
+              lines.append("| Length | Metric | Sequential | Parallel | Match |")
+              lines.append("|--------|--------|------------|----------|-------|")
+
+              for length in ["3", "4", "5", "6", "7", "8"]:
+                  seq = current.get(length)
+                  par = current_par.get(length)
+
+                  if not seq or not par:
+                      lines.append(f"| {length} | — | — | — | ⚠️ Missing |")
+                      continue
+
+                  sol_match = seq["solutions"] == par["solutions"]
+                  sol_icon = "✅" if sol_match else "❌"
+                  if not sol_match:
+                      has_mismatch = True
+                  lines.append(f'| {length} | Solutions | {seq["solutions"]} | {par["solutions"]} | {sol_icon} |')
+
+                  src_match = seq["searched"] == par["searched"]
+                  src_icon = "✅" if src_match else "❌"
+                  if not src_match:
+                      has_mismatch = True
+                  lines.append(f'| {length} | Expr Searched | {seq["searched"]} | {par["searched"]} | {src_icon} |')
+
+                  # Speedup comparison
+                  if seq["time_ns"] and par["time_ns"] and par["time_ns"] > 0:
+                      speedup = seq["time_ns"] / par["time_ns"]
+                      speedup_str = f"{speedup:.2f}x"
+                  else:
+                      speedup_str = "N/A"
+                  lines.append(f'| {length} | Time | {format_time(seq["time_ns"]) if seq["time_ns"] else seq["time_raw"]} | {format_time(par["time_ns"]) if par["time_ns"] else par["time_raw"]} | ⚡ {speedup_str} |')
+
+              lines.append("")
+
           # Add legend
           lines.append("<details>")
           lines.append("<summary>📖 Comparison Legend</summary>")
@@ -446,6 +595,7 @@ jobs:
           lines.append("| ⚪ | Time within ±5% (noise range) |")
           lines.append("| 🟡 | Time regressed 5-10% |")
           lines.append("| 🔴 | Time regressed > 10% |")
+          lines.append("| ⚡ | Parallel speedup vs sequential |")
           lines.append("")
           lines.append("</details>")
           lines.append("")
@@ -471,6 +621,19 @@ jobs:
                   lines.append(f.read())
           except FileNotFoundError:
               lines.append("(no baseline output)")
+          lines.append("```")
+          lines.append("")
+          lines.append("</details>")
+
+          lines.append("<details>")
+          lines.append("<summary>📝 Raw Baseline Parallel Benchmark Output</summary>")
+          lines.append("")
+          lines.append("```")
+          try:
+              with open("baseline-parallel-benchmark-output.txt") as f:
+                  lines.append(f.read())
+          except FileNotFoundError:
+              lines.append("(no baseline parallel output)")
           lines.append("```")
           lines.append("")
           lines.append("</details>")

@@ -483,6 +483,48 @@ fn test_parallel_matches_sequential() {
 }
 
 #[test]
+fn test_parallel_matches_sequential_length7() {
+    let gk = empty_gk(7);
+    let solver = Solver::new(7, gk);
+
+    let (seq_results, _seq_searched) = solver.solve();
+
+    let parallel_solver = ParallelSolver::new(solver, Some(2));
+    let (par_results, _par_searched) = parallel_solver.solve();
+
+    let mut seq_sorted = seq_results;
+    seq_sorted.sort();
+    let mut par_sorted = par_results;
+    par_sorted.sort();
+
+    assert_eq!(
+        seq_sorted, par_sorted,
+        "Parallel and sequential results should match for length 7"
+    );
+}
+
+#[test]
+fn test_parallel_matches_sequential_length8() {
+    let gk = empty_gk(8);
+    let solver = Solver::new(8, gk);
+
+    let (seq_results, _seq_searched) = solver.solve();
+
+    let parallel_solver = ParallelSolver::new(solver, Some(4));
+    let (par_results, _par_searched) = parallel_solver.solve();
+
+    let mut seq_sorted = seq_results;
+    seq_sorted.sort();
+    let mut par_sorted = par_results;
+    par_sorted.sort();
+
+    assert_eq!(
+        seq_sorted, par_sorted,
+        "Parallel and sequential results should match for length 8"
+    );
+}
+
+#[test]
 fn test_parallel_with_constraints() {
     let row: GuessRow = vec![
         Tile {
@@ -640,6 +682,19 @@ fn test_solve_length_5() {
         assert_eq!(sol.len(), 5);
     }
     assert!(results.contains(&"1+2=3".to_string()));
+}
+
+#[test]
+fn test_solver_does_not_generate_greater_equal() {
+    for length in 3..=8 {
+        let solver = Solver::new(length, empty_gk(length));
+        let (results, _) = solver.solve();
+        assert!(
+            results.iter().all(|s| !s.contains(">=")),
+            "Solver should not generate >= main operators for length {}",
+            length
+        );
+    }
 }
 
 // =========================================================================
@@ -891,7 +946,7 @@ fn test_factorial_sequential_parallel_consistency() {
 /// Verify that all factorial solutions are valid equations
 #[test]
 fn test_all_factorial_solutions_are_valid() {
-    for length in 4..=6 {
+    for length in 4..=8 {
         let gk = empty_gk(length);
         let solver = Solver::new(length, gk);
         let (results, _searched) = solver.solve();
@@ -954,4 +1009,279 @@ fn test_factorial_close_bracket_pruning() {
         !paren_factorial.is_empty(),
         "Should find at least one solution with ')' after '!'"
     );
+}
+
+/// The reference evaluator accepts `-0` as a simple numeric RHS.  Solver-side
+/// pruning must therefore keep equations whose right side is exactly `-0`.
+#[test]
+fn test_solver_preserves_negative_zero_rhs() {
+    assert!(is_valid_equation("1-1=-0"));
+
+    let gk = empty_gk(6);
+    let solver = Solver::new(6, gk);
+    let (results, _) = solver.solve();
+    assert!(
+        results.contains(&"1-1=-0".to_string()),
+        "Solver pruning must not drop valid negative-zero RHS equations"
+    );
+}
+
+// =========================================================================
+// Branch partitioning / high-thread consistency (regression for the reported
+// "lost solutions" concern: a high thread count deepens the prefix and grows
+// the eager `=` result set, which must stay a superset — never lossy).
+// =========================================================================
+
+/// Sorted solution set from a fresh solver of the given length and thread count.
+fn solve_sorted(length: usize, threads: usize) -> (Vec<String>, u64) {
+    let solver = Solver::new(length, empty_gk(length));
+    let (mut results, searched) = if threads == 1 {
+        solver.solve()
+    } else {
+        ParallelSolver::new(solver, Some(threads)).solve()
+    };
+    results.sort();
+    (results, searched)
+}
+
+#[test]
+fn test_high_thread_count_does_not_lose_solutions() {
+    // A large thread count forces the branch prefix to deepen well past the
+    // first level, so eager `=` solutions are collected at several depths.
+    for length in 5..=7 {
+        let (seq, seq_searched) = solve_sorted(length, 1);
+        // 256 threads => branch target 4096 => deep prefix on small lengths.
+        let (par, par_searched) = solve_sorted(length, 256);
+        assert_eq!(
+            seq, par,
+            "length {length}: high-thread solution set must equal single-threaded"
+        );
+        assert_eq!(
+            seq_searched, par_searched,
+            "length {length}: searched count must match single-threaded"
+        );
+    }
+}
+
+// =========================================================================
+// Streaming output consistency: solutions streamed via solve_to_writer must
+// be exactly the default solution set (order aside).
+// =========================================================================
+
+#[test]
+fn test_streaming_output_matches_default_set() {
+    let length = 6;
+    let (expected, _) = solve_sorted(length, 1);
+
+    let solver = Solver::new(length, empty_gk(length));
+    let ps = ParallelSolver::new(solver, Some(4));
+
+    let tmp = std::env::temp_dir().join("sumzle_stream_test.jsonl");
+    let file = std::io::BufWriter::new(std::fs::File::create(&tmp).unwrap());
+    let (written, _searched) = ps.solve_to_writer(file).unwrap();
+
+    let content = std::fs::read_to_string(&tmp).unwrap();
+    let mut got: Vec<String> = content
+        .lines()
+        .map(|l| {
+            // line form: {"solution":"<expr>"}
+            let start = l.find(":\"").unwrap() + 2;
+            let end = l.rfind("\"}").unwrap();
+            l[start..end].to_string()
+        })
+        .collect();
+    got.sort();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert_eq!(got, expected, "streamed set must equal default set");
+    assert_eq!(
+        written as usize,
+        expected.len(),
+        "streamed solution count must equal default count"
+    );
+}
+
+// =========================================================================
+// top-N consistency: scoring matches server::compute_recommended, and a large
+// N returns the entire solution set.
+// =========================================================================
+
+#[test]
+fn test_top_n_large_n_equals_full_set() {
+    let length = 6;
+    let (expected, _) = solve_sorted(length, 1);
+
+    let solver = Solver::new(length, empty_gk(length));
+    let ps = ParallelSolver::new(solver, Some(4));
+    let (scored, _searched) = ps.solve_top_n(expected.len() + 10);
+
+    let mut got: Vec<String> = scored.into_iter().map(|(_, s)| s).collect();
+    got.sort();
+    assert_eq!(
+        got, expected,
+        "top-N with N >= total must return the full solution set"
+    );
+}
+
+#[test]
+fn test_top_n_best_matches_compute_recommended() {
+    use sumzle_solver::server::{compute_char_probabilities, compute_recommended};
+
+    let length = 6;
+
+    // Reference: full in-memory solve + server scoring.
+    let solver = Solver::new(length, empty_gk(length));
+    let (full, _) = solver.solve();
+    let probs = compute_char_probabilities(&full);
+    let recommended = compute_recommended(&full, &probs).unwrap();
+
+    // All solutions with their top-N score (N >= total).
+    let solver = Solver::new(length, empty_gk(length));
+    let ps = ParallelSolver::new(solver, Some(4));
+    let (scored, _) = ps.solve_top_n(full.len() + 10);
+
+    // `compute_recommended` and `solve_top_n` may pick different solutions when
+    // several tie for the maximum score (the former keeps the first in solve
+    // order; the latter is deterministic). The meaningful invariant is that
+    // both select a *maximum-scoring* solution, i.e. the scores agree.
+    let max_score = scored
+        .iter()
+        .map(|(s, _)| *s)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let rec_score = scored
+        .iter()
+        .find(|(_, sol)| *sol == recommended)
+        .map(|(s, _)| *s)
+        .expect("recommended solution must be present in the scored set");
+
+    assert_eq!(
+        rec_score, max_score,
+        "server::compute_recommended must select a maximum-scoring solution"
+    );
+
+    // top-1 must also be a maximum-scoring solution with that same score.
+    let (top1, _) = ps.solve_top_n(1);
+    assert_eq!(top1.len(), 1, "top-1 returns exactly one solution");
+    assert_eq!(
+        top1[0].0, max_score,
+        "top-1 must equal the maximum score over the full set"
+    );
+}
+
+#[test]
+fn test_top_n_output_ordering_and_tie_break() {
+    // The documented contract: results are sorted by score descending, ties
+    // broken by expression ascending; and when a score tie straddles the N
+    // boundary, the lexicographically smaller expressions are the ones kept.
+    let length = 6;
+    let solver = Solver::new(length, empty_gk(length));
+    let ps = ParallelSolver::new(solver, Some(4));
+    let (scored, _) = ps.solve_top_n(50);
+
+    // Ordering: (score desc, expr asc).
+    for w in scored.windows(2) {
+        let (sa, ea) = (&w[0].0, &w[0].1);
+        let (sb, eb) = (&w[1].0, &w[1].1);
+        assert!(
+            sa > sb || (sa == sb && ea < eb),
+            "top-N must be ordered by score desc then expr asc: ({sa},{ea}) before ({sb},{eb})"
+        );
+    }
+
+    // Boundary keep-behavior: take a score that has more occurrences than the
+    // slots we allow, and confirm we keep the lexicographically smallest exprs.
+    let (full_scored, _) = {
+        let solver = Solver::new(length, empty_gk(length));
+        let ps = ParallelSolver::new(solver, Some(4));
+        ps.solve_top_n(usize::MAX >> 8) // effectively "all", bounded sanity
+    };
+    // Group all solutions by score; find the maximum score's tie group.
+    let max_score = full_scored
+        .iter()
+        .map(|(s, _)| *s)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut tied: Vec<String> = full_scored
+        .iter()
+        .filter(|(s, _)| *s == max_score)
+        .map(|(_, e)| e.clone())
+        .collect();
+    tied.sort();
+
+    if tied.len() >= 2 {
+        // Ask for exactly one fewer than the tie-group size at the top: the
+        // kept set must be the smallest exprs of the group.
+        let k = tied.len() - 1;
+        let solver = Solver::new(length, empty_gk(length));
+        let ps = ParallelSolver::new(solver, Some(4));
+        let (topk, _) = ps.solve_top_n(k);
+        let kept: Vec<String> = topk.into_iter().map(|(_, e)| e).collect();
+        assert_eq!(
+            kept,
+            tied[..k],
+            "on a boundary score tie, the lexicographically smallest expressions must be kept"
+        );
+    }
+}
+
+// ---- Regression tests for PR review fixes ----
+
+#[test]
+fn invalid_guess_char_does_not_panic() {
+    // A character outside the Sumzle charset in a guess row must not crash the
+    // constraint-preparation path: `idx_of_char` returns `None` and the char is
+    // dropped, instead of hitting `unreachable!` (which crashed the API/CLI).
+    let row: GuessRow = vec![Tile {
+        char: 'x',
+        state: TileState::Empty,
+    }];
+    let gk = GlobalKnowledge::from_guess_rows(5, &[row]).expect("constraints should build");
+    let solver = Solver::new(5, gk);
+    let (results, _searched) = solver.solve();
+    // The unrepresentable char contributes no constraint, so the full
+    // unconstrained length-5 solution set remains.
+    assert_eq!(results.len(), 6243);
+}
+
+#[test]
+fn floor_value_saturating_below_i64_min_does_not_panic() {
+    // `[0-9^20]` floors to ~-1.2e19, below i64::MIN; the cast saturates and the
+    // decimal formatter must not panic (previously `-i64::MIN` overflowed in
+    // debug builds). Asserting it returns at all is enough to guard the panic.
+    let _ = evaluate_expression("[0-9^20]");
+}
+
+#[test]
+fn non_finite_numeric_rhs_is_rejected() {
+    // A numeric RHS long enough to overflow f64 to infinity must be rejected,
+    // not silently accepted because ±∞ and a large LHS both saturate to i64::MAX.
+    let huge = "9".repeat(320);
+    assert!(!is_valid_equation(&format!("9^20={huge}")));
+}
+
+#[test]
+fn correct_invalid_guess_char_does_not_panic() {
+    // A `Correct` tile fixes an exact character at a position. When that
+    // character is outside the Sumzle charset (e.g. `x`), its raw byte must not
+    // reach the search: `idx_of` would map it to `INVALID_INDEX` (255) and index
+    // `char_counts` out of bounds (a DoS on the API/CLI). The fixed constraint is
+    // dropped during preparation. The companion `cannot_be_at` set still forbids
+    // every valid char at that position, so no solution can be placed there.
+    let gk = gk_from_row(5, &[('x', TileState::Correct)]);
+    let solver = Solver::new(5, gk);
+    let (results, _searched) = solver.solve();
+    assert!(
+        results.is_empty(),
+        "position fixed to an unrepresentable char admits no solutions"
+    );
+}
+
+#[test]
+fn solve_branch_invalid_first_char_does_not_panic() {
+    // `solve_branch` is public and may be called with an arbitrary `first_char`.
+    // A character outside the Sumzle charset must be rejected before it reaches
+    // `idx_of`, which would otherwise index `char_counts` out of bounds.
+    let solver = Solver::new(5, empty_gk(5));
+    let (results, searched) = solver.solve_branch('x', None, FloorContext::new());
+    assert!(results.is_empty());
+    assert_eq!(searched, 0);
 }
