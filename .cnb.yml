@@ -1,0 +1,166 @@
+# CNB (cnb.cool) build & dev environment configuration.
+# Docs: https://docs.cnb.cool/zh/build/intro.html
+#       https://docs.cnb.cool/zh/workspaces/custom-dev-env.html
+
+# ---------------------------------------------------------------------------
+# CI pipeline: runs on every push to main / PR branches.
+# Mirrors the GitHub Actions workflow in .github/workflows/ci.yml.
+# ---------------------------------------------------------------------------
+main:
+  push:
+    - docker:
+        image: rust:1.82-slim
+      services:
+        - docker
+      stages:
+        - name: Install system deps
+          script: |
+            apt-get update -y
+            apt-get install -y --no-install-recommends \
+              curl unzip zip default-jdk-headless python3 git \
+              libwebkit2gtk-4.1-dev libssl-dev libgtk-3-dev libayatana-appindicator3-dev
+        - name: Show env
+          script: |
+            rustc --version
+            cargo --version
+            java -version
+        - name: Verify solver logic
+          script: |
+            bash scripts/verify-solver-logic.sh
+
+# ---------------------------------------------------------------------------
+# Cloud-native dev environment — start via "云原生开发" button on cnb.cool.
+# Provides a full Tauri Android build env: Rust + Android SDK/NDK + JDK 21.
+# ---------------------------------------------------------------------------
+$:
+  vscode:
+    - runner:
+        cpus: 8
+      docker:
+        image: cnbcool/default-dev-env:latest
+      services:
+        - vscode
+        - docker
+      stages:
+        - name: Show env
+          script: |
+            echo "=== Cloud-native dev environment ready ==="
+            uname -a
+            df -h /
+            free -h
+            nproc
+        - name: Install Rust
+          script: |
+            if ! command -v cargo >/dev/null 2>&1; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              source "$HOME/.cargo/env"
+            fi
+            rustc --version
+            rustup target add aarch64-linux-android x86_64-linux-android armv7-linux-androideabi i686-linux-android
+        - name: Install JDK 21 (with javac)
+          script: |
+            if ! command -v javac >/dev/null 2>&1; then
+              cd /tmp
+              curl -sL -o jdk21.tar.gz "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jdk_x64_linux_hotspot_21.0.5_11.tar.gz"
+              mkdir -p "$HOME/jdk21"
+              tar -xzf jdk21.tar.gz -C "$HOME/jdk21" --strip-components=1
+              rm jdk21.tar.gz
+              echo 'export JAVA_HOME=$HOME/jdk21' >> "$HOME/.bashrc"
+              echo 'export PATH=$JAVA_HOME/bin:$PATH' >> "$HOME/.bashrc"
+            fi
+            javac --version
+        - name: Install Android SDK + NDK
+          script: |
+            export ANDROID_HOME="$HOME/android-sdk"
+            export ANDROID_SDK_ROOT="$ANDROID_HOME"
+            export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+            export NDK_HOME="$ANDROID_NDK_HOME"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
+              cd /tmp
+              curl -sL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+              unzip -q cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools/"
+              mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+              rm cmdline-tools.zip
+            fi
+            export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+            yes | sdkmanager --licenses > /dev/null 2>&1
+            sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+            echo "Android SDK ready: $ANDROID_HOME"
+        - name: Install Node.js + Tauri CLI
+          script: |
+            if ! command -v node >/dev/null 2>&1; then
+              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+              apt-get install -y nodejs
+            fi
+            node --version
+            npm --version
+            cd /workspaces/sumzle-hpc-solver 2>/dev/null || cd "$HOME/sumzle-hpc-solver" 2>/dev/null || cd /workspace
+            npm install --no-audit --no-fund
+            npx tauri --version
+        - name: Install project deps
+          script: |
+            cd /workspaces/sumzle-hpc-solver 2>/dev/null || cd "$HOME/sumzle-hpc-solver" 2>/dev/null || cd /workspace
+            npm install --prefix frontend --no-audit --no-fund
+        - name: Run solver verification
+          script: |
+            cd /workspaces/sumzle-hpc-solver 2>/dev/null || cd "$HOME/sumzle-hpc-solver" 2>/dev/null || cd /workspace
+            bash scripts/verify-solver-logic.sh
+        - name: Build Android APK
+          script: |
+            export ANDROID_HOME="$HOME/android-sdk"
+            export ANDROID_SDK_ROOT="$ANDROID_HOME"
+            export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+            export NDK_HOME="$ANDROID_NDK_HOME"
+            export JAVA_HOME="$HOME/jdk21"
+            export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$HOME/.cargo/bin:$PATH"
+
+            cd /workspaces/sumzle-hpc-solver 2>/dev/null || cd "$HOME/sumzle-hpc-solver" 2>/dev/null || cd /workspace
+
+            # Build frontend
+            npm run build --prefix frontend
+
+            # Init Tauri Android project (idempotent)
+            npx tauri android init
+
+            # Copy frontend dist to Android assets (Tauri 2 sometimes misses this,
+            # causing the WebView to white-screen on launch)
+            ASSETS_DIR="src-tauri/gen/android/app/src/main/assets"
+            mkdir -p "$ASSETS_DIR"
+            cp -r frontend/dist/. "$ASSETS_DIR/"
+
+            # Build debug APK for arm64-v8a (most common phone ABI)
+            npx tauri android build --debug --apk --target aarch64
+
+            # Verify APK contains the required assets
+            APK=$(find src-tauri/gen/android -name "*.apk" -path "*debug*" | head -1)
+            echo "APK: $APK"
+            unzip -l "$APK" | grep -E "assets/(index\.html|assets/)" || {
+              echo "ERROR: APK missing frontend assets — app will white-screen"
+              exit 1
+            }
+
+            # Zipalign + sign
+            BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+            "$BUILD_TOOLS/zipalign" -f 4 "$APK" /tmp/aligned.apk
+            KS="$HOME/.android/debug.keystore"
+            mkdir -p "$(dirname "$KS")"
+            if [ ! -f "$KS" ]; then
+              keytool -genkey -v -keystore "$KS" -storepass android -alias androiddebugkey \
+                -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+              --out /tmp/sumzle-tauri-arm64-debug.apk /tmp/aligned.apk
+            "$BUILD_TOOLS/apksigner" verify --verbose /tmp/sumzle-tauri-arm64-debug.apk | head -5
+            ls -lh /tmp/sumzle-tauri-arm64-debug.apk
+        - name: Done — APK ready
+          script: |
+            echo "============================================================"
+            echo " Android APK build complete"
+            echo "============================================================"
+            ls -lh /tmp/sumzle-tauri-arm64-debug.apk 2>&1
+            echo ""
+            echo "Download the APK from the workspace file browser:"
+            echo "  /tmp/sumzle-tauri-arm64-debug.apk"
