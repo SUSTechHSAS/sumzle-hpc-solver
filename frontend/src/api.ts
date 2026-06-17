@@ -8,6 +8,25 @@ import type {
   DownloadFormat,
 } from './types';
 
+// Detect Tauri at runtime. Tauri injects `window.__TAURI_INTERNALS__` (and the
+// `@tauri-apps/api` package keys off it). In dev/standalone web mode this is
+// absent and we fall through to the regular HTTP API.
+const isTauri =
+  typeof window !== 'undefined' &&
+  // @ts-ignore - injected by Tauri runtime
+  (window.__TAURI_INTERNALS__ !== undefined || window.__TAURI__ !== undefined);
+
+// Lazily import the Tauri invoke bridge only when running inside Tauri, so the
+// web build does not pull in the (optional) Tauri runtime.
+let invokeFn: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!invokeFn) {
+    const mod = await import('@tauri-apps/api/core');
+    invokeFn = mod.invoke;
+  }
+  return invokeFn(cmd, args) as Promise<T>;
+}
+
 const API_BASE = '/api';
 
 export interface SolveOptions {
@@ -24,6 +43,15 @@ export async function solvePuzzle(
 ): Promise<SolveResponse> {
   const threads = options.threads ?? 0;
   const top = options.top ?? 0;
+
+  if (isTauri) {
+    // Tauri command: same JSON shape as the HTTP body, with options flattened
+    // into top-level fields (matching the Rust `SolveRequest` struct).
+    return invoke<SolveResponse>('solve', {
+      req: { length, rows, threads, top },
+    });
+  }
+
   const params = new URLSearchParams({ threads: String(threads) });
   if (top > 0) {
     params.set('top', String(top));
@@ -112,6 +140,9 @@ export function downloadResults(
 }
 
 export async function validateEquation(equation: string): Promise<ValidateResponse> {
+  if (isTauri) {
+    return invoke<ValidateResponse>('validate', { equation });
+  }
   const body: ValidateRequest = { equation };
   const res = await fetch(`${API_BASE}/validate`, {
     method: 'POST',
@@ -123,6 +154,9 @@ export async function validateEquation(equation: string): Promise<ValidateRespon
 }
 
 export async function evaluateExpression(expression: string): Promise<EvalResponse> {
+  if (isTauri) {
+    return invoke<EvalResponse>('eval_expression', { expression });
+  }
   const body: EvalRequest = { expression };
   const res = await fetch(`${API_BASE}/eval`, {
     method: 'POST',

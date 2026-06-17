@@ -12,3 +12,10 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 sumzle-hpc-solver/
+
+# Tauri (added for mobile support)
+/src-tauri/gen/
+/src-tauri/target/
+/src-tauri/Cargo.lock
+node_modules/
+target/
