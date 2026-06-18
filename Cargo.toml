@@ -29,6 +29,12 @@ env_logger = "0.11"
 num_cpus = "1.16"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
+# Returning-friendly global allocator. The long-running `serve` process builds
+# and frees large solution sets each request; glibc's default malloc retains
+# those freed pages in per-thread arenas, so RSS grows and never comes back
+# down across solves (issue #20). mimalloc decommits freed memory back to the
+# OS, keeping server memory steady. Cross-platform (Linux/macOS/Windows).
+mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

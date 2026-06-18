@@ -10,6 +10,15 @@ use sumzle_solver::solver::Solver;
 use sumzle_solver::types::GlobalKnowledge;
 use sumzle_solver::types::*;
 
+// Use mimalloc as the global allocator (issue #20). The `serve` command is a
+// long-running process that allocates and frees large `Vec<String>` solution
+// sets on every request; glibc's malloc keeps those freed pages in per-thread
+// arenas, so the resident set climbs across solves and never shrinks. mimalloc
+// returns freed memory to the OS, so server RSS stays steady. Set
+// `MIMALLOC_PURGE_DELAY=0` to return memory immediately after each solve.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(name = "sumzle-solver")]
 #[command(about = "High-performance Sumzle puzzle solver")]
