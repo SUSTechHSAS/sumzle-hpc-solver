@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { validateEquation } from '../api';
+import Icon from './Icon';
 import './EquationValidator.css';
 
 export default function EquationValidator() {
@@ -17,7 +18,8 @@ export default function EquationValidator() {
       const res = await validateEquation(equation.trim());
       setValid(res.valid);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Validation failed');
+      const message = e instanceof Error ? e.message : '未知错误';
+      setError(`验证失败：${message}`);
     } finally {
       setLoading(false);
     }
@@ -29,7 +31,7 @@ export default function EquationValidator() {
 
   return (
     <div className="validator-section" data-testid="equation-validator">
-      <h3 className="section-title">✅ 方程验证</h3>
+      <h3 className="section-title"><Icon name="check" />方程验证</h3>
       <div className="validator-row">
         <input
           type="text"
@@ -40,7 +42,7 @@ export default function EquationValidator() {
           onKeyDown={handleKeyDown}
         />
         <button className="validator-btn" onClick={handleValidate} disabled={loading}>
-          {loading ? '...' : '验证'}
+          {loading ? '验证中…' : '验证'}
         </button>
       </div>
       {valid !== null && (

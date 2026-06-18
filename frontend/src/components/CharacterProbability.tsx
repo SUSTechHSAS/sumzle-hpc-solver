@@ -1,4 +1,5 @@
 import type { CharProbability } from '../types';
+import Icon from './Icon';
 import './CharacterProbability.css';
 
 interface CharacterProbabilityProps {
@@ -14,7 +15,7 @@ export default function CharacterProbability({ probabilities }: CharacterProbabi
 
   return (
     <div className="char-prob-section">
-      <h3 className="section-title">🗝️ 字符概率</h3>
+      <h3 className="section-title"><Icon name="key" />字符概率</h3>
       <div className="char-prob-container">
         {probabilities.map((p) => (
           <div key={p.char} className="prob-item">
@@ -23,7 +24,8 @@ export default function CharacterProbability({ probabilities }: CharacterProbabi
               <div
                 className="prob-bar"
                 style={{
-                  width: `${(p.probability / maxProb) * 100}%`,
+                  width: '100%',
+                  transform: `scaleX(${maxProb > 0 ? p.probability / maxProb : 0})`,
                 }}
               />
             </div>

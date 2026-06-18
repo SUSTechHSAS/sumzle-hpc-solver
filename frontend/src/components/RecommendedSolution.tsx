@@ -1,4 +1,5 @@
 import { displayChar } from '../types';
+import Icon from './Icon';
 import './RecommendedSolution.css';
 
 interface RecommendedSolutionProps {
@@ -12,9 +13,9 @@ export default function RecommendedSolution({ solution }: RecommendedSolutionPro
 
   return (
     <div className="recommended-section">
-      <h3 className="section-title">⭐ 推荐解</h3>
+      <h3 className="section-title"><Icon name="star" />推荐解</h3>
       <div className="recommended-result-item">
-        <span className="recommended-label">⭐推荐</span>
+        <span className="recommended-label"><Icon name="star" />推荐</span>
         <span className="recommended-expression">
           {solution.split('').map(displayChar).join('')}
         </span>

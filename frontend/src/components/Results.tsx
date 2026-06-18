@@ -3,6 +3,7 @@ import { displayChar } from '../types';
 import { formatSpeed, formatTime } from '../utils';
 import CharacterProbability from './CharacterProbability';
 import RecommendedSolution from './RecommendedSolution';
+import Icon from './Icon';
 import './Results.css';
 
 interface ResultsProps {
@@ -10,17 +11,18 @@ interface ResultsProps {
   loading: boolean;
   error: string | null;
   onDownload: (format: DownloadFormat) => void;
+  onRetry?: () => void;
 }
 
 const MAX_DISPLAY_SOLUTIONS = 500;
 
-export default function Results({ data, loading, error, onDownload }: ResultsProps) {
+export default function Results({ data, loading, error, onDownload, onRetry }: ResultsProps) {
   if (loading) {
     return (
       <div className="results-section">
-        <div className="results-loading">
+        <div className="results-loading" role="status" aria-live="polite">
           <div className="spinner" />
-          <span>正在求解...</span>
+          <span>正在搜索候选表达式…</span>
         </div>
         <div className="progress-bar-container">
           <div className="progress-bar animated" />
@@ -32,9 +34,14 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
   if (error) {
     return (
       <div className="results-section">
-        <div className="results-error">
-          <span className="error-icon">⚠️</span>
-          <span>{error}</span>
+        <div className="results-error" role="alert">
+          <span className="error-icon"><Icon name="alert" /></span>
+          <span className="results-error-message">{error}</span>
+          {onRetry && (
+            <button className="results-retry" type="button" onClick={onRetry}>
+              重新求解
+            </button>
+          )}
         </div>
       </div>
     );
@@ -43,7 +50,7 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
   if (!data) {
     return (
       <div className="results-section">
-        <div className="results-placeholder">等待求解开始...</div>
+        <div className="results-placeholder">输入反馈后运行求解，结果会显示在这里。</div>
       </div>
     );
   }
@@ -57,7 +64,7 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
 
   return (
     <div className="results-section" data-testid="results-section">
-      <h2 className="section-title">📊 求解结果</h2>
+      <h2 className="section-title"><Icon name="chart" />求解结果</h2>
 
       {/* Stats cards */}
       <div className="stats-grid">
@@ -88,7 +95,7 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
       {/* Results list */}
       <div className="results-list-section">
         <div className="results-list-header">
-          <h3 className="section-title">📜 结果列表</h3>
+          <h3 className="section-title"><Icon name="table" />结果列表</h3>
           <span className="results-count">
             {top > 0 ? (
               <>
@@ -117,19 +124,19 @@ export default function Results({ data, loading, error, onDownload }: ResultsPro
                   {sol.split('').map(displayChar).join('')}
                 </span>
                 {hasScores && <span className="result-score">{scores[i].toFixed(1)}</span>}
-                {recommended === sol && <span className="result-recommended-badge">⭐推荐</span>}
+                {recommended === sol && <span className="result-recommended-badge"><Icon name="star" />推荐</span>}
               </div>
             ))}
           </div>
         ) : (
-          <div className="no-solutions">暂无找到符合条件的解</div>
+          <div className="no-solutions">没有符合当前反馈的解。请检查颜色状态或表达式长度。</div>
         )}
       </div>
 
       {/* Download buttons */}
       {solutions.length > 0 && (
         <div className="download-section">
-          <h3 className="section-title">📥 下载结果</h3>
+          <h3 className="section-title"><Icon name="download" />下载结果</h3>
           <div className="download-buttons">
             <button
               className="btn btn-download"

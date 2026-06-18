@@ -15,6 +15,7 @@ export default function VirtualKeyboard({ onKeyPress }: VirtualKeyboardProps) {
               key={key}
               className={`keyboard-key${key === '⌫' ? ' key-backspace' : ''}`}
               onClick={() => onKeyPress(key)}
+              aria-label={key === '⌫' ? '删除当前字符' : `输入 ${key}`}
             >
               {key}
             </button>

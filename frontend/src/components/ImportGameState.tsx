@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import type { GuessRow, TileState } from '../types';
+import Icon from './Icon';
 import './ImportGameState.css';
 
 interface ImportGameStateProps {
@@ -91,14 +92,15 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
         className="btn btn-import-toggle"
         onClick={() => setShowImport(!showImport)}
       >
-        {showImport ? '🔽 收起导入' : '📥 导入局面'}
+        <Icon name={showImport ? 'chevron-up' : 'download'} />
+        {showImport ? '收起导入' : '导入局面'}
       </button>
 
       {showImport && (
         <div className="import-panel">
           <textarea
             className="import-textarea"
-            placeholder="粘贴Sumzle游戏状态JSON..."
+            placeholder="粘贴 Sumzle 游戏状态 JSON"
             value={importText}
             onChange={(e) => setImportText(e.target.value)}
             rows={4}
@@ -111,7 +113,8 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
               className="btn btn-secondary btn-sm"
               onClick={() => fileInputRef.current?.click()}
             >
-              📂 从文件导入
+              <Icon name="file" />
+              从文件导入
             </button>
             <input
               ref={fileInputRef}

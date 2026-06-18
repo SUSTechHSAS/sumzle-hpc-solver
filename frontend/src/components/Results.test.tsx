@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import Results from './Results';
 import type { SolveResponse } from '../types';
@@ -8,17 +9,34 @@ describe('Results', () => {
 
   it('shows placeholder when no data', () => {
     render(<Results data={null} loading={false} error={null} onDownload={mockOnDownload}  />);
-    expect(screen.getByText('等待求解开始...')).toBeInTheDocument();
+    expect(screen.getByText('输入反馈后运行求解，结果会显示在这里。')).toBeInTheDocument();
   });
 
   it('shows loading state', () => {
     render(<Results data={null} loading={true} error={null} onDownload={mockOnDownload}  />);
-    expect(screen.getByText('正在求解...')).toBeInTheDocument();
+    expect(screen.getByText('正在搜索候选表达式…')).toBeInTheDocument();
   });
 
   it('shows error message', () => {
     render(<Results data={null} loading={false} error="Something went wrong" onDownload={mockOnDownload}  />);
     expect(screen.getByText('Something went wrong')).toBeInTheDocument();
+  });
+
+  it('offers retry from the error state when a retry handler is provided', async () => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    render(
+      <Results
+        data={null}
+        loading={false}
+        error="求解失败：网络中断"
+        onDownload={mockOnDownload}
+        onRetry={onRetry}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '重新求解' }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
   it('displays solutions and stats', () => {
@@ -60,6 +78,22 @@ describe('Results', () => {
     expect(screen.getByText('×')).toBeInTheDocument();
   });
 
+  it('renders zero character probabilities without invalid transforms', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3'],
+      stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [
+        { char: '=', display: '=', count: 0, probability: 0 },
+      ],
+      recommended: '1+2=3',
+      top: 0,
+      scores: [],
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} />);
+
+    expect(container.querySelector('.prob-bar')).toHaveStyle({ transform: 'scaleX(0)' });
+  });
+
   it('shows recommended solution', () => {
     const data: SolveResponse = {
       solutions: ['1+2=3', '2+3=5'],
@@ -86,7 +120,7 @@ describe('Results', () => {
     };
     render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload}  />);
 
-    expect(screen.getByText('暂无找到符合条件的解')).toBeInTheDocument();
+    expect(screen.getByText('没有符合当前反馈的解。请检查颜色状态或表达式长度。')).toBeInTheDocument();
   });
 
   it('shows download buttons when solutions exist', () => {

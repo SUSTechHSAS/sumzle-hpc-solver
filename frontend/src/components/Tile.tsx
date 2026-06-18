@@ -1,5 +1,5 @@
 import { useRef, useEffect } from 'react';
-import { type Tile as TileType, type TileState } from '../types';
+import { type Tile as TileType, type TileState, VALID_CHARS } from '../types';
 import './Tile.css';
 
 interface TileProps {
@@ -16,8 +16,27 @@ const STATE_LABELS: Record<TileState, string> = {
   empty: '✕',
 };
 
+const STATE_COPY: Record<TileState, { label: string; next: string }> = {
+  correct: { label: '正确位置', next: '错位存在' },
+  present: { label: '错位存在', next: '不存在' },
+  empty: { label: '不存在', next: '正确位置' },
+};
+
+const VALID_DIRECT_INPUT = new Set(VALID_CHARS.flat().filter((key) => key !== '⌫'));
+const DIRECT_INPUT_ALIASES: Record<string, string> = {
+  '×': '*',
+  '÷': '/',
+};
+
+function normalizeDirectInput(value: string): string {
+  const raw = value.slice(-1).toUpperCase();
+  const normalized = DIRECT_INPUT_ALIASES[raw] ?? raw;
+  return VALID_DIRECT_INPUT.has(normalized) ? normalized : '';
+}
+
 export default function Tile({ tile, onCharChange, onStateToggle, selected, onSelect }: TileProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const stateCopy = STATE_COPY[tile.state];
 
   useEffect(() => {
     if (selected && inputRef.current) {
@@ -29,8 +48,14 @@ export default function Tile({ tile, onCharChange, onStateToggle, selected, onSe
     const val = e.target.value;
     if (val.length === 0) {
       onCharChange('');
-    } else {
-      onCharChange(val.slice(-1));
+      return;
+    }
+
+    const normalized = normalizeDirectInput(val);
+    if (normalized !== '') {
+      onCharChange(normalized);
+    } else if (tile.char === '') {
+      onCharChange('');
     }
   };
 
@@ -53,7 +78,8 @@ export default function Tile({ tile, onCharChange, onStateToggle, selected, onSe
         value={tile.char}
         onChange={handleInput}
         onKeyDown={handleKeyDown}
-        aria-label="Tile character"
+        aria-label="输入方块字符"
+        onFocus={onSelect}
         onClick={(e) => e.stopPropagation()}
       />
       <button
@@ -62,8 +88,8 @@ export default function Tile({ tile, onCharChange, onStateToggle, selected, onSe
           e.stopPropagation();
           onStateToggle();
         }}
-        title={`State: ${tile.state}. Click to toggle.`}
-        aria-label={`State: ${tile.state}`}
+        title={`当前标记：${stateCopy.label}。点击切换为：${stateCopy.next}。`}
+        aria-label={`当前标记：${stateCopy.label}。点击切换为：${stateCopy.next}。`}
       >
         {STATE_LABELS[tile.state]}
       </button>

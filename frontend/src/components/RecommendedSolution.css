@@ -1,29 +1,34 @@
 .recommended-section {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-md);
 }
 
 .recommended-result-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: color-mix(in srgb, var(--fluent-blue) 10%, var(--color-surface));
-  border-left: 5px solid var(--fluent-blue);
-  border-radius: 6px;
-  box-shadow: var(--shadow-s);
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid color-mix(in srgb, var(--color-correct) 34%, var(--color-border));
+  border-radius: var(--radius-m, 12px);
+  background: color-mix(in srgb, var(--color-correct) 9%, var(--color-surface));
+  box-shadow: var(--shadow-xs);
 }
 
 .recommended-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  color: var(--color-correct);
   font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--fluent-blue);
+  font-weight: var(--weight-bold);
   white-space: nowrap;
 }
 
 .recommended-expression {
-  font-family: 'Courier New', monospace;
-  font-size: 1.2rem;
-  font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--color-text);
-  letter-spacing: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1.12rem;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.09em;
 }
