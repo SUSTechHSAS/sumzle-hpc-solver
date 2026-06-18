@@ -248,7 +248,7 @@ export default function App() {
                     type="number"
                     min={0}
                     value={topN}
-                    onChange={(e) => setTopN(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                    onChange={(e) => setTopN(Math.max(0, Number.parseInt(e.target.value, 10) || 0))}
                     className="option-input"
                   />
                   <span className="option-hint">0 表示返回全部</span>
