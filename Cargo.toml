@@ -42,6 +42,9 @@ proptest = "1.5"
 tower = "0.5"
 http = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Used only by the Linux memory regression test to query the real page size
+# (libc::sysconf(_SC_PAGESIZE)) instead of assuming 4 KiB.
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

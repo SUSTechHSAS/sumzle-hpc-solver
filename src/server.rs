@@ -969,7 +969,12 @@ mod tests {
                 .nth(1)
                 .and_then(|s| s.parse().ok())
                 .expect("resident pages field in /proc/self/statm");
-            resident_pages * 4096
+            // statm reports counts in pages; query the real page size rather than
+            // assuming 4 KiB. ARM64 (Graviton, Apple Silicon under Linux) commonly
+            // uses 16 KiB or 64 KiB pages, where a hardcoded 4096 underestimates
+            // RSS by 4-16x and could mask a regression.
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+            resident_pages * page_size
         }
 
         let one_solve = || {

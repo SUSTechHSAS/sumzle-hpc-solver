@@ -1237,6 +1237,7 @@ dependencies = [
  "criterion",
  "env_logger",
  "http",
+ "libc",
  "log",
  "mimalloc",
  "num_cpus",
