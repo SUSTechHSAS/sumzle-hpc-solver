@@ -29,6 +29,9 @@ env_logger = "0.11"
 num_cpus = "1.16"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
+# Bridges a tokio mpsc channel into a `Stream` for the SSE progress endpoint
+# and the chunked NDJSON solution-stream endpoint.
+tokio-stream = "0.1"
 # Returning-friendly global allocator. The long-running `serve` process builds
 # and frees large solution sets each request; glibc's default malloc retains
 # those freed pages in per-thread arenas, so RSS grows and never comes back
