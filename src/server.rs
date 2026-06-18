@@ -1234,6 +1234,56 @@ mod tests {
         assert_eq!(status, HttpStatusCode::BAD_REQUEST);
     }
 
+    /// Regression test for issue #20: the server builds and frees a large
+    /// `Vec<String>` of solutions on every request. With the mimalloc global
+    /// allocator (defined in `lib.rs`, so it backs this test binary too) the
+    /// resident set must stay bounded across many solves — a real leak, or
+    /// glibc-style per-arena retention, would climb by hundreds of MB.
+    ///
+    /// Linux-only (reads `/proc/self/statm`). Each iteration mirrors one
+    /// `/api/solve` request: build a fresh solver, produce the full length-6
+    /// solution set (~50k strings), then drop it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_repeated_solves_keep_memory_bounded() {
+        fn rss_bytes() -> usize {
+            let statm = std::fs::read_to_string("/proc/self/statm").expect("read /proc/self/statm");
+            let resident_pages: usize = statm
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .expect("resident pages field in /proc/self/statm");
+            resident_pages * 4096
+        }
+
+        let one_solve = || {
+            let gk = GlobalKnowledge::from_guess_rows(6, &[]).unwrap();
+            let solver = Solver::new(6, gk);
+            let (results, _searched) = ParallelSolver::new(solver, None).solve();
+            assert!(!results.is_empty());
+        };
+
+        // Warm up to a steady-state working set, then measure growth over many
+        // more solves. mimalloc reuses/returns memory, so growth stays near zero;
+        // if every request's result set were retained instead, 60 length-6 solves
+        // would add well over 100 MB.
+        for _ in 0..5 {
+            one_solve();
+        }
+        let baseline = rss_bytes();
+        for _ in 0..60 {
+            one_solve();
+        }
+        let growth = rss_bytes().saturating_sub(baseline);
+
+        assert!(
+            growth < 64 * 1024 * 1024,
+            "RSS grew {} MB across 60 solves after warmup — solutions are not being \
+             freed across requests (issue #20 regression)",
+            growth / (1024 * 1024),
+        );
+    }
+
     #[tokio::test]
     async fn test_solve_length_above_old_cap_accepted() {
         // The previous hard cap of 8 has been removed; longer expressions are
