@@ -617,7 +617,14 @@ async fn solve_stream_handler(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(16);
     tokio::task::spawn_blocking(move || {
-        let writer = ChannelWriter { tx };
+        // Buffer the per-line NDJSON writes into ~8 KB chunks before they hit the
+        // channel. `solve_to_writer` writes one solution per `write` call, which
+        // unbuffered would mean thousands of tiny `Vec<u8>` allocations and
+        // `blocking_send`s (one per solution) plus an HTTP chunk each. `BufWriter`
+        // coalesces them, cutting allocation/contention/chunking overhead. The
+        // final `BufWriter` flush is guaranteed by `solve_to_writer`, which calls
+        // `flush()?` on the writer before returning (see `parallel.rs`).
+        let writer = std::io::BufWriter::new(ChannelWriter { tx });
         let parallel = ParallelSolver::new(solver, Some(num_threads));
         // Errors here are almost always the client disconnecting; the stream is
         // already closing, so there is nothing further to report. Dropping the
