@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import GuessRowComponent from './GuessRow';
@@ -114,7 +114,7 @@ describe('GuessRow', () => {
     expect(onCharChange).toHaveBeenCalledWith(0, 0, '*');
   });
 
-  it('rejects unsupported characters typed directly into a tile', async () => {
+  it('rejects unsupported characters typed directly into an empty tile', async () => {
     const user = userEvent.setup();
     const onCharChange = vi.fn();
     const row = createBlankRow(3);
@@ -129,6 +129,29 @@ describe('GuessRow', () => {
     const inputs = screen.getAllByLabelText('输入方块字符');
     await user.type(inputs[0], 'z');
     expect(onCharChange).toHaveBeenCalledWith(0, 0, '');
+  });
+
+  it('keeps an existing tile value when unsupported characters are typed', () => {
+    const onCharChange = vi.fn();
+    const row = {
+      tiles: [
+        { char: '5', state: 'empty' as const },
+        { char: '', state: 'empty' as const },
+        { char: '', state: 'empty' as const },
+      ],
+    };
+    render(
+      <GuessRowComponent
+        row={row}
+        rowIndex={0}
+        onTileCharChange={onCharChange}
+        onTileStateToggle={mockOnStateToggle}
+      />,
+    );
+
+    const inputs = screen.getAllByLabelText('输入方块字符');
+    fireEvent.change(inputs[0], { target: { value: '5z' } });
+    expect(onCharChange).not.toHaveBeenCalled();
   });
 
   it('calls onTileStateToggle when state button is clicked', async () => {
@@ -164,5 +187,23 @@ describe('GuessRow', () => {
     const tiles = container.querySelectorAll('.tile');
     expect(tiles[1]).toHaveClass('tile-selected');
     expect(tiles[0]).not.toHaveClass('tile-selected');
+  });
+
+  it('selects the tile when its input receives focus', () => {
+    const onSelect = vi.fn();
+    const row = createBlankRow(3);
+    render(
+      <GuessRowComponent
+        row={row}
+        rowIndex={0}
+        onTileCharChange={mockOnCharChange}
+        onTileStateToggle={mockOnStateToggle}
+        onTileSelect={onSelect}
+      />,
+    );
+
+    const inputs = screen.getAllByLabelText('输入方块字符');
+    fireEvent.focus(inputs[2]);
+    expect(onSelect).toHaveBeenCalledWith(0, 2);
   });
 });

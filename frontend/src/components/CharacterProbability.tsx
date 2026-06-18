@@ -25,7 +25,7 @@ export default function CharacterProbability({ probabilities }: CharacterProbabi
                 className="prob-bar"
                 style={{
                   width: '100%',
-                  transform: `scaleX(${p.probability / maxProb})`,
+                  transform: `scaleX(${maxProb > 0 ? p.probability / maxProb : 0})`,
                 }}
               />
             </div>

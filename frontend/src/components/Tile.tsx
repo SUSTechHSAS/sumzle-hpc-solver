@@ -46,7 +46,17 @@ export default function Tile({ tile, onCharChange, onStateToggle, selected, onSe
 
   const handleInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
-    onCharChange(val.length === 0 ? '' : normalizeDirectInput(val));
+    if (val.length === 0) {
+      onCharChange('');
+      return;
+    }
+
+    const normalized = normalizeDirectInput(val);
+    if (normalized !== '') {
+      onCharChange(normalized);
+    } else if (tile.char === '') {
+      onCharChange('');
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -69,6 +79,7 @@ export default function Tile({ tile, onCharChange, onStateToggle, selected, onSe
         onChange={handleInput}
         onKeyDown={handleKeyDown}
         aria-label="输入方块字符"
+        onFocus={onSelect}
         onClick={(e) => e.stopPropagation()}
       />
       <button

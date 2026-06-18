@@ -78,6 +78,22 @@ describe('Results', () => {
     expect(screen.getByText('×')).toBeInTheDocument();
   });
 
+  it('renders zero character probabilities without invalid transforms', () => {
+    const data: SolveResponse = {
+      solutions: ['1+2=3'],
+      stats: { searched_count: 100, found_count: 1, elapsed_ms: 5, speed: 20000 },
+      char_probabilities: [
+        { char: '=', display: '=', count: 0, probability: 0 },
+      ],
+      recommended: '1+2=3',
+      top: 0,
+      scores: [],
+    };
+    const { container } = render(<Results data={data} loading={false} error={null} onDownload={mockOnDownload} />);
+
+    expect(container.querySelector('.prob-bar')).toHaveStyle({ transform: 'scaleX(0)' });
+  });
+
   it('shows recommended solution', () => {
     const data: SolveResponse = {
       solutions: ['1+2=3', '2+3=5'],
