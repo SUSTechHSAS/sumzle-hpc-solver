@@ -185,7 +185,11 @@ export default function App() {
     } catch (e) {
       const message = e instanceof Error ? e.message : '未知错误';
       setStreamStatus(null);
-      setError(`流式导出失败：${message}`);
+      // Cancelling the save dialog is a normal user action, not an error — don't
+      // surface it as a red failure banner.
+      if (message !== '已取消保存') {
+        setError(`流式导出失败：${message}`);
+      }
     } finally {
       setStreaming(false);
     }

@@ -301,53 +301,62 @@ export async function solveStreamToFile(
     }
   }
 
-  const res = await fetch(`${API_BASE}/solve/stream?${solveParams(options, false)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ length, rows }),
-  });
-  if (!res.ok) {
-    if (writable) await writable.close();
-    throw new Error(await res.text());
-  }
-  if (!res.body) {
-    if (writable) await writable.close();
-    throw new Error('当前浏览器不支持流式响应');
-  }
+  // From here the writable (if any) is open, so guard the request + streaming
+  // loop with try/finally: on any error mid-stream we must still close the
+  // writable, or the OS file handle leaks and the file stays locked/incomplete.
+  try {
+    const res = await fetch(`${API_BASE}/solve/stream?${solveParams(options, false)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ length, rows }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    if (!res.body) throw new Error('当前浏览器不支持流式响应');
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  const chunks: Uint8Array[] = [];
-  let count = 0;
-  let tail = '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const chunks: Uint8Array[] = [];
+    let count = 0;
+    let tail = '';
 
-  let streaming = true;
-  while (streaming) {
-    const { done, value } = await reader.read();
-    if (value) {
-      if (writable) {
-        await writable.write(value);
-      } else {
-        chunks.push(value);
+    let streaming = true;
+    while (streaming) {
+      const { done, value } = await reader.read();
+      if (value) {
+        if (writable) {
+          await writable.write(value);
+        } else {
+          chunks.push(value);
+        }
+        // Each solution is one '\n'-terminated NDJSON line; count completed lines.
+        const text = tail + decoder.decode(value, { stream: true });
+        const lines = text.split('\n');
+        tail = lines.pop() ?? '';
+        count += lines.length;
+        if (onCount) onCount(count);
       }
-      // Each solution is one '\n'-terminated NDJSON line; count completed lines.
-      const text = tail + decoder.decode(value, { stream: true });
-      const lines = text.split('\n');
-      tail = lines.pop() ?? '';
-      count += lines.length;
+      if (done) streaming = false;
+    }
+    if (tail.trim().length > 0) {
+      count += 1;
       if (onCount) onCount(count);
     }
-    if (done) streaming = false;
-  }
-  if (tail.trim().length > 0) {
-    count += 1;
-    if (onCount) onCount(count);
-  }
 
-  if (writable) {
-    await writable.close();
-    return { count, streamedToDisk: true };
+    if (writable) {
+      await writable.close();
+      writable = null; // closed cleanly — don't double-close in `finally`
+      return { count, streamedToDisk: true };
+    }
+    downloadBlob(new Blob(chunks as BlobPart[], { type: 'application/x-ndjson' }), suggestedName);
+    return { count, streamedToDisk: false };
+  } finally {
+    // Reached with an open writable only on an error path; release the handle.
+    if (writable) {
+      try {
+        await writable.close();
+      } catch {
+        // Ignore secondary errors while cleaning up.
+      }
+    }
   }
-  downloadBlob(new Blob(chunks as BlobPart[], { type: 'application/x-ndjson' }), suggestedName);
-  return { count, streamedToDisk: false };
 }

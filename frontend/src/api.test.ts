@@ -426,6 +426,40 @@ describe('API functions', () => {
 
       (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
     });
+
+    it('closes the writable if the request fails mid-stream', async () => {
+      const writable = {
+        write: vi.fn(() => Promise.resolve()),
+        close: vi.fn(() => Promise.resolve()),
+      };
+      const handle = { createWritable: vi.fn(() => Promise.resolve(writable)) };
+      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = vi.fn(() =>
+        Promise.resolve(handle),
+      );
+      // Server rejects the request after the writable was already opened.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        text: () => Promise.resolve('boom'),
+      } as Response);
+
+      await expect(solveStreamToFile(5, [], { threads: 0 })).rejects.toThrow('boom');
+      // The file handle must be released even though streaming never started.
+      expect(writable.close).toHaveBeenCalled();
+
+      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
+    });
+
+    it('throws "已取消保存" and never fetches when the save dialog is cancelled', async () => {
+      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = vi.fn(() =>
+        Promise.reject(new DOMException('The user aborted a request.', 'AbortError')),
+      );
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      await expect(solveStreamToFile(5, [], { threads: 0 })).rejects.toThrow('已取消保存');
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
+    });
   });
 
 });
