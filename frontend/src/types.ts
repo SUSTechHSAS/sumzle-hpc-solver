@@ -50,6 +50,30 @@ export interface SolveResponse {
   scores: number[];
 }
 
+/** Live progress emitted by POST /api/solve/progress (issue #22). */
+export interface SolveProgress {
+  /** Completed search branches. */
+  done: number;
+  /** Total search branches to complete (0 until the branch set is known). */
+  total: number;
+  /** Coarse phase: 0 preparing, 1 searching, 2 scoring (top-N), 3 finished. */
+  phase: number;
+}
+
+/** Human-readable label for a {@link SolveProgress} phase. */
+export function progressPhaseLabel(phase: number): string {
+  switch (phase) {
+    case 1:
+      return '搜索中';
+    case 2:
+      return '评分中';
+    case 3:
+      return '完成';
+    default:
+      return '准备中';
+  }
+}
+
 /** Request body for POST /api/validate */
 export interface ValidateRequest {
   equation: string;

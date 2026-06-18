@@ -1,6 +1,7 @@
 import type {
   SolveRequest,
   SolveResponse,
+  SolveProgress,
   ValidateRequest,
   ValidateResponse,
   EvalRequest,
@@ -131,4 +132,222 @@ export async function evaluateExpression(expression: string): Promise<EvalRespon
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+/** Build the shared `?threads=&top=` query string for the solve endpoints. */
+function solveParams(options: SolveOptions, includeTop: boolean): string {
+  const params = new URLSearchParams({ threads: String(options.threads ?? 0) });
+  const top = options.top ?? 0;
+  if (includeTop && top > 0) {
+    params.set('top', String(top));
+  }
+  return params.toString();
+}
+
+/** Parse one SSE frame into its `event` name and concatenated `data` payload.
+ * Returns null for comment-only/empty frames (e.g. keep-alive `:` lines). */
+function parseSseFrame(frame: string): { event: string; data: string } | null {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const raw of frame.split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (line.startsWith(':')) continue; // comment / keep-alive
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      const rest = line.slice(5);
+      dataLines.push(rest.startsWith(' ') ? rest.slice(1) : rest);
+    }
+  }
+  if (dataLines.length === 0) return null;
+  return { event, data: dataLines.join('\n') };
+}
+
+/**
+ * Solve via the streaming SSE endpoint, reporting live progress (issue #22).
+ *
+ * Identical result to {@link solvePuzzle}, but the backend streams
+ * `progress` events (forwarded to `onProgress`) before the final result, so the
+ * UI can show a real, branch-completion-based progress bar.
+ */
+export async function solveWithProgress(
+  length: number,
+  rows: SolveRequest['rows'],
+  options: SolveOptions = {},
+  onProgress?: (progress: SolveProgress) => void,
+): Promise<SolveResponse> {
+  const res = await fetch(`${API_BASE}/solve/progress?${solveParams(options, true)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ length, rows }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  if (!res.body) throw new Error('当前浏览器不支持流式响应');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: SolveResponse | null = null;
+
+  const handleFrame = (frame: string) => {
+    const parsed = parseSseFrame(frame);
+    if (!parsed) return;
+    if (parsed.event === 'progress') {
+      if (onProgress) {
+        try {
+          onProgress(JSON.parse(parsed.data) as SolveProgress);
+        } catch {
+          /* ignore malformed progress frame */
+        }
+      }
+    } else if (parsed.event === 'result') {
+      result = JSON.parse(parsed.data) as SolveResponse;
+    } else if (parsed.event === 'error') {
+      throw new Error(parsed.data || '求解失败');
+    }
+  };
+
+  let streaming = true;
+  while (streaming) {
+    const { done, value } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      handleFrame(buffer.slice(0, sep));
+      buffer = buffer.slice(sep + 2);
+    }
+    if (done) {
+      streaming = false;
+    }
+  }
+  // Flush any trailing frame that wasn't newline-terminated.
+  if (buffer.trim().length > 0) handleFrame(buffer);
+
+  if (!result) throw new Error('求解结束但未返回结果');
+  return result;
+}
+
+// Minimal typings for the File System Access API (not in the default DOM lib
+// for this toolchain). Only the members we use are declared.
+interface SaveFilePickerOptions {
+  suggestedName?: string;
+  types?: { description?: string; accept: Record<string, string[]> }[];
+}
+interface WritableFileStreamLike {
+  write(data: BufferSource | Blob | string): Promise<void>;
+  close(): Promise<void>;
+}
+interface FileHandleLike {
+  createWritable(): Promise<WritableFileStreamLike>;
+}
+type ShowSaveFilePicker = (options?: SaveFilePickerOptions) => Promise<FileHandleLike>;
+
+/** Trigger a browser download of `blob` under `filename`. */
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/** Outcome of {@link solveStreamToFile}. */
+export interface StreamToFileResult {
+  /** Number of solutions written (one NDJSON line each). */
+  count: number;
+  /** True if streamed directly to disk; false if buffered then downloaded
+   * (fallback for browsers without the File System Access API). */
+  streamedToDisk: boolean;
+}
+
+/**
+ * Stream every solution from the backend straight into a file as NDJSON,
+ * without holding the full set in memory (issue #21).
+ *
+ * Prefers the File System Access API (`showSaveFilePicker`) so bytes go to disk
+ * as they arrive; falls back to buffering + a normal download where it is
+ * unavailable. `onCount` reports the running solution count for progress.
+ *
+ * Must be called from a user gesture (the save dialog requires user activation).
+ */
+export async function solveStreamToFile(
+  length: number,
+  rows: SolveRequest['rows'],
+  options: SolveOptions = {},
+  onCount?: (count: number) => void,
+): Promise<StreamToFileResult> {
+  const suggestedName = `sumzle_solutions_${Math.floor(Date.now() / 1000)}.ndjson`;
+
+  // Open the save dialog first, while we still have user activation.
+  let writable: WritableFileStreamLike | null = null;
+  const picker = (window as unknown as { showSaveFilePicker?: ShowSaveFilePicker })
+    .showSaveFilePicker;
+  if (picker) {
+    try {
+      const handle = await picker({
+        suggestedName,
+        types: [{ description: 'NDJSON', accept: { 'application/x-ndjson': ['.ndjson'] } }],
+      });
+      writable = await handle.createWritable();
+    } catch (e) {
+      // User dismissed the picker — abort without firing the solve request.
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        throw new Error('已取消保存', { cause: e });
+      }
+      writable = null; // any other failure → fall back to a buffered download
+    }
+  }
+
+  const res = await fetch(`${API_BASE}/solve/stream?${solveParams(options, false)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ length, rows }),
+  });
+  if (!res.ok) {
+    if (writable) await writable.close();
+    throw new Error(await res.text());
+  }
+  if (!res.body) {
+    if (writable) await writable.close();
+    throw new Error('当前浏览器不支持流式响应');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: Uint8Array[] = [];
+  let count = 0;
+  let tail = '';
+
+  let streaming = true;
+  while (streaming) {
+    const { done, value } = await reader.read();
+    if (value) {
+      if (writable) {
+        await writable.write(value);
+      } else {
+        chunks.push(value);
+      }
+      // Each solution is one '\n'-terminated NDJSON line; count completed lines.
+      const text = tail + decoder.decode(value, { stream: true });
+      const lines = text.split('\n');
+      tail = lines.pop() ?? '';
+      count += lines.length;
+      if (onCount) onCount(count);
+    }
+    if (done) streaming = false;
+  }
+  if (tail.trim().length > 0) {
+    count += 1;
+    if (onCount) onCount(count);
+  }
+
+  if (writable) {
+    await writable.close();
+    return { count, streamedToDisk: true };
+  }
+  downloadBlob(new Blob(chunks as BlobPart[], { type: 'application/x-ndjson' }), suggestedName);
+  return { count, streamedToDisk: false };
 }

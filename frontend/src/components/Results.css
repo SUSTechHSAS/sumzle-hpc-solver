@@ -49,6 +49,18 @@
   animation: progress-pulse 1.7s ease-in-out infinite;
 }
 
+.progress-bar.determinate {
+  transition: transform 0.15s ease-out;
+}
+
+.progress-detail {
+  margin-top: var(--space-xs);
+  font-size: 0.8rem;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 @keyframes progress-pulse {
   0% {
     opacity: 0.45;
