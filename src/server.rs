@@ -395,7 +395,13 @@ async fn solve_handler(
     // returned `solutions` are just the ranked top-N subset, so their own
     // frequencies would be misleading. In the other modes `results` already
     // holds every solution, so the probabilities are derived from it below.
-    let (results, scores, full_char_probs, searched_count) = if top > 0 {
+    //
+    // `found_count` is the total number of solutions found across the *full*
+    // search. In top-N mode `results` is only the ranked top-N subset, so its
+    // length would under-report the total — the count comes from the pass-1
+    // `CountSink::total` instead (matching how `searched_count` and the
+    // character probabilities already report over the full set). See issue #19.
+    let (results, scores, full_char_probs, searched_count, found_count) = if top > 0 {
         // Top-N: bounded-memory two-pass scoring through the shared, tested
         // `solve_top_n` — identical scoring to `compute_recommended`. Routing
         // both the single- and multi-threaded cases through it keeps the
@@ -417,10 +423,18 @@ async fn solve_handler(
         // just the kept top-N.
         let char_probs =
             char_probabilities_from_counts(counts.char_count_pairs(), counts.total as usize);
-        (exprs, scs, Some(char_probs), searched)
+        // Total solutions found is the full-set count, not the kept top-N.
+        (
+            exprs,
+            scs,
+            Some(char_probs),
+            searched,
+            counts.total as usize,
+        )
     } else if threads == 1 {
         let (r, s) = solver.solve();
-        (r, Vec::new(), None, s)
+        let found = r.len();
+        (r, Vec::new(), None, s, found)
     } else {
         let num_threads = if threads == 0 {
             num_cpus::get()
@@ -429,13 +443,13 @@ async fn solve_handler(
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
         let (r, s) = parallel_solver.solve();
-        (r, Vec::new(), None, s)
+        let found = r.len();
+        (r, Vec::new(), None, s, found)
     };
 
     let elapsed = start.elapsed();
     let elapsed_ms = elapsed.as_millis() as u64;
     let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
-    let found_count = results.len();
 
     // Character probabilities: in top-N mode they were computed over the full
     // solution set above; otherwise derive them from the complete `results`.
@@ -891,6 +905,49 @@ mod tests {
             topn.char_probabilities, all.char_probabilities,
             "top-N char probabilities must be computed over all solutions, not the top-N subset"
         );
+    }
+
+    #[tokio::test]
+    async fn test_solve_top_n_found_count_is_total() {
+        // Issue #19: in top-N mode `found_count` must report the TOTAL number of
+        // solutions found across the full search — not the kept top-N subset —
+        // mirroring `searched_count` and the character probabilities. The
+        // returned `solutions` are still capped at `top`.
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        let body_str = serde_json::to_string(&req_body).unwrap();
+
+        let mut app = test_app();
+        let (_, all_body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=0",
+            body_str.clone(),
+        )
+        .await;
+        let all: SolveResponse = serde_json::from_slice(&all_body).unwrap();
+
+        let mut app = test_app();
+        let (_, top_body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=3",
+            body_str,
+        )
+        .await;
+        let topn: SolveResponse = serde_json::from_slice(&top_body).unwrap();
+
+        // Only the top-N subset is returned...
+        assert_eq!(topn.solutions.len(), 3);
+        assert!(all.solutions.len() > 3);
+        // ...but the reported count is the full total, identical to a top=0 solve.
+        assert_eq!(
+            topn.stats.found_count, all.stats.found_count,
+            "top-N found_count must be the total solutions found, not the kept top-N"
+        );
+        assert_eq!(topn.stats.found_count, all.solutions.len());
     }
 
     #[tokio::test]
