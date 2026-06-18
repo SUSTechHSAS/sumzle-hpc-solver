@@ -531,6 +531,219 @@ jobs:
           echo "</details>" >> $GITHUB_STEP_SUMMARY
 
       # ---------------------------------------------------------------
+      #  Server multi-solve benchmark: many concurrent POST /api/solve
+      #  requests against the long-running `serve` process. Exercises the
+      #  HTTP path and the cross-request memory behavior that issue #20 /
+      #  mimalloc address — the only path the other benches never touch.
+      # ---------------------------------------------------------------
+
+      - name: Write server benchmark helper
+        run: |
+          cat > bench_server.py << 'PYEOF'
+          #!/usr/bin/env python3
+          """Benchmark a running sumzle-solver server with concurrent /api/solve requests.
+
+          Fires --warmup untimed requests, then --requests timed POST /api/solve requests
+          at --concurrency (each request uses ?threads=N), all for one puzzle length.
+          Reports throughput, mean/p50/p95 latency, the server's peak resident set (VmHWM
+          from /proc/<pid>/status), and a correctness check that every response returns
+          identical found_count/searched_count (the search is deterministic, so they must).
+
+          Machine-parseable line on stdout (consumed by the workflow):
+            L:requests:concurrency:throughput:mean_ms:p50_ms:p95_ms:peak_rss_kb:found:searched:errors
+          Human-readable detail goes to stderr.
+          """
+          import argparse
+          import json
+          import math
+          import sys
+          import time
+          import urllib.request
+          from concurrent.futures import ThreadPoolExecutor
+
+
+          def solve_once(url, length, threads, timeout):
+              """One POST /api/solve. Returns (latency_s, found, searched, ok)."""
+              body = json.dumps({"length": length, "rows": []}).encode()
+              req = urllib.request.Request(
+                  f"{url}/api/solve?threads={threads}",
+                  data=body,
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              start = time.monotonic()
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as resp:
+                      payload = json.loads(resp.read())
+                  latency = time.monotonic() - start
+                  stats = payload.get("stats", {})
+                  return (
+                      latency,
+                      int(stats.get("found_count", -1)),
+                      int(stats.get("searched_count", -1)),
+                      True,
+                  )
+              except Exception as e:  # noqa: BLE001 - any failure counts as a failed request
+                  latency = time.monotonic() - start
+                  print(f"  request error: {e}", file=sys.stderr)
+                  return (latency, -1, -1, False)
+
+
+          def read_vmhwm_kb(pid):
+              """Peak resident set (VmHWM, KB) of the server process, or 0 if unavailable."""
+              if not pid:
+                  return 0
+              try:
+                  with open(f"/proc/{pid}/status") as f:
+                      for line in f:
+                          if line.startswith("VmHWM:"):
+                              return int(line.split()[1])
+              except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+                  pass
+              return 0
+
+
+          def percentile(sorted_vals, pct):
+              """Nearest-rank percentile of an already-sorted list."""
+              if not sorted_vals:
+                  return 0.0
+              rank = math.ceil(pct / 100.0 * len(sorted_vals))
+              k = min(max(rank, 1), len(sorted_vals)) - 1
+              return sorted_vals[k]
+
+
+          def main():
+              ap = argparse.ArgumentParser()
+              ap.add_argument("--url", default="http://127.0.0.1:3030")
+              ap.add_argument("--pid", type=int, default=0)
+              ap.add_argument("--length", type=int, required=True)
+              ap.add_argument("--requests", type=int, default=40)
+              ap.add_argument("--concurrency", type=int, default=4)
+              ap.add_argument("--threads", type=int, default=1)
+              ap.add_argument("--warmup", type=int, default=5)
+              ap.add_argument("--timeout", type=float, default=120.0)
+              args = ap.parse_args()
+
+              def fire(_i):
+                  return solve_once(args.url, args.length, args.threads, args.timeout)
+
+              # Warmup (untimed): let mimalloc/Rayon reach steady state before measuring.
+              if args.warmup > 0:
+                  with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+                      list(ex.map(fire, range(args.warmup)))
+
+              # Timed run.
+              wall_start = time.monotonic()
+              with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+                  results = list(ex.map(fire, range(args.requests)))
+              wall = time.monotonic() - wall_start
+
+              latencies = sorted(r[0] for r in results)
+              founds = {r[1] for r in results if r[3]}
+              searcheds = {r[2] for r in results if r[3]}
+              errors = sum(1 for r in results if not r[3])
+
+              # Correctness: deterministic search => every OK response must agree.
+              if len(founds) > 1 or len(searcheds) > 1:
+                  errors += 1
+                  print(f"  MISMATCH: found={founds} searched={searcheds}", file=sys.stderr)
+
+              found = min(founds) if founds else -1
+              searched = min(searcheds) if searcheds else -1
+              throughput = (args.requests / wall) if wall > 0 else 0.0
+              mean_ms = (sum(latencies) / len(latencies) * 1000) if latencies else 0.0
+              p50_ms = percentile(latencies, 50) * 1000
+              p95_ms = percentile(latencies, 95) * 1000
+              peak = read_vmhwm_kb(args.pid)
+
+              print(
+                  f"L={args.length} requests={args.requests} concurrency={args.concurrency} "
+                  f"threads={args.threads}: throughput={throughput:.1f} req/s "
+                  f"mean={mean_ms:.1f}ms p50={p50_ms:.1f}ms p95={p95_ms:.1f}ms "
+                  f"peak_rss={peak} KB found={found} searched={searched} errors={errors}",
+                  file=sys.stderr,
+              )
+
+              # Machine-parseable single line on stdout.
+              print(
+                  f"{args.length}:{args.requests}:{args.concurrency}:{throughput:.1f}:"
+                  f"{mean_ms:.1f}:{p50_ms:.1f}:{p95_ms:.1f}:{peak}:{found}:{searched}:{errors}"
+              )
+
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+          chmod +x bench_server.py
+
+      - name: Run server multi-solve benchmarks
+        run: |
+          echo "## 📊 Server Multi-Solve Benchmarks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Concurrent \`POST /api/solve\` requests (each \`threads=1\`, so concurrency drives load) against the long-running \`serve\` process. Exercises the HTTP path and cross-request memory stability (issue #20 / mimalloc). Server peak RSS is VmHWM sampled after the run." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          PORT=3030
+          ./target/release/sumzle-solver serve --host 127.0.0.1 --port $PORT >server.log 2>&1 &
+          SERVER_PID=$!
+
+          # Wait until the server accepts requests. There is no health endpoint,
+          # so probe /api/solve with a trivial length-3 puzzle until it 200s.
+          READY=0
+          for _ in $(seq 1 60); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              -X POST "http://127.0.0.1:${PORT}/api/solve?threads=1" \
+              -H 'Content-Type: application/json' \
+              -d '{"length":3,"rows":[]}' || true)
+            if [ "$CODE" = "200" ]; then READY=1; break; fi
+            sleep 0.5
+          done
+
+          > current-server-bench-results.txt
+          > server-benchmark-output.txt
+          if [ "$READY" = "1" ]; then
+            for len in 4 5 6; do
+              echo "Running server multi-solve benchmark: L=$len..."
+              python3 bench_server.py \
+                --url "http://127.0.0.1:${PORT}" --pid "$SERVER_PID" \
+                --length "$len" --requests 40 --concurrency 4 --threads 1 --warmup 5 \
+                >> current-server-bench-results.txt 2>> server-benchmark-output.txt || true
+            done
+          else
+            echo "Server did not become ready on port ${PORT}; skipping server benchmarks." | tee -a server-benchmark-output.txt
+          fi
+
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
+
+          # Summary table.
+          echo "| Length | Requests | Concurrency | Throughput (req/s) | Mean (ms) | p95 (ms) | Server Peak RSS | Errors |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|-------------|--------------------|-----------|----------|-----------------|--------|" >> $GITHUB_STEP_SUMMARY
+          while IFS=: read -r LEN REQ CONC TP MEAN P50 P95 PEAK FOUND SRCH ERRS; do
+            if [ "$PEAK" -ge 1048576 ]; then
+              RSS_HR="$(awk "BEGIN {printf \"%.2f GB\", $PEAK/1048576}")"
+            elif [ "$PEAK" -ge 1024 ]; then
+              RSS_HR="$(awk "BEGIN {printf \"%.1f MB\", $PEAK/1024}")"
+            else
+              RSS_HR="$PEAK KB"
+            fi
+            echo "| $LEN | $REQ | $CONC | $TP | $MEAN | $P95 | $RSS_HR | $ERRS |" >> $GITHUB_STEP_SUMMARY
+          done < current-server-bench-results.txt
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>📝 Raw Server Benchmark Output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat server-benchmark-output.txt >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "--- server.log (tail) ---" >> $GITHUB_STEP_SUMMARY
+          tail -n 20 server.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+      # ---------------------------------------------------------------
       #  Baseline (main branch) benchmarks – PR only
       # ---------------------------------------------------------------
 
@@ -667,6 +880,41 @@ jobs:
           else
             echo "Baseline binary does not support --top/--output, skipping baseline memory benchmarks." >> baseline-mem-benchmark-output.txt
           fi
+
+      - name: Run server multi-solve benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: |
+          BASELINE_BIN="$RUNNER_TEMP/baseline-target/release/sumzle-solver"
+          PORT=3030
+          "$BASELINE_BIN" serve --host 127.0.0.1 --port $PORT >baseline-server.log 2>&1 &
+          SERVER_PID=$!
+
+          READY=0
+          for _ in $(seq 1 60); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              -X POST "http://127.0.0.1:${PORT}/api/solve?threads=1" \
+              -H 'Content-Type: application/json' \
+              -d '{"length":3,"rows":[]}' || true)
+            if [ "$CODE" = "200" ]; then READY=1; break; fi
+            sleep 0.5
+          done
+
+          > baseline-server-bench-results.txt
+          > baseline-server-benchmark-output.txt
+          if [ "$READY" = "1" ]; then
+            for len in 4 5 6; do
+              echo "Running baseline server multi-solve benchmark: L=$len..."
+              python3 bench_server.py \
+                --url "http://127.0.0.1:${PORT}" --pid "$SERVER_PID" \
+                --length "$len" --requests 40 --concurrency 4 --threads 1 --warmup 5 \
+                >> baseline-server-bench-results.txt 2>> baseline-server-benchmark-output.txt || true
+            done
+          else
+            echo "Baseline server did not become ready; skipping baseline server benchmarks." | tee -a baseline-server-benchmark-output.txt
+          fi
+
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
 
       # ---------------------------------------------------------------
       #  Benchmark comparison (PR only)
@@ -806,6 +1054,33 @@ jobs:
                   pass
               return results
 
+          def load_server_results(filepath):
+              """Load server results: L:req:conc:throughput:mean_ms:p50_ms:p95_ms:peak_rss_kb:found:searched:errors."""
+              results = {}
+              try:
+                  with open(filepath) as f:
+                      for line in f:
+                          parts = line.strip().split(":")
+                          if len(parts) == 11:
+                              results[parts[0]] = {
+                                  "requests": int(parts[1]),
+                                  "concurrency": int(parts[2]),
+                                  "throughput": float(parts[3]),
+                                  "mean_ms": float(parts[4]),
+                                  "p50_ms": float(parts[5]),
+                                  "p95_ms": float(parts[6]),
+                                  "peak_rss_kb": int(parts[7]),
+                                  "found": int(parts[8]),
+                                  "searched": int(parts[9]),
+                                  "errors": int(parts[10]),
+                                  # Mean latency in ns, so format_diff_pct (lower = better)
+                                  # treats a latency regression like the other time metrics.
+                                  "time_ns": float(parts[4]) * 1_000_000,
+                              }
+              except FileNotFoundError:
+                  pass
+              return results
+
           def format_rss(kb):
               if kb is None:
                   return "N/A"
@@ -826,6 +1101,8 @@ jobs:
           baseline_stream = load_stream_results("baseline-stream-bench-results.txt")
           current_mem = load_mem_results("current-mem-bench-results.txt")
           baseline_mem = load_mem_results("baseline-mem-bench-results.txt")
+          current_server = load_server_results("current-server-bench-results.txt")
+          baseline_server = load_server_results("baseline-server-bench-results.txt")
 
           pr_branch = os.environ.get("PR_BRANCH", "PR")
           base_branch = os.environ.get("BASE_BRANCH", "main")
@@ -1115,6 +1392,84 @@ jobs:
               lines.append("")
 
           # =============================================================
+          #  Section 6b: Server Multi-Solve Benchmark Comparison
+          # =============================================================
+          if current_server:
+              lines.append("## 📊 Server Multi-Solve Benchmark Comparison with Main Branch")
+              lines.append("")
+              lines.append(f"Comparing **{pr_branch}** (PR) vs **{base_branch}** (baseline). Concurrent `POST /api/solve`; lower mean latency / higher throughput is better, and server peak RSS larger than main is a memory regression (issue #20).")
+              lines.append("")
+              lines.append("| Length | Metric | PR | Main | Match | Diff |")
+              lines.append("|--------|--------|-----|------|-------|------|")
+              for length in ["4", "5", "6"]:
+                  cur = current_server.get(length)
+                  base = baseline_server.get(length)
+                  if not cur:
+                      lines.append(f"| {length} | — | — | — | ⚠️ Missing | — |")
+                      continue
+
+                  # Failed requests / intra-run found|searched disagreement.
+                  err_icon = "✅" if cur["errors"] == 0 else "❌"
+                  if cur["errors"] != 0:
+                      has_mismatch = True
+                  base_err = str(base["errors"]) if base else "—"
+                  lines.append(f'| {length} | Errors | {cur["errors"]} | {base_err} | {err_icon} | — |')
+
+                  if base:
+                      # Correctness: found/searched must match the baseline server.
+                      sol_match = cur["found"] == base["found"]
+                      sol_icon = "✅" if sol_match else "❌"
+                      if not sol_match:
+                          has_mismatch = True
+                      sol_diff = "=" if sol_match else f'{cur["found"] - base["found"]:+d}'
+                      lines.append(f'| {length} | Solutions | {cur["found"]} | {base["found"]} | {sol_icon} | {sol_diff} |')
+
+                      src_match = cur["searched"] == base["searched"]
+                      src_icon = "✅" if src_match else "❌"
+                      if not src_match:
+                          has_mismatch = True
+                      src_diff = "=" if src_match else f'{cur["searched"] - base["searched"]:+d}'
+                      lines.append(f'| {length} | Expr Searched | {cur["searched"]} | {base["searched"]} | {src_icon} | {src_diff} |')
+
+                      # Throughput (higher is better) — informational ratio.
+                      if base["throughput"] > 0:
+                          tp_ratio = f'{cur["throughput"] / base["throughput"]:.2f}x'
+                      else:
+                          tp_ratio = "N/A"
+                      lines.append(f'| {length} | Throughput | {cur["throughput"]:.1f} req/s | {base["throughput"]:.1f} req/s | ⚡ | {tp_ratio} |')
+
+                      # Mean latency (lower is better) drives the regression gate.
+                      lat_diff_pct, lat_emoji = format_diff_pct(cur["time_ns"], base["time_ns"])
+                      if lat_emoji in ("🔴", "🟡"):
+                          has_regression = True
+                      lines.append(f'| {length} | Mean Latency | {cur["mean_ms"]:.1f}ms | {base["mean_ms"]:.1f}ms | {lat_emoji} | {lat_diff_pct} |')
+
+                      # Server peak RSS (lower is better) — issue #20 guard.
+                      if base["peak_rss_kb"] > 0:
+                          rss_diff_pct = ((cur["peak_rss_kb"] - base["peak_rss_kb"]) / base["peak_rss_kb"]) * 100
+                          if rss_diff_pct > 10:
+                              rss_icon = "🔴"; has_regression = True
+                          elif rss_diff_pct > 5:
+                              rss_icon = "🟡"; has_regression = True
+                          elif rss_diff_pct < -10:
+                              rss_icon = "🟢"
+                          elif rss_diff_pct < -5:
+                              rss_icon = "🔵"
+                          else:
+                              rss_icon = "⚪"
+                          sign = "+" if rss_diff_pct >= 0 else ""
+                          rss_diff_str = f"{sign}{rss_diff_pct:.1f}%"
+                          base_rss_hr = format_rss(base["peak_rss_kb"])
+                      else:
+                          rss_icon = "—"; rss_diff_str = "—"; base_rss_hr = "N/A"
+                      lines.append(f'| {length} | Server Peak RSS | {format_rss(cur["peak_rss_kb"])} | {base_rss_hr} | {rss_icon} | {rss_diff_str} |')
+                  else:
+                      lines.append(f'| {length} | Throughput | {cur["throughput"]:.1f} req/s | N/A | — | — |')
+                      lines.append(f'| {length} | Mean Latency | {cur["mean_ms"]:.1f}ms | N/A | — | — |')
+                      lines.append(f'| {length} | Server Peak RSS | {format_rss(cur["peak_rss_kb"])} | N/A | — | — |')
+              lines.append("")
+
+          # =============================================================
           #  Section 7: Cross-Mode searched_count Consistency Check
           # =============================================================
           if current_stream or current_topn:
@@ -1231,6 +1586,19 @@ jobs:
                   lines.append(f.read())
           except FileNotFoundError:
               lines.append("(no baseline memory output)")
+          lines.append("```")
+          lines.append("")
+          lines.append("</details>")
+
+          lines.append("<details>")
+          lines.append("<summary>📝 Raw Baseline Server Benchmark Output</summary>")
+          lines.append("")
+          lines.append("```")
+          try:
+              with open("baseline-server-benchmark-output.txt") as f:
+                  lines.append(f.read())
+          except FileNotFoundError:
+              lines.append("(no baseline server output)")
           lines.append("```")
           lines.append("")
           lines.append("</details>")
