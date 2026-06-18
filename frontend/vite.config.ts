@@ -19,7 +19,15 @@ export default defineConfig({
     target: 'es2021',
     outDir: 'dist',
     emptyOutDir: true,
+    // Use relative paths so assets resolve correctly under tauri://localhost
+    // or http://tauri.localhost/ on Android WebView.
+    assetsDir: 'assets',
+    // Tauri serves files from the root, so relative paths work better.
   },
+  // Ensure Tauri's asset protocol can load JS/CSS without CORS issues.
+  // The `crossorigin` attribute on <script> tags can block loading under
+  // custom schemes; setting base to './' makes Vite emit relative paths.
+  base: './',
   test: {
     globals: true,
     environment: 'jsdom',
