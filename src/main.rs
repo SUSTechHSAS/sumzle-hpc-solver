@@ -10,14 +10,9 @@ use sumzle_solver::solver::Solver;
 use sumzle_solver::types::GlobalKnowledge;
 use sumzle_solver::types::*;
 
-// Use mimalloc as the global allocator (issue #20). The `serve` command is a
-// long-running process that allocates and frees large `Vec<String>` solution
-// sets on every request; glibc's malloc keeps those freed pages in per-thread
-// arenas, so the resident set climbs across solves and never shrinks. mimalloc
-// returns freed memory to the OS, so server RSS stays steady. Set
-// `MIMALLOC_PURGE_DELAY=0` to return memory immediately after each solve.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// The mimalloc global allocator (issue #20) is defined in the library crate
+// (`lib.rs`) so it applies consistently to this binary and to every test/bench
+// binary — letting the memory regression test exercise the real allocator.
 
 #[derive(Parser)]
 #[command(name = "sumzle-solver")]
@@ -93,7 +88,10 @@ enum Commands {
     /// Start the web API server
     Serve {
         /// Host to bind to
-        #[arg(short, long, default_value = "0.0.0.0")]
+        // `long` only: a `short` here would be `-h`, which collides with clap's
+        // auto-generated `-h`/`--help` and panics the `serve` command in debug
+        // builds (the collision assertion is compiled out of release builds).
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
