@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect } from 'vitest';
 import App from './App';
@@ -100,6 +100,56 @@ describe('App', () => {
     await user.tab();
     expect(input).toHaveValue(64);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('surfaces an error for zero and negative lengths and recovers on blur', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const input = screen.getByLabelText('表达式长度:') as HTMLInputElement;
+
+    // 0 can never become a valid length by appending digits, so it should
+    // error immediately rather than being swallowed silently.
+    await user.clear(input);
+    await user.paste('0');
+    expect(input).toHaveValue(0);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    // Board unchanged (default 5 tiles).
+    expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(5);
+
+    // Same for a negative value.
+    await user.clear(input);
+    await user.paste('-5');
+    expect(input).toHaveValue(-5);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(5);
+
+    // Blur normalizes to MIN_LENGTH (3) via clampLength.
+    await user.tab();
+    expect(input).toHaveValue(3);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(3);
+  });
+
+  it('rejects an imported game state with an empty rows array', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    // Open the import panel and paste a payload whose rows array is empty.
+    await user.click(screen.getByText('导入局面'));
+    const textarea = screen.getByPlaceholderText('粘贴 Sumzle 游戏状态 JSON');
+    // fireEvent.change is the reliable way to set a React-controlled
+    // textarea's value in jsdom (userEvent.type parses `{` as a keyboard
+    // modifier, and paste needs clipboard support jsdom lacks).
+    fireEvent.change(textarea, { target: { value: '{"length": 5, "rows": []}' } });
+    await user.click(screen.getByText('导入JSON'));
+
+    // The import error is surfaced (role="alert" was added to .import-error
+    // during polish so it's announced to assistive tech).
+    expect(screen.getByRole('alert')).toHaveTextContent('rows数组不能为空');
+
+    // The board is untouched: still one default row of 5 tiles.
+    expect(screen.getAllByTestId(/guess-row-/)).toHaveLength(1);
+    expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(5);
   });
 
   it('renders expression evaluator', () => {

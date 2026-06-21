@@ -63,6 +63,14 @@ export default function App() {
         setLengthError(null);
         return;
       }
+      if (parsed <= 0) {
+        // 0 and negatives can never become valid lengths by appending more
+        // digits (unlike "1" or "2", which could be on the way to "15" or
+        // "25"). Surface an error immediately rather than swallowing the
+        // input silently.
+        setLengthError('表达式长度必须是正整数。');
+        return;
+      }
       if (parsed < MIN_LENGTH) {
         // Likely an intermediate keystroke (e.g. typing "1" on the way to
         // "15"). Don't commit and don't warn — committing would shrink the

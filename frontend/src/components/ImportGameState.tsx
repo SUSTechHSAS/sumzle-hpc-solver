@@ -55,6 +55,13 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
     if (!data.rows || !Array.isArray(data.rows)) {
       throw new Error('JSON格式错误: 缺少rows数组');
     }
+    // An empty rows array would import successfully but leave the board with
+    // zero guess rows — no tiles to click, the virtual keyboard does nothing,
+    // and the user has no obvious path back. Reject it up-front so the user
+    // sees a clear error instead of a broken UI.
+    if (data.rows.length === 0) {
+      throw new Error('JSON格式错误: rows数组不能为空');
+    }
 
     const importedLength = data.length || length;
     // Reject out-of-range lengths BEFORE iterating the rows. A malicious or
