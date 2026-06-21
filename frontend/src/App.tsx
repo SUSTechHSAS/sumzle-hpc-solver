@@ -4,7 +4,7 @@ import { solvePuzzle, downloadResults } from './api';
 import GuessRowComponent from './components/GuessRow';
 import VirtualKeyboard from './components/VirtualKeyboard';
 import ImportGameState from './components/ImportGameState';
-import { createBlankRow, cycleState } from './utils';
+import { createBlankRow, cycleState, clampLength, MIN_LENGTH, MAX_LENGTH } from './utils';
 import Results from './components/Results';
 import ExpressionEvaluator from './components/ExpressionEvaluator';
 import EquationValidator from './components/EquationValidator';
@@ -13,13 +13,15 @@ import './App.css';
 
 const DEFAULT_LENGTH = 5;
 
+/**
+ * Resize a guess row to `len` tiles, padding with blanks or truncating as
+ * needed. Uses `slice` for the truncation step so shrinking a row that was
+ * somehow created with a huge tile count is O(len) rather than O(prev_len).
+ */
 const adjustRowLength = (row: GuessRow, len: number): GuessRow => {
-  const tiles = [...row.tiles];
+  const tiles = row.tiles.slice(0, len);
   while (tiles.length < len) {
     tiles.push({ char: '', state: 'empty' as TileState });
-  }
-  while (tiles.length > len) {
-    tiles.pop();
   }
   return { tiles };
 };
@@ -28,6 +30,7 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [length, setLength] = useState(DEFAULT_LENGTH);
   const [lengthDraft, setLengthDraft] = useState(String(DEFAULT_LENGTH));
+  const [lengthError, setLengthError] = useState<string | null>(null);
   const [rows, setRows] = useState<GuessRow[]>([createBlankRow(DEFAULT_LENGTH)]);
   const [solutions, setSolutions] = useState<SolveResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -38,10 +41,13 @@ export default function App() {
   const [topN, setTopN] = useState(0);
 
   const commitLength = useCallback((newLength: number) => {
-    // Only a lower bound: the solver supports arbitrary expression lengths.
-    const clamped = Math.max(3, newLength);
+    // Always clamp to the supported range. The backend supports arbitrary
+    // expression lengths, but the frontend must not render an unbounded
+    // number of guess boxes — doing so freezes the browser (issue #29).
+    const clamped = clampLength(newLength);
     setLength(clamped);
     setLengthDraft(String(clamped));
+    setLengthError(null);
     setRows((prev) => prev.map((row) => adjustRowLength(row, clamped)));
     setSolutions(null);
     setError(null);
@@ -51,15 +57,46 @@ export default function App() {
     (value: string) => {
       setLengthDraft(value);
       const parsed = Number.parseInt(value, 10);
-      if (Number.isFinite(parsed) && parsed >= 3) {
-        commitLength(parsed);
+      if (!Number.isFinite(parsed)) {
+        // Empty input or non-numeric — let the user keep typing without
+        // committing. No error message: this is a normal intermediate state.
+        setLengthError(null);
+        return;
       }
+      if (parsed <= 0) {
+        // 0 and negatives can never become valid lengths by appending more
+        // digits (unlike "1" or "2", which could be on the way to "15" or
+        // "25"). Surface an error immediately rather than swallowing the
+        // input silently.
+        setLengthError('表达式长度必须是正整数。');
+        return;
+      }
+      if (parsed < MIN_LENGTH) {
+        // Likely an intermediate keystroke (e.g. typing "1" on the way to
+        // "15"). Don't commit and don't warn — committing would shrink the
+        // board to MIN_LENGTH and discard the user's in-progress value.
+        setLengthError(null);
+        return;
+      }
+      if (parsed > MAX_LENGTH) {
+        // Definitely out of range. Do NOT commit: committing would trigger
+        // `setRows` which would allocate a huge tile array per row and
+        // freeze the browser. Surface an error so the user knows their
+        // typed value will not be honored as-is.
+        setLengthError(`表达式长度不能超过 ${MAX_LENGTH}，请输入 ${MIN_LENGTH}–${MAX_LENGTH} 之间的整数。`);
+        return;
+      }
+      setLengthError(null);
+      commitLength(parsed);
     },
     [commitLength],
   );
 
   const handleLengthBlur = useCallback(() => {
     const parsed = Number.parseInt(lengthDraft, 10);
+    // `commitLength` clamps internally, so an out-of-range value typed by the
+    // user gets normalized to the nearest bound on blur (e.g. 1,000,000 →
+    // MAX_LENGTH), keeping the rendered tile count safe.
     commitLength(Number.isFinite(parsed) ? parsed : length);
   }, [commitLength, length, lengthDraft]);
 
@@ -168,9 +205,14 @@ export default function App() {
 
   const handleImport = useCallback(
     (importedLength: number, importedRows: GuessRow[]) => {
-      setLength(importedLength);
-      setLengthDraft(String(importedLength));
-      setRows(importedRows);
+      // `ImportGameState.parseAndImport` already rejects out-of-range lengths,
+      // but clamp again here as defense-in-depth so a stray invalid value
+      // can never reach the rendered tile array.
+      const clamped = clampLength(importedLength);
+      setLength(clamped);
+      setLengthDraft(String(clamped));
+      setLengthError(null);
+      setRows(importedRows.map((row) => adjustRowLength(row, clamped)));
       setSolutions(null);
       setError(null);
       setSelectedTile(null);
@@ -204,14 +246,22 @@ export default function App() {
                   <input
                     id="length-input"
                     type="number"
-                    min={3}
+                    min={MIN_LENGTH}
+                    max={MAX_LENGTH}
                     value={lengthDraft}
                     inputMode="numeric"
                     onChange={(e) => handleLengthDraftChange(e.target.value)}
                     onBlur={handleLengthBlur}
                     className="length-input"
+                    aria-invalid={lengthError !== null}
+                    aria-describedby={lengthError ? 'length-error' : undefined}
                   />
                 </div>
+                {lengthError && (
+                  <div id="length-error" className="length-error" role="alert">
+                    {lengthError}
+                  </div>
+                )}
                 <div className="row-buttons">
                   <button className="btn btn-secondary" onClick={addRow}>
                     + 添加行

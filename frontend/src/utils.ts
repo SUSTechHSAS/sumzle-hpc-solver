@@ -1,6 +1,29 @@
 import type { GuessRow, TileState } from './types';
 import { STATE_ORDER } from './types';
 
+/**
+ * Minimum expression length supported by the UI.
+ * Mirrors the backend's `MIN_SOLVE_LENGTH`.
+ */
+export const MIN_LENGTH = 3;
+
+/**
+ * Maximum expression length the UI will render guess boxes for.
+ *
+ * The backend supports arbitrary expression lengths, but rendering one tile
+ * per character means an extremely large value (e.g. 1,000,000) would
+ * allocate millions of DOM nodes and freeze the browser (see GitHub
+ * issue #29). 64 is well above any realistic Sumzle expression length
+ * while keeping the rendered tile count small enough to stay responsive.
+ */
+export const MAX_LENGTH = 64;
+
+/** Clamp a candidate expression length to the supported range. */
+export function clampLength(value: number): number {
+  if (!Number.isFinite(value)) return MIN_LENGTH;
+  return Math.min(MAX_LENGTH, Math.max(MIN_LENGTH, Math.trunc(value)));
+}
+
 /** Create a blank guess row with given length */
 export function createBlankRow(length: number): GuessRow {
   return {

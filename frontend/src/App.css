@@ -296,6 +296,22 @@ textarea:focus-visible {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fluent-blue) 16%, transparent);
 }
 
+.length-input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 16%, transparent);
+}
+
+.length-error {
+  /* Force this element onto its own line inside the flex .puzzle-controls
+     container so it appears below the length input rather than beside it. */
+  flex-basis: 100%;
+  color: var(--color-danger);
+  /* Matches the sibling .import-error style in ImportGameState.css so inline
+     errors read at the same size across the left panel. */
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 .option-hint {
   color: var(--color-text-secondary);
   font-size: 0.73rem;
