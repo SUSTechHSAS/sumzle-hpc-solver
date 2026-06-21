@@ -306,8 +306,9 @@ textarea:focus-visible {
      container so it appears below the length input rather than beside it. */
   flex-basis: 100%;
   color: var(--color-danger);
-  font-size: 0.78rem;
-  line-height: 1.35;
+  /* Matches the sibling .import-error style in ImportGameState.css so inline
+     errors read at the same size across the left panel. */
+  font-size: 0.82rem;
   overflow-wrap: anywhere;
 }
 

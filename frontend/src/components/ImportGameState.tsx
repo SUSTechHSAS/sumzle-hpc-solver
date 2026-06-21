@@ -138,7 +138,11 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
               onChange={handleFileImport}
             />
           </div>
-          {importError && <div className="import-error">{importError}</div>}
+          {importError && (
+            <div className="import-error" role="alert">
+              {importError}
+            </div>
+          )}
         </div>
       )}
     </div>

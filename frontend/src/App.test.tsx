@@ -55,12 +55,19 @@ describe('App', () => {
     expect(tiles.length).toBeLessThanOrEqual(64);
     // An accessible error message explains why the typed value is not honored.
     expect(screen.getByRole('alert')).toBeInTheDocument();
+    // The input is flagged as invalid for assistive tech, and wired to the
+    // error message via aria-describedby.
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveAttribute('aria-describedby', 'length-error');
 
     // On blur, the input is normalized to the maximum supported value.
     await user.tab();
     expect(input).toHaveValue(64);
     expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(64);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    // React renders aria-invalid={false} as the literal "false"; the error
+    // state is cleared.
+    expect(input).toHaveAttribute('aria-invalid', 'false');
   });
 
   it('accepts the maximum supported expression length without error', async () => {
