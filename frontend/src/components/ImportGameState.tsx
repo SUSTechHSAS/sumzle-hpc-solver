@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import type { GuessRow, TileState } from '../types';
+import { MIN_LENGTH, MAX_LENGTH } from '../utils';
 import Icon from './Icon';
 import './ImportGameState.css';
 
@@ -56,6 +57,19 @@ export default function ImportGameState({ length, onImport }: ImportGameStatePro
     }
 
     const importedLength = data.length || length;
+    // Reject out-of-range lengths BEFORE iterating the rows. A malicious or
+    // buggy JSON payload could declare length=1,000,000 with matching tile
+    // arrays; building those tile objects and then rendering them would
+    // freeze the browser (issue #29).
+    if (
+      !Number.isFinite(importedLength) ||
+      importedLength < MIN_LENGTH ||
+      importedLength > MAX_LENGTH
+    ) {
+      throw new Error(
+        `表达式长度 ${importedLength} 超出支持范围，请输入 ${MIN_LENGTH}–${MAX_LENGTH} 之间的整数`,
+      );
+    }
     const rows: GuessRow[] = data.rows.map((row: unknown, rowIndex: number) => {
       if (!Array.isArray(row)) {
         throw new Error(`JSON格式错误: rows中的第${rowIndex + 1}行必须是数组`);

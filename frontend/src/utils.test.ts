@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { displayChar, CHAR_DISPLAY, VALID_CHARS } from './types';
-import { createBlankRow, cycleState, formatSpeed, formatTime } from './utils';
+import {
+  createBlankRow,
+  cycleState,
+  formatSpeed,
+  formatTime,
+  clampLength,
+  MIN_LENGTH,
+  MAX_LENGTH,
+} from './utils';
 
 describe('types', () => {
   it('should have correct display char mappings', () => {
@@ -53,5 +61,41 @@ describe('utils', () => {
     expect(formatTime(50)).toBe('50ms');
     expect(formatTime(1500)).toBe('1.50s');
     expect(formatTime(90000)).toBe('1m 30.0s');
+  });
+});
+
+describe('clampLength', () => {
+  it('exposes a sensible minimum and maximum', () => {
+    expect(MIN_LENGTH).toBeGreaterThanOrEqual(3);
+    expect(MAX_LENGTH).toBeGreaterThan(MIN_LENGTH);
+    // MAX_LENGTH must be small enough that rendering that many tiles per row
+    // does not freeze the browser (issue #29).
+    expect(MAX_LENGTH).toBeLessThanOrEqual(256);
+  });
+
+  it('clamps below MIN_LENGTH up to MIN_LENGTH', () => {
+    expect(clampLength(0)).toBe(MIN_LENGTH);
+    expect(clampLength(-5)).toBe(MIN_LENGTH);
+    expect(clampLength(2)).toBe(MIN_LENGTH);
+  });
+
+  it('clamps above MAX_LENGTH down to MAX_LENGTH', () => {
+    expect(clampLength(MAX_LENGTH + 1)).toBe(MAX_LENGTH);
+    expect(clampLength(100)).toBe(MAX_LENGTH);
+    expect(clampLength(1_000_000)).toBe(MAX_LENGTH);
+    expect(clampLength(Number.MAX_SAFE_INTEGER)).toBe(MAX_LENGTH);
+  });
+
+  it('passes through in-range values, truncating any fractional part', () => {
+    expect(clampLength(MIN_LENGTH)).toBe(MIN_LENGTH);
+    expect(clampLength(5)).toBe(5);
+    expect(clampLength(MAX_LENGTH)).toBe(MAX_LENGTH);
+    expect(clampLength(5.9)).toBe(5);
+  });
+
+  it('returns MIN_LENGTH for non-finite values (defensive)', () => {
+    expect(clampLength(NaN)).toBe(MIN_LENGTH);
+    expect(clampLength(Infinity)).toBe(MIN_LENGTH);
+    expect(clampLength(-Infinity)).toBe(MIN_LENGTH);
   });
 });
