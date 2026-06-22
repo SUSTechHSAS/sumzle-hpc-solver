@@ -34,6 +34,9 @@ test.describe('issue #33 — length error must not shift the row buttons', () =>
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await page.setViewportSize({ width: 1280, height: 900 });
+    // Wait for the React app to finish mounting and rendering before taking
+    // any layout measurements, otherwise CI can race the first measurement.
+    await expect(page.getByLabel('表达式长度:')).toBeVisible();
     // Dismiss any focus state on the input before measuring.
     await page.locator('body').click();
   });

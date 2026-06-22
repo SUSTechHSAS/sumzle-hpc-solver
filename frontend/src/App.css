@@ -276,6 +276,11 @@ textarea:focus-visible {
      flex-start on .puzzle-controls keeps .row-buttons pinned to the top
      when the column grows taller on error. */
   width: min-content;
+  /* Floor so the error message always has a legible wrap width even if the
+     label shrinks under localization (e.g. a very short translated label).
+     15ch is comfortably wider than any realistic label+input row, so this
+     only kicks in for the degenerate short-label case. */
+  min-width: 15ch;
 }
 
 .length-control-row,
