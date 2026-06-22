@@ -242,26 +242,28 @@ export default function App() {
 
               <div className="puzzle-controls">
                 <div className="length-control">
-                  <label htmlFor="length-input">表达式长度:</label>
-                  <input
-                    id="length-input"
-                    type="number"
-                    min={MIN_LENGTH}
-                    max={MAX_LENGTH}
-                    value={lengthDraft}
-                    inputMode="numeric"
-                    onChange={(e) => handleLengthDraftChange(e.target.value)}
-                    onBlur={handleLengthBlur}
-                    className="length-input"
-                    aria-invalid={lengthError !== null}
-                    aria-describedby={lengthError ? 'length-error' : undefined}
-                  />
-                </div>
-                {lengthError && (
-                  <div id="length-error" className="length-error" role="alert">
-                    {lengthError}
+                  <div className="length-control-row">
+                    <label htmlFor="length-input">表达式长度:</label>
+                    <input
+                      id="length-input"
+                      type="number"
+                      min={MIN_LENGTH}
+                      max={MAX_LENGTH}
+                      value={lengthDraft}
+                      inputMode="numeric"
+                      onChange={(e) => handleLengthDraftChange(e.target.value)}
+                      onBlur={handleLengthBlur}
+                      className="length-input"
+                      aria-invalid={lengthError !== null}
+                      aria-describedby={lengthError ? 'length-error' : undefined}
+                    />
                   </div>
-                )}
+                  {lengthError && (
+                    <div id="length-error" className="length-error" role="alert">
+                      {lengthError}
+                    </div>
+                  )}
+                </div>
                 <div className="row-buttons">
                   <button className="btn btn-secondary" onClick={addRow}>
                     + 添加行
