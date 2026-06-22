@@ -317,13 +317,18 @@ textarea:focus-visible {
   font-size: 0.82rem;
   overflow-wrap: anywhere;
   /* The error is a direct child of .puzzle-controls (NOT inside
-     .length-control), placed after .row-buttons. flex-basis: 100% forces it
-     onto its own line below the input + buttons row, so it spans the full
-     panel width and uses the empty space on the right instead of wrapping
-     into a narrow column under the input (issue #33 aesthetic fix). Because
-     it comes AFTER .row-buttons in source order, the buttons stay on line 1
-     and never shift when the error appears or changes length. */
-  flex-basis: 100%;
+     .length-control), placed after .row-buttons. width: 100% forces it onto
+     its own line below the input + buttons row, so it spans the full panel
+     width and uses the empty space on the right instead of wrapping into a
+     narrow column under the input (issue #33 aesthetic fix). Because it
+     comes AFTER .row-buttons in source order, the buttons stay on line 1
+     and never shift when the error appears or changes length.
+     width: 100% (not flex-basis: 100%) is deliberate: on mobile
+     .puzzle-controls switches to flex-direction: column, where
+     flex-basis applies to the main axis (height) and could stretch the
+     element vertically. width: 100% targets the cross axis and behaves
+     correctly in both row (desktop) and column (mobile) layouts. */
+  width: 100%;
 }
 
 .option-hint {
