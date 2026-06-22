@@ -266,12 +266,14 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
-  /* Anchor for the absolutely-positioned .length-error. Keeping the error
-     out of flow means the control's width and height are dictated solely
-     by the label+input row, so .row-buttons never shifts when an error
-     appears (issue #33: the previous in-flow error made .length-control
-     grow wider/taller with the message, wrapping or pushing the buttons). */
-  position: relative;
+  /* Fixed width so the control's box never grows with the error message
+     (issue #33): the error wraps inside this width instead of expanding
+     .length-control and pushing/wrapping .row-buttons. 150px comfortably
+     fits the label + 64px input row (~144px) and gives the error text a
+     reasonable wrap column. align-items: flex-start on .puzzle-controls
+     keeps .row-buttons pinned to the top so the taller column (when an
+     error is showing) doesn't re-center the buttons. */
+  width: 150px;
 }
 
 .length-control-row,
@@ -330,16 +332,12 @@ textarea:focus-visible {
      errors read at the same size across the left panel. */
   font-size: 0.82rem;
   overflow-wrap: anywhere;
-  /* Taken out of flow on desktop so the control's box (and therefore the
-     sibling .row-buttons) never resizes when an error appears (issue #33).
-     Anchored just below the input row, left-aligned with it, capped so a
-     long message wraps instead of running off-panel. None of the ancestors
-     (.length-control / .puzzle-controls / .panel) clip overflow, so the
-     error stays visible. Mobile resets this in the media query below. */
-  position: absolute;
-  top: calc(100% + var(--space-xs));
-  left: 0;
-  max-width: 40ch;
+  /* In-flow (no absolute positioning) so the error pushes the page down
+     naturally instead of overlapping whatever sits below .puzzle-controls.
+     The fixed width on .length-control keeps the error from widening the
+     control and shifting .row-buttons; align-items: flex-start on
+     .puzzle-controls keeps the buttons pinned to the top. */
+  max-width: 100%;
 }
 
 .option-hint {
@@ -537,20 +535,18 @@ textarea:focus-visible {
     justify-content: center;
   }
 
+  /* On mobile .puzzle-controls is a column and .length-control should span
+     the full width (the desktop fixed-width constraint exists only to keep
+     .row-buttons from wrapping beside it). */
+  .length-control {
+    width: auto;
+  }
+
   /* The label+input row is centered on mobile, so the inline error must
      center too — otherwise a left-aligned error reads as misaligned with
      the input directly above it. Desktop keeps the default left align
-     because the input row there is left-aligned.
-     Mobile also returns the error to in-flow: .puzzle-controls is a column
-     here, .length-control is full-width, and the error stacks naturally
-     under the input without any sibling to displace — so the desktop
-     absolute positioning (which exists to keep .row-buttons put) is
-     unnecessary and would only risk overlapping the stacked row buttons. */
+     because the input row there is left-aligned. */
   .length-error {
-    position: static;
-    top: auto;
-    left: auto;
-    max-width: none;
     text-align: center;
   }
 
