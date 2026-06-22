@@ -130,6 +130,34 @@ describe('App', () => {
     expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(3);
   });
 
+  it('keeps the row buttons on the same line when a length error is shown (issue #31)', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const input = screen.getByLabelText('表达式长度:') as HTMLInputElement;
+
+    await user.clear(input);
+    await user.paste('65');
+    const error = screen.getByRole('alert');
+    // The error must live INSIDE .length-control so it stacks under the
+    // input without forcing .row-buttons onto a new line (the bug in #31
+    // was flex-basis:100% on the error, which wrapped every following
+    // sibling in .puzzle-controls).
+    const lengthControl = input.closest('.length-control') as HTMLElement | null;
+    expect(lengthControl).not.toBeNull();
+    expect(lengthControl!).toContainElement(error);
+    // The three row buttons are a sibling of .length-control inside
+    // .puzzle-controls, not pushed below the error.
+    const addRowBtn = screen.getByText('+ 添加行');
+    const puzzleControls = addRowBtn.closest('.puzzle-controls') as HTMLElement | null;
+    expect(puzzleControls).not.toBeNull();
+    expect(puzzleControls!).toContainElement(addRowBtn);
+    expect(puzzleControls!).toContainElement(lengthControl);
+    // All three buttons still render (none get pushed off or hidden).
+    expect(screen.getByText('+ 添加行')).toBeInTheDocument();
+    expect(screen.getByText('− 删除行')).toBeInTheDocument();
+    expect(screen.getByText('清空')).toBeInTheDocument();
+  });
+
   it('rejects an imported game state with an empty rows array', async () => {
     const user = userEvent.setup();
     render(<App />);
