@@ -139,7 +139,7 @@ describe('App', () => {
     await user.paste('65');
     const error = screen.getByRole('alert');
     // The error is a direct child of .puzzle-controls placed AFTER
-    // .row-buttons, with flex-basis:100% so it takes its own line below
+    // .row-buttons, with width:100% so it takes its own line below
     // the input + buttons row. This keeps the buttons on line 1 (no shift)
     // while letting the error span the full panel width (no narrow wrap).
     const addRowBtn = screen.getByText('+ 添加行');

@@ -247,7 +247,7 @@ textarea:focus-visible {
 /* Pin line-1 children (.length-control, .row-buttons) to the top so they
    can't re-center vertically if a future change ever puts the dynamic
    .length-error on the same row. Today the error takes its own line via
-   flex-basis: 100% so this is defense-in-depth, not a current fix. The
+   width: 100% so this is defense-in-depth, not a current fix. The
    mobile media query overrides this with align-items: stretch + column. */
 .puzzle-controls {
   align-items: flex-start;
