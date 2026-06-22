@@ -336,8 +336,8 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
   /* In-flow (no absolute positioning) so the error pushes the page down
      naturally instead of overlapping whatever sits below .puzzle-controls.
-     The fixed width on .length-control keeps the error from widening the
-     control and shifting .row-buttons; align-items: flex-start on
+     The min-content width on .length-control keeps the error from widening
+     the control and shifting .row-buttons; align-items: flex-start on
      .puzzle-controls keeps the buttons pinned to the top. */
   max-width: 100%;
 }
@@ -538,7 +538,7 @@ textarea:focus-visible {
   }
 
   /* On mobile .puzzle-controls is a column and .length-control should span
-     the full width (the desktop fixed-width constraint exists only to keep
+     the full width (the desktop min-content constraint exists only to keep
      .row-buttons from wrapping beside it). */
   .length-control {
     width: auto;

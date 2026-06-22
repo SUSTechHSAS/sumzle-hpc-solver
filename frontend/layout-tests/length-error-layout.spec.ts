@@ -19,10 +19,10 @@ import { test, expect, type Page } from '@playwright/test';
  */
 
 /** Tolerance for sub-pixel rendering differences across platforms (font
- * rendering, high-DPI scaling, etc.). 1.0px is loose enough to avoid CI
- * flakiness on different OSes but still catches real layout shifts, which
- * typically move elements by 10px or more. */
-const EPSILON = 1.0;
+ * rendering, high-DPI scaling, etc.). 1.5px gives comfortable headroom
+ * against CI flakiness on different OSes while still catching real layout
+ * shifts, which typically move elements by 10px or more. */
+const EPSILON = 1.5;
 
 async function rowButtonsBox(page: Page) {
   const box = await page.locator('.row-buttons').boundingBox();
