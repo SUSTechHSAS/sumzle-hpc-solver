@@ -526,12 +526,28 @@ textarea:focus-visible {
     justify-content: center;
   }
 
-  /* The label+input row is centered on mobile, so the inline error must
-     center too — otherwise a left-aligned error reads as misaligned with
-     the input directly above it. Desktop keeps the default left align
-     because the input row there is left-aligned. */
+  /* On mobile .puzzle-controls is a column. The DOM source order is
+     .length-control → .row-buttons → .length-error (error last, so it
+     can't push the buttons on desktop). In a column that would render the
+     buttons BETWEEN the input and its error — disjointed. Use `order` to
+     visually place the error directly under the input, with the buttons
+     last. Desktop is unaffected (it's a row with flex-wrap, order doesn't
+     change the line-1 layout). */
+  .length-control {
+    order: 1;
+  }
+
   .length-error {
+    order: 2;
+    /* The label+input row is centered on mobile, so the inline error must
+       center too — otherwise a left-aligned error reads as misaligned with
+       the input directly above it. Desktop keeps the default left align
+       because the input row there is left-aligned. */
     text-align: center;
+  }
+
+  .row-buttons {
+    order: 3;
   }
 
   .option-control {
