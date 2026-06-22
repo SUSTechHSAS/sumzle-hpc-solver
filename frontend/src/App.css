@@ -512,6 +512,14 @@ textarea:focus-visible {
     justify-content: center;
   }
 
+  /* The label+input row is centered on mobile, so the inline error must
+     center too — otherwise a left-aligned error reads as misaligned with
+     the input directly above it. Desktop keeps the default left align
+     because the input row there is left-aligned. */
+  .length-error {
+    text-align: center;
+  }
+
   .option-control {
     justify-content: space-between;
   }
