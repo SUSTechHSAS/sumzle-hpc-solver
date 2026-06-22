@@ -266,14 +266,16 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
-  /* Fixed width so the control's box never grows with the error message
-     (issue #33): the error wraps inside this width instead of expanding
-     .length-control and pushing/wrapping .row-buttons. 150px comfortably
-     fits the label + 64px input row (~144px) and gives the error text a
-     reasonable wrap column. align-items: flex-start on .puzzle-controls
-     keeps .row-buttons pinned to the top so the taller column (when an
-     error is showing) doesn't re-center the buttons. */
-  width: 150px;
+  /* min-content sizes the control to the label+input row only: the label
+     has white-space: nowrap, so the row's min-content width is exactly
+     label + input. The error's min-content is tiny (overflow-wrap:
+     anywhere), so it wraps to the row's width without expanding the
+     container — .row-buttons never shifts (issue #33). Unlike a hardcoded
+     px width, this stays correct under localization (e.g. a longer
+     "Expression Length:" label) and different system fonts. align-items:
+     flex-start on .puzzle-controls keeps .row-buttons pinned to the top
+     when the column grows taller on error. */
+  width: min-content;
 }
 
 .length-control-row,
