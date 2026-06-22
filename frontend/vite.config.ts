@@ -14,5 +14,9 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // Playwright layout tests live in ./layout-tests and run via
+    // `npm run test:layout` (a real Chromium engine). Exclude them from
+    // vitest so `npm test` (jsdom) doesn't try to load them.
+    exclude: ['node_modules', 'dist', 'layout-tests/**'],
   },
 })

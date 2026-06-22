@@ -266,6 +266,12 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
+  /* Anchor for the absolutely-positioned .length-error. Keeping the error
+     out of flow means the control's width and height are dictated solely
+     by the label+input row, so .row-buttons never shifts when an error
+     appears (issue #33: the previous in-flow error made .length-control
+     grow wider/taller with the message, wrapping or pushing the buttons). */
+  position: relative;
 }
 
 .length-control-row,
@@ -324,6 +330,16 @@ textarea:focus-visible {
      errors read at the same size across the left panel. */
   font-size: 0.82rem;
   overflow-wrap: anywhere;
+  /* Taken out of flow on desktop so the control's box (and therefore the
+     sibling .row-buttons) never resizes when an error appears (issue #33).
+     Anchored just below the input row, left-aligned with it, capped so a
+     long message wraps instead of running off-panel. None of the ancestors
+     (.length-control / .puzzle-controls / .panel) clip overflow, so the
+     error stays visible. Mobile resets this in the media query below. */
+  position: absolute;
+  top: calc(100% + var(--space-xs));
+  left: 0;
+  max-width: 40ch;
 }
 
 .option-hint {
@@ -524,8 +540,17 @@ textarea:focus-visible {
   /* The label+input row is centered on mobile, so the inline error must
      center too — otherwise a left-aligned error reads as misaligned with
      the input directly above it. Desktop keeps the default left align
-     because the input row there is left-aligned. */
+     because the input row there is left-aligned.
+     Mobile also returns the error to in-flow: .puzzle-controls is a column
+     here, .length-control is full-width, and the error stacks naturally
+     under the input without any sibling to displace — so the desktop
+     absolute positioning (which exists to keep .row-buttons put) is
+     unnecessary and would only risk overlapping the stacked row buttons. */
   .length-error {
+    position: static;
+    top: auto;
+    left: auto;
+    max-width: none;
     text-align: center;
   }
 
