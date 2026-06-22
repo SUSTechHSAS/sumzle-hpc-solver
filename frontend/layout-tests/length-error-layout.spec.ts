@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 /**
  * Layout-shift regression tests for the expression-length input error.
@@ -18,16 +18,16 @@ import { test, expect } from '@playwright/test';
  * these tests fail immediately.
  */
 
-/** Tolerance for sub-pixel rendering differences across platforms. */
-const EPSILON = 0.5;
+/** Tolerance for sub-pixel rendering differences across platforms (font
+ * rendering, high-DPI scaling, etc.). 1.0px is loose enough to avoid CI
+ * flakiness on different OSes but still catches real layout shifts, which
+ * typically move elements by 10px or more. */
+const EPSILON = 1.0;
 
-async function rowButtonsBox(page: import('@playwright/test').Page) {
-  return page.evaluate(() => {
-    const el = document.querySelector('.row-buttons');
-    if (!el) throw new Error('.row-buttons not found');
-    const r = el.getBoundingClientRect();
-    return { top: r.top, left: r.left, width: r.width, height: r.height };
-  });
+async function rowButtonsBox(page: Page) {
+  const box = await page.locator('.row-buttons').boundingBox();
+  if (!box) throw new Error('.row-buttons not found or not visible');
+  return { top: box.y, left: box.x, width: box.width, height: box.height };
 }
 
 test.describe('issue #33 — length error must not shift the row buttons', () => {

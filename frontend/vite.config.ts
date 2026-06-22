@@ -16,7 +16,15 @@ export default defineConfig({
     setupFiles: './src/test/setup.ts',
     // Playwright layout tests live in ./layout-tests and run via
     // `npm run test:layout` (a real Chromium engine). Exclude them from
-    // vitest so `npm test` (jsdom) doesn't try to load them.
-    exclude: ['node_modules', 'dist', 'layout-tests/**'],
+    // vitest so `npm test` (jsdom) doesn't try to load them. Preserve the
+    // default vitest exclude patterns so node_modules / dist / etc. are
+    // still skipped.
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/cypress/**',
+      '**/.{idea,git,cache,output,temp}/**',
+      'layout-tests/**',
+    ],
   },
 })
