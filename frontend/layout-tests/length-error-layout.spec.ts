@@ -40,9 +40,12 @@ test.describe('issue #33 — length error must not shift the row buttons', () =>
     await page.setViewportSize({ width: 1280, height: 900 });
     // Wait for the React app to finish mounting and rendering before taking
     // any layout measurements, otherwise CI can race the first measurement.
-    await expect(page.getByLabel('表达式长度:')).toBeVisible();
-    // Dismiss any focus state on the input before measuring.
-    await page.locator('body').click();
+    const input = page.getByLabel('表达式长度:');
+    await expect(input).toBeVisible();
+    // Dismiss any focus state on the input before measuring. Use an explicit
+    // blur rather than a body click — a body click can land on whatever
+    // interactive element happens to sit at the viewport center.
+    await input.blur();
   });
 
   test('row buttons stay put when a long error appears (desktop)', async ({ page }) => {
@@ -71,6 +74,8 @@ test.describe('issue #33 — length error must not shift the row buttons', () =>
     const after = await rowButtonsBox(page);
     expect(Math.abs(after.top - before.top)).toBeLessThan(EPSILON);
     expect(Math.abs(after.left - before.left)).toBeLessThan(EPSILON);
+    expect(Math.abs(after.width - before.width)).toBeLessThan(EPSILON);
+    expect(Math.abs(after.height - before.height)).toBeLessThan(EPSILON);
   });
 
   test('row buttons position is identical across long and short errors (desktop)', async ({
@@ -87,9 +92,12 @@ test.describe('issue #33 — length error must not shift the row buttons', () =>
     const shortErr = await rowButtonsBox(page);
 
     // The whole point of #33: button position must not depend on error
-    // message length.
+    // message length. Assert all four dimensions so flexbox squeezing or
+    // wrapping is caught too.
     expect(Math.abs(longErr.top - shortErr.top)).toBeLessThan(EPSILON);
     expect(Math.abs(longErr.left - shortErr.left)).toBeLessThan(EPSILON);
+    expect(Math.abs(longErr.width - shortErr.width)).toBeLessThan(EPSILON);
+    expect(Math.abs(longErr.height - shortErr.height)).toBeLessThan(EPSILON);
   });
 
   test('clearing the error restores the exact pre-error button geometry', async ({ page }) => {
@@ -105,5 +113,7 @@ test.describe('issue #33 — length error must not shift the row buttons', () =>
     const restored = await rowButtonsBox(page);
     expect(Math.abs(restored.top - before.top)).toBeLessThan(EPSILON);
     expect(Math.abs(restored.left - before.left)).toBeLessThan(EPSILON);
+    expect(Math.abs(restored.width - before.width)).toBeLessThan(EPSILON);
+    expect(Math.abs(restored.height - before.height)).toBeLessThan(EPSILON);
   });
 });
