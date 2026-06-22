@@ -21,6 +21,10 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:4317',
     trace: 'on-first-retry',
+    // The app's labels are Chinese (e.g. "表达式长度:"). Pin the locale so the
+    // tests run identically across CI environments regardless of the host's
+    // default locale.
+    locale: 'zh-CN',
   },
   projects: [
     {
