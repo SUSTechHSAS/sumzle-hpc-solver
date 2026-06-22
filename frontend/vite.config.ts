@@ -24,6 +24,7 @@ export default defineConfig({
       '**/dist/**',
       '**/cypress/**',
       '**/.{idea,git,cache,output,temp}/**',
+      '**/{karma,rollup,webpack,vite,vitest}.config.*',
       'layout-tests/**',
     ],
   },

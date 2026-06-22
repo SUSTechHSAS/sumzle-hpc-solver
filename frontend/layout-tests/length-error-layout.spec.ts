@@ -25,7 +25,11 @@ import { test, expect, type Page } from '@playwright/test';
 const EPSILON = 1.5;
 
 async function rowButtonsBox(page: Page) {
-  const box = await page.locator('.row-buttons').boundingBox();
+  const locator = page.locator('.row-buttons');
+  // boundingBox() does not auto-wait; wait for visible so CI can't race
+  // the measurement against rendering.
+  await expect(locator).toBeVisible();
+  const box = await locator.boundingBox();
   if (!box) throw new Error('.row-buttons not found or not visible');
   return { top: box.y, left: box.x, width: box.width, height: box.height };
 }
