@@ -130,7 +130,7 @@ describe('App', () => {
     expect(screen.getAllByLabelText('输入方块字符')).toHaveLength(3);
   });
 
-  it('keeps the row buttons on the same line when a length error is shown (issue #31)', async () => {
+  it('keeps the row buttons on the same line when a length error is shown (issue #31, #33)', async () => {
     const user = userEvent.setup();
     render(<App />);
     const input = screen.getByLabelText('表达式长度:') as HTMLInputElement;
@@ -138,20 +138,19 @@ describe('App', () => {
     await user.clear(input);
     await user.paste('65');
     const error = screen.getByRole('alert');
-    // The error must live INSIDE .length-control so it stacks under the
-    // input without forcing .row-buttons onto a new line (the bug in #31
-    // was flex-basis:100% on the error, which wrapped every following
-    // sibling in .puzzle-controls).
-    const lengthControl = input.closest('.length-control') as HTMLElement | null;
-    expect(lengthControl).not.toBeNull();
-    expect(lengthControl!).toContainElement(error);
-    // The three row buttons are a sibling of .length-control inside
-    // .puzzle-controls, not pushed below the error.
+    // The error is a direct child of .puzzle-controls placed AFTER
+    // .row-buttons, with flex-basis:100% so it takes its own line below
+    // the input + buttons row. This keeps the buttons on line 1 (no shift)
+    // while letting the error span the full panel width (no narrow wrap).
     const addRowBtn = screen.getByText('+ 添加行');
     const puzzleControls = addRowBtn.closest('.puzzle-controls') as HTMLElement | null;
     expect(puzzleControls).not.toBeNull();
     expect(puzzleControls!).toContainElement(addRowBtn);
-    expect(puzzleControls!).toContainElement(lengthControl);
+    expect(puzzleControls!).toContainElement(error);
+    // .length-control holds only the label + input now (not the error).
+    const lengthControl = input.closest('.length-control') as HTMLElement | null;
+    expect(lengthControl).not.toBeNull();
+    expect(lengthControl!).not.toContainElement(error);
     // All three buttons still render (none get pushed off or hidden).
     expect(screen.getByText('+ 添加行')).toBeInTheDocument();
     expect(screen.getByText('− 删除行')).toBeInTheDocument();

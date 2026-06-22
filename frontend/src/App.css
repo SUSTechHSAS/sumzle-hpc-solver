@@ -244,15 +244,6 @@ textarea:focus-visible {
   margin-bottom: var(--space-md);
 }
 
-/* .puzzle-controls overrides align-items to flex-start so the row buttons
-   (.row-buttons) stay pinned to the top instead of shifting vertically to
-   re-center when the .length-control column grows taller on error. The
-   mobile media query below sets align-items: stretch + flex-direction:
-   column, which takes precedence there. .solve-options keeps center. */
-.puzzle-controls {
-  align-items: flex-start;
-}
-
 .solve-options {
   padding: var(--space-md);
   border: 1px solid var(--color-border);
@@ -260,30 +251,7 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--fluent-blue) 6%, var(--color-surface));
 }
 
-.length-control {
-  /* Column so the label+input row and the inline error stack vertically,
-     without the error forcing sibling controls (.row-buttons) to wrap. */
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  /* min-content sizes the control to the label+input row only: the label
-     has white-space: nowrap, so the row's min-content width is exactly
-     label + input. The error's min-content is tiny (overflow-wrap:
-     anywhere), so it wraps to the row's width without expanding the
-     container — .row-buttons never shifts (issue #33). Unlike a hardcoded
-     px width, this stays correct under localization (e.g. a longer
-     "Expression Length:" label) and different system fonts. align-items:
-     flex-start on .puzzle-controls keeps .row-buttons pinned to the top
-     when the column grows taller on error. */
-  width: min-content;
-  /* Floor so the error message always has a legible wrap width even if the
-     label shrinks under localization (e.g. a very short translated label).
-     15ch is comfortably wider than any realistic label+input row, so this
-     only kicks in for the degenerate short-label case. */
-  min-width: 15ch;
-}
-
-.length-control-row,
+.length-control,
 .option-control {
   display: flex;
   align-items: center;
@@ -339,12 +307,14 @@ textarea:focus-visible {
      errors read at the same size across the left panel. */
   font-size: 0.82rem;
   overflow-wrap: anywhere;
-  /* In-flow (no absolute positioning) so the error pushes the page down
-     naturally instead of overlapping whatever sits below .puzzle-controls.
-     The min-content width on .length-control keeps the error from widening
-     the control and shifting .row-buttons; align-items: flex-start on
-     .puzzle-controls keeps the buttons pinned to the top. */
-  max-width: 100%;
+  /* The error is a direct child of .puzzle-controls (NOT inside
+     .length-control), placed after .row-buttons. flex-basis: 100% forces it
+     onto its own line below the input + buttons row, so it spans the full
+     panel width and uses the empty space on the right instead of wrapping
+     into a narrow column under the input (issue #33 aesthetic fix). Because
+     it comes AFTER .row-buttons in source order, the buttons stay on line 1
+     and never shift when the error appears or changes length. */
+  flex-basis: 100%;
 }
 
 .option-hint {
@@ -537,16 +507,9 @@ textarea:focus-visible {
     flex-direction: column;
   }
 
-  .length-control-row,
+  .length-control,
   .row-buttons {
     justify-content: center;
-  }
-
-  /* On mobile .puzzle-controls is a column and .length-control should span
-     the full width (the desktop min-content constraint exists only to keep
-     .row-buttons from wrapping beside it). */
-  .length-control {
-    width: auto;
   }
 
   /* The label+input row is centered on mobile, so the inline error must
