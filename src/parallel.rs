@@ -221,7 +221,16 @@ impl ParallelSolver {
     /// arbitrary threads). Use the default `solve` or `solve_top_n` when a
     /// deterministic order is required.
     /// Returns `(solutions_written, searched_count)`.
-    pub fn solve_to_writer<W: Write + Send>(&self, writer: W) -> std::io::Result<(u64, u64)> {
+    ///
+    /// `cancelled` lets a consumer abort early: worker threads check it before
+    /// each branch and stop, so a disconnected streaming client doesn't keep all
+    /// cores searching to completion (Rayon's `map`/`reduce` does not itself
+    /// short-circuit when a write returns `BrokenPipe`).
+    pub fn solve_to_writer<W: Write + Send>(
+        &self,
+        writer: W,
+        cancelled: &AtomicBool,
+    ) -> std::io::Result<(u64, u64)> {
         let (branches, eager_results, eager_searched) = self.collect_branches();
 
         let writer = Mutex::new(writer);
@@ -237,6 +246,10 @@ impl ParallelSolver {
             branches
                 .par_iter()
                 .map(|branch| {
+                    // Stop early if the client has gone away.
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok((0u64, 0u64));
+                    }
                     let mut sink = JsonlSink::new(&writer);
                     let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
                     sink.finish().map(|written| (written, searched))

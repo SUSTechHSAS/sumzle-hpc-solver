@@ -17,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
@@ -582,11 +583,15 @@ async fn solve_progress_handler(
 /// the client reads slowly, so server memory stays bounded.
 struct ChannelWriter {
     tx: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    /// Flipped when the channel is closed (client disconnected) so the solver's
+    /// worker threads can stop searching instead of running to completion.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl std::io::Write for ChannelWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.tx.blocking_send(Ok(buf.to_vec())).map_err(|_| {
+            self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
         })?;
         Ok(buf.len())
@@ -619,6 +624,11 @@ async fn solve_stream_handler(
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(16);
+    // Shared between the writer (which trips it on a broken pipe) and the solver
+    // (whose workers check it before each branch), so an abandoned stream stops
+    // searching instead of burning every core to completion.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let writer_flag = Arc::clone(&cancelled);
     tokio::task::spawn_blocking(move || {
         // Buffer the per-line NDJSON writes into ~8 KB chunks before they hit the
         // channel. `solve_to_writer` writes one solution per `write` call, which
@@ -627,12 +637,15 @@ async fn solve_stream_handler(
         // coalesces them, cutting allocation/contention/chunking overhead. The
         // final `BufWriter` flush is guaranteed by `solve_to_writer`, which calls
         // `flush()?` on the writer before returning (see `parallel.rs`).
-        let writer = std::io::BufWriter::new(ChannelWriter { tx });
+        let writer = std::io::BufWriter::new(ChannelWriter {
+            tx,
+            cancelled: writer_flag,
+        });
         let parallel = ParallelSolver::new(solver, Some(num_threads));
         // Errors here are almost always the client disconnecting; the stream is
         // already closing, so there is nothing further to report. Dropping the
         // writer (and its sender) ends the response body.
-        let _ = parallel.solve_to_writer(writer);
+        let _ = parallel.solve_to_writer(writer, &cancelled);
     });
 
     (
