@@ -207,21 +207,36 @@ export async function solveWithProgress(
     }
   };
 
-  let streaming = true;
-  while (streaming) {
-    const { done, value } = await reader.read();
-    if (value) buffer += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buffer.indexOf('\n\n')) !== -1) {
-      handleFrame(buffer.slice(0, sep));
-      buffer = buffer.slice(sep + 2);
+  try {
+    let streaming = true;
+    while (streaming) {
+      const { done, value } = await reader.read();
+      if (value) {
+        buffer += decoder.decode(value, { stream: true });
+        // Normalize CRLF → LF so the `\n\n` frame separator still matches if a
+        // proxy/VPN rewrites line endings to `\r\n` (otherwise the separator
+        // becomes `\r\n\r\n`, which contains no `\n\n`, and we buffer forever).
+        buffer = buffer.replace(/\r\n/g, '\n');
+      }
+      let sep: number;
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        handleFrame(buffer.slice(0, sep));
+        buffer = buffer.slice(sep + 2);
+      }
+      if (done) {
+        streaming = false;
+      }
     }
-    if (done) {
-      streaming = false;
-    }
+    // Flush any trailing frame that wasn't newline-terminated.
+    if (buffer.trim().length > 0) handleFrame(buffer);
+  } catch (err) {
+    // handleFrame may throw (error event / malformed result JSON); cancel the
+    // stream so the connection isn't leaked, then rethrow.
+    reader.cancel().catch(() => {});
+    throw err;
+  } finally {
+    reader.releaseLock();
   }
-  // Flush any trailing frame that wasn't newline-terminated.
-  if (buffer.trim().length > 0) handleFrame(buffer);
 
   if (!result) throw new Error('求解结束但未返回结果');
   return result;
@@ -302,8 +317,10 @@ export async function solveStreamToFile(
   }
 
   // From here the writable (if any) is open, so guard the request + streaming
-  // loop with try/finally: on any error mid-stream we must still close the
-  // writable, or the OS file handle leaks and the file stays locked/incomplete.
+  // loop with try/catch/finally: on any error mid-stream we must still cancel
+  // the response reader and close the writable, or the connection and the OS
+  // file handle leak (leaving the file locked/incomplete).
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   try {
     const res = await fetch(`${API_BASE}/solve/stream?${solveParams(options, false)}`, {
       method: 'POST',
@@ -313,7 +330,7 @@ export async function solveStreamToFile(
     if (!res.ok) throw new Error(await res.text());
     if (!res.body) throw new Error('当前浏览器不支持流式响应');
 
-    const reader = res.body.getReader();
+    reader = res.body.getReader();
     const decoder = new TextDecoder();
     const chunks: Uint8Array[] = [];
     let count = 0;
@@ -349,7 +366,12 @@ export async function solveStreamToFile(
     }
     downloadBlob(new Blob(chunks as BlobPart[], { type: 'application/x-ndjson' }), suggestedName);
     return { count, streamedToDisk: false };
+  } catch (err) {
+    // Cancel the response stream so the connection isn't leaked on error.
+    if (reader) reader.cancel().catch(() => {});
+    throw err;
   } finally {
+    if (reader) reader.releaseLock();
     // Reached with an open writable only on an error path; release the handle.
     if (writable) {
       try {
