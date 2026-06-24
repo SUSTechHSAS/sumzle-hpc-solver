@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   solvePuzzle,
   validateEquation,
@@ -364,6 +364,12 @@ describe('API functions', () => {
   });
 
   describe('solveStreamToFile', () => {
+    // Restore the global picker after every test, even if an assertion throws
+    // mid-test, so the mock never leaks into the next test.
+    afterEach(() => {
+      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
+    });
+
     it('falls back to a blob download when the file picker is unavailable', async () => {
       (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
       const ndjson = '{"solution":"1+2=3"}\n{"solution":"2+1=3"}\n';
@@ -423,8 +429,6 @@ describe('API functions', () => {
       expect(r.count).toBe(3);
       expect(writable.write).toHaveBeenCalled();
       expect(writable.close).toHaveBeenCalled();
-
-      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
     });
 
     it('closes the writable if the request fails mid-stream', async () => {
@@ -445,8 +449,6 @@ describe('API functions', () => {
       await expect(solveStreamToFile(5, [], { threads: 0 })).rejects.toThrow('boom');
       // The file handle must be released even though streaming never started.
       expect(writable.close).toHaveBeenCalled();
-
-      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
     });
 
     it('throws "已取消保存" and never fetches when the save dialog is cancelled', async () => {
@@ -457,8 +459,6 @@ describe('API functions', () => {
 
       await expect(solveStreamToFile(5, [], { threads: 0 })).rejects.toThrow('已取消保存');
       expect(fetchSpy).not.toHaveBeenCalled();
-
-      (window as { showSaveFilePicker?: unknown }).showSaveFilePicker = undefined;
     });
   });
 

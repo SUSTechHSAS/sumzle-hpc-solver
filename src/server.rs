@@ -498,7 +498,26 @@ async fn solve_handler(
         Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
     };
 
-    let response = run_solve(solver, threads, top, &Progress::new());
+    // `run_solve` is CPU-bound and can run for seconds; keep it off the async
+    // worker threads so it doesn't block the Tokio reactor and stall other
+    // requests (the streaming/progress handlers spawn_blocking for the same
+    // reason).
+    let response = match tokio::task::spawn_blocking(move || {
+        run_solve(solver, threads, top, &Progress::new())
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "solve task failed".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    };
     (StatusCode::OK, Json(response)).into_response()
 }
 
@@ -591,7 +610,8 @@ struct ChannelWriter {
 impl std::io::Write for ChannelWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.tx.blocking_send(Ok(buf.to_vec())).map_err(|_| {
-            self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
         })?;
         Ok(buf.len())

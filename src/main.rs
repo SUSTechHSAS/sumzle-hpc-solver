@@ -258,7 +258,8 @@ fn main() -> Result<()> {
                 // Writing to a local file: nothing to cancel, so pass a flag that
                 // is never tripped.
                 let never = std::sync::atomic::AtomicBool::new(false);
-                let (found_count, searched_count) = parallel_solver.solve_to_writer(file, &never)?;
+                let (found_count, searched_count) =
+                    parallel_solver.solve_to_writer(file, &never)?;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
                 let mut out = std::io::stdout().lock();
