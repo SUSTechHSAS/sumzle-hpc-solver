@@ -544,7 +544,10 @@ async fn solve_progress_handler(
             tokio::select! {
                 _ = ticker.tick() => {
                     if tx.send(Ok(progress_event(&progress_for_ticks))).await.is_err() {
-                        break; // client disconnected — stop sending
+                        // Client disconnected — tell the worker threads to stop
+                        // so the abandoned solve doesn't keep all cores busy.
+                        progress_for_ticks.cancel();
+                        break;
                     }
                 }
                 res = &mut solve_task => {

@@ -211,17 +211,16 @@ export async function solveWithProgress(
     let streaming = true;
     while (streaming) {
       const { done, value } = await reader.read();
-      if (value) {
-        buffer += decoder.decode(value, { stream: true });
-        // Normalize CRLF → LF so the `\n\n` frame separator still matches if a
-        // proxy/VPN rewrites line endings to `\r\n` (otherwise the separator
-        // becomes `\r\n\r\n`, which contains no `\n\n`, and we buffer forever).
-        buffer = buffer.replace(/\r\n/g, '\n');
-      }
-      let sep: number;
-      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      if (value) buffer += decoder.decode(value, { stream: true });
+      // Match the frame separator directly (`\n\n`, or `\r\n\r\n` if a proxy
+      // rewrote line endings) instead of rewriting the whole buffer each chunk —
+      // a per-chunk `buffer.replace` would be O(N²) for a large final frame.
+      let match = buffer.match(/\r?\n\r?\n/);
+      while (match) {
+        const sep = match.index ?? 0;
         handleFrame(buffer.slice(0, sep));
-        buffer = buffer.slice(sep + 2);
+        buffer = buffer.slice(sep + match[0].length);
+        match = buffer.match(/\r?\n\r?\n/);
       }
       if (done) {
         streaming = false;
@@ -249,7 +248,10 @@ interface SaveFilePickerOptions {
   types?: { description?: string; accept: Record<string, string[]> }[];
 }
 interface WritableFileStreamLike {
-  write(data: BufferSource | Blob | string): Promise<void>;
+  // Accept `Uint8Array` directly: the response reader yields
+  // `Uint8Array<ArrayBufferLike>`, which TS 6's `BufferSource` (an
+  // `ArrayBufferView<ArrayBuffer>`) rejects over the SharedArrayBuffer case.
+  write(data: Uint8Array | Blob | string): Promise<void>;
   close(): Promise<void>;
 }
 interface FileHandleLike {

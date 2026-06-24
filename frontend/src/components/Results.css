@@ -51,6 +51,8 @@
 
 .progress-bar.determinate {
   transition: transform 0.15s ease-out;
+  /* scaleX grows from center by default; anchor left so the bar fills L→R. */
+  transform-origin: left;
 }
 
 .progress-detail {

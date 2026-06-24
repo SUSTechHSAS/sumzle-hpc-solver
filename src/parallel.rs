@@ -3,7 +3,7 @@
 use crate::solver::{CountSink, JsonlSink, SolutionSink, Solver, TopNSink};
 use rayon::prelude::*;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 /// Live progress of a parallel solve, shared between the Rayon worker threads
@@ -25,6 +25,10 @@ pub struct Progress {
     /// Coarse phase: 0 = preparing, 1 = searching (or pass 1), 2 = top-N
     /// scoring (pass 2), 3 = finished.
     phase: AtomicU8,
+    /// Set when the consumer has gone away (e.g. the SSE client disconnected).
+    /// Worker threads check this between branches and stop early so an abandoned
+    /// solve does not keep all cores busy running to completion.
+    cancelled: AtomicBool,
 }
 
 /// Phase constants for [`Progress::phase`].
@@ -39,7 +43,20 @@ impl Progress {
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),
             phase: AtomicU8::new(PHASE_PREPARING),
+            cancelled: AtomicBool::new(false),
         }
+    }
+
+    /// Signal worker threads to stop early (the consumer has disconnected).
+    #[inline]
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called.
+    #[inline]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -163,6 +180,10 @@ impl ParallelSolver {
             let outcomes: Vec<(Vec<String>, u64)> = branches
                 .par_iter()
                 .map(|branch| {
+                    // Skip remaining work if the consumer disconnected.
+                    if progress.is_cancelled() {
+                        return (Vec::new(), 0);
+                    }
                     let out = self.solver.solve_from_prefix(branch);
                     progress.inc_done();
                     out
@@ -291,6 +312,9 @@ impl ParallelSolver {
             let (counts, branch_searched) = branches
                 .par_iter()
                 .map(|branch| {
+                    if progress.is_cancelled() {
+                        return (CountSink::new(), 0);
+                    }
                     let mut sink = CountSink::new();
                     let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
                     progress.inc_done();
@@ -320,6 +344,9 @@ impl ParallelSolver {
             let merged = branches
                 .par_iter()
                 .map(|branch| {
+                    if progress.is_cancelled() {
+                        return TopNSink::new(n, probs, top5);
+                    }
                     let mut sink = TopNSink::new(n, probs, top5);
                     self.solver.solve_from_prefix_into(branch, &mut sink);
                     progress.inc_done();
