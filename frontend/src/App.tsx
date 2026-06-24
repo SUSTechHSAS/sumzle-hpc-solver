@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
-import type { GuessRow, TileState, DownloadFormat, SolveResponse } from './types';
-import { solvePuzzle, downloadResults } from './api';
+import type { GuessRow, TileState, DownloadFormat, SolveResponse, SolveProgress } from './types';
+import { solvePuzzle, downloadResults, solveWithProgress, solveStreamToFile } from './api';
 import GuessRowComponent from './components/GuessRow';
 import VirtualKeyboard from './components/VirtualKeyboard';
 import ImportGameState from './components/ImportGameState';
@@ -39,6 +39,11 @@ export default function App() {
   // Solver options: threads (0 = auto) and top-N (0 = return every solution).
   const [threads, setThreads] = useState(0);
   const [topN, setTopN] = useState(0);
+  // Streaming options (issues #21 / #22).
+  const [useProgress, setUseProgress] = useState(false);
+  const [progress, setProgress] = useState<SolveProgress | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<string | null>(null);
 
   const commitLength = useCallback((newLength: number) => {
     // Always clamp to the supported range. The backend supports arbitrary
@@ -173,8 +178,15 @@ export default function App() {
     setLoading(true);
     setError(null);
     setSolutions(null);
+    setProgress(null);
+    setStreamStatus(null);
     try {
-      const res = await solvePuzzle(length, rows, { threads, top: topN });
+      // Real-time mode streams progress events over SSE; otherwise a plain POST.
+      const res = useProgress
+        ? await solveWithProgress(length, rows, { threads, top: topN }, (p) => {
+            if (generation === solveGenerationRef.current) setProgress(p);
+          })
+        : await solvePuzzle(length, rows, { threads, top: topN });
       if (generation === solveGenerationRef.current) {
         setSolutions(res);
       }
@@ -186,9 +198,39 @@ export default function App() {
     } finally {
       if (generation === solveGenerationRef.current) {
         setLoading(false);
+        setProgress(null);
       }
     }
-  }, [length, rows, threads, topN]);
+  }, [length, rows, threads, topN, useProgress]);
+
+  // Stream every solution straight to a file (issue #21). Bypasses the in-memory
+  // result list, so it scales to huge solution sets. The save dialog needs a
+  // user gesture, so this is invoked directly from the button's onClick.
+  const handleStreamToFile = useCallback(async () => {
+    setError(null);
+    setStreaming(true);
+    setStreamStatus('正在准备导出…');
+    try {
+      const result = await solveStreamToFile(length, rows, { threads }, (count) => {
+        setStreamStatus(`正在写入… 已 ${count.toLocaleString()} 个解`);
+      });
+      setStreamStatus(
+        result.streamedToDisk
+          ? `已保存 ${result.count.toLocaleString()} 个解到文件`
+          : `已下载 ${result.count.toLocaleString()} 个解（浏览器不支持直接写盘，已回退为下载）`,
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : '未知错误';
+      setStreamStatus(null);
+      // Cancelling the save dialog is a normal user action, not an error — don't
+      // surface it as a red failure banner.
+      if (message !== '已取消保存') {
+        setError(`流式导出失败：${message}`);
+      }
+    } finally {
+      setStreaming(false);
+    }
+  }, [length, rows, threads]);
 
   const handleDownload = useCallback(
     (format: DownloadFormat) => {
@@ -303,6 +345,18 @@ export default function App() {
                   />
                   <span className="option-hint">0 表示返回全部</span>
                 </div>
+                <div className="option-control option-control-checkbox">
+                  <label htmlFor="progress-toggle">
+                    <input
+                      id="progress-toggle"
+                      type="checkbox"
+                      checked={useProgress}
+                      onChange={(e) => setUseProgress(e.target.checked)}
+                    />
+                    实时进度
+                  </label>
+                  <span className="option-hint">显示多线程搜索的真实进度</span>
+                </div>
               </div>
 
               <div className="guess-rows">
@@ -325,10 +379,20 @@ export default function App() {
                 <button
                   className="btn btn-primary btn-solve"
                   onClick={handleSolve}
-                  disabled={loading}
+                  disabled={loading || streaming}
                 >
                   {loading ? '正在求解…' : <><Icon name="play" />开始求解</>}
                 </button>
+                <button
+                  className="btn btn-secondary btn-stream"
+                  onClick={handleStreamToFile}
+                  disabled={loading || streaming}
+                  title="将全部解直接流式写入文件，不受结果列表上限限制"
+                >
+                  <Icon name="download" />
+                  {streaming ? '正在导出…' : '流式保存到文件'}
+                </button>
+                {streamStatus && <p className="stream-status" role="status">{streamStatus}</p>}
                 <p className="solve-hint">
                   先输入猜测，再按反馈标记方块：绿色=正确位置，黄色=存在但错位，灰色=不存在。
                 </p>
@@ -358,6 +422,7 @@ export default function App() {
                 error={error}
                 onDownload={handleDownload}
                 onRetry={handleSolve}
+                progress={progress}
               />
             </div>
 

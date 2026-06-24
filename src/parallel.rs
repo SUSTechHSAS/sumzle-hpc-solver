@@ -3,7 +3,93 @@
 use crate::solver::{CountSink, JsonlSink, SolutionSink, Solver, TopNSink};
 use rayon::prelude::*;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
+
+/// Live progress of a parallel solve, shared between the Rayon worker threads
+/// (which bump `done` as each prefix branch finishes) and an outside observer
+/// such as the SSE progress endpoint.
+///
+/// The unit of progress is a *branch* — the fine-grained prefix partitions that
+/// [`ParallelSolver::collect_branches`] produces, which is exactly "the
+/// multi-threaded task completion" the progress bar is meant to show. Updating
+/// it costs one relaxed atomic add per branch (there are ~16×threads branches),
+/// so it does not measurably affect solve throughput.
+#[derive(Debug)]
+pub struct Progress {
+    /// Branch-tasks completed so far.
+    done: AtomicU64,
+    /// Total branch-tasks to complete. 0 until the branch set is known; for the
+    /// top-N two-pass solve this counts both passes (2 × branch count).
+    total: AtomicU64,
+    /// Coarse phase: 0 = preparing, 1 = searching (or pass 1), 2 = top-N
+    /// scoring (pass 2), 3 = finished.
+    phase: AtomicU8,
+    /// Set when the consumer has gone away (e.g. the SSE client disconnected).
+    /// Worker threads check this between branches and stop early so an abandoned
+    /// solve does not keep all cores busy running to completion.
+    cancelled: AtomicBool,
+}
+
+/// Phase constants for [`Progress::phase`].
+pub const PHASE_PREPARING: u8 = 0;
+pub const PHASE_SEARCHING: u8 = 1;
+pub const PHASE_SCORING: u8 = 2;
+pub const PHASE_DONE: u8 = 3;
+
+impl Progress {
+    pub fn new() -> Self {
+        Self {
+            done: AtomicU64::new(0),
+            total: AtomicU64::new(0),
+            phase: AtomicU8::new(PHASE_PREPARING),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    /// Signal worker threads to stop early (the consumer has disconnected).
+    #[inline]
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called.
+    #[inline]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn add_total(&self, n: u64) {
+        self.total.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn set_phase(&self, p: u8) {
+        self.phase.store(p, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn inc_done(&self) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(done, total, phase)` read atomically-enough for display (relaxed loads;
+    /// the values are monotonic so a torn read only ever under-reports briefly).
+    pub fn snapshot(&self) -> (u64, u64, u8) {
+        (
+            self.done.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+            self.phase.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Parallel solver that distributes work across multiple CPU cores
 pub struct ParallelSolver {
@@ -76,7 +162,16 @@ impl ParallelSolver {
     /// This only changes how the identical search is divided — solutions and
     /// the total searched count match the single-threaded solver exactly.
     pub fn solve(&self) -> (Vec<String>, u64) {
+        self.solve_with_progress(&Progress::new())
+    }
+
+    /// Like [`solve`](Self::solve), but reports branch-completion progress
+    /// through the shared `progress` handle (see [`Progress`]). The returned
+    /// solutions and searched count are identical to `solve`.
+    pub fn solve_with_progress(&self, progress: &Progress) -> (Vec<String>, u64) {
         let (branches, mut eager_results, mut searched) = self.collect_branches();
+        progress.add_total(branches.len() as u64);
+        progress.set_phase(PHASE_SEARCHING);
 
         // Solve every branch and assemble the sorted result set within a single
         // pool acquisition (both the per-branch search and the final sort run in
@@ -84,7 +179,15 @@ impl ParallelSolver {
         let mut results = self.run_in_pool(|| {
             let outcomes: Vec<(Vec<String>, u64)> = branches
                 .par_iter()
-                .map(|branch| self.solver.solve_from_prefix(branch))
+                .map(|branch| {
+                    // Skip remaining work if the consumer disconnected.
+                    if progress.is_cancelled() {
+                        return (Vec::new(), 0);
+                    }
+                    let out = self.solver.solve_from_prefix(branch);
+                    progress.inc_done();
+                    out
+                })
                 .collect();
 
             let total_len =
@@ -105,6 +208,7 @@ impl ParallelSolver {
 
         // The dedup is a defensive no-op (branches are disjoint by prefix).
         results.dedup();
+        progress.set_phase(PHASE_DONE);
 
         (results, searched)
     }
@@ -117,7 +221,16 @@ impl ParallelSolver {
     /// arbitrary threads). Use the default `solve` or `solve_top_n` when a
     /// deterministic order is required.
     /// Returns `(solutions_written, searched_count)`.
-    pub fn solve_to_writer<W: Write + Send>(&self, writer: W) -> std::io::Result<(u64, u64)> {
+    ///
+    /// `cancelled` lets a consumer abort early: worker threads check it before
+    /// each branch and stop, so a disconnected streaming client doesn't keep all
+    /// cores searching to completion (Rayon's `map`/`reduce` does not itself
+    /// short-circuit when a write returns `BrokenPipe`).
+    pub fn solve_to_writer<W: Write + Send>(
+        &self,
+        writer: W,
+        cancelled: &AtomicBool,
+    ) -> std::io::Result<(u64, u64)> {
         let (branches, eager_results, eager_searched) = self.collect_branches();
 
         let writer = Mutex::new(writer);
@@ -133,6 +246,10 @@ impl ParallelSolver {
             branches
                 .par_iter()
                 .map(|branch| {
+                    // Stop early if the client has gone away.
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok((0u64, 0u64));
+                    }
                     let mut sink = JsonlSink::new(&writer);
                     let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
                     sink.finish().map(|written| (written, searched))
@@ -178,7 +295,22 @@ impl ParallelSolver {
     /// character probabilities across all solutions while returning only the
     /// ranked top-N subset (the top-N's own frequencies would be misleading).
     pub fn solve_top_n_with_counts(&self, n: usize) -> (Vec<(f64, String)>, CountSink, u64) {
+        self.solve_top_n_with_counts_progress(n, &Progress::new())
+    }
+
+    /// Like [`solve_top_n_with_counts`](Self::solve_top_n_with_counts), but
+    /// reports branch-completion progress through `progress`. Both passes are
+    /// counted (so `total` is 2 × the branch count), and `phase` moves from
+    /// [`PHASE_SEARCHING`] (pass 1) to [`PHASE_SCORING`] (pass 2).
+    pub fn solve_top_n_with_counts_progress(
+        &self,
+        n: usize,
+        progress: &Progress,
+    ) -> (Vec<(f64, String)>, CountSink, u64) {
         let (branches, eager_results, eager_searched) = self.collect_branches();
+        // Two passes over the same branch set.
+        progress.add_total(branches.len() as u64 * 2);
+        progress.set_phase(PHASE_SEARCHING);
 
         // Both passes share a single pool acquisition. The sequential glue
         // between them (folding eager solutions, deriving probabilities and the
@@ -193,8 +325,12 @@ impl ParallelSolver {
             let (counts, branch_searched) = branches
                 .par_iter()
                 .map(|branch| {
+                    if progress.is_cancelled() {
+                        return (CountSink::new(), 0);
+                    }
                     let mut sink = CountSink::new();
                     let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
+                    progress.inc_done();
                     (sink, searched)
                 })
                 .reduce(
@@ -212,6 +348,7 @@ impl ParallelSolver {
             let top5 = base_counts.top5_mask();
 
             // ---- Pass 2: score every solution, keep the top n. ----
+            progress.set_phase(PHASE_SCORING);
             let mut base_top = TopNSink::new(n, probs, top5);
             for sol in &eager_results {
                 base_top.accept(sol.as_bytes());
@@ -220,8 +357,12 @@ impl ParallelSolver {
             let merged = branches
                 .par_iter()
                 .map(|branch| {
+                    if progress.is_cancelled() {
+                        return TopNSink::new(n, probs, top5);
+                    }
                     let mut sink = TopNSink::new(n, probs, top5);
                     self.solver.solve_from_prefix_into(branch, &mut sink);
+                    progress.inc_done();
                     sink
                 })
                 .reduce(
@@ -236,6 +377,7 @@ impl ParallelSolver {
             (base_top, base_counts, searched)
         });
 
+        progress.set_phase(PHASE_DONE);
         (base_top.into_sorted(), base_counts, searched)
     }
 }

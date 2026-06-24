@@ -6,19 +6,26 @@
 //! SPA fallback support.
 
 use axum::{
+    body::Body,
     extract::Query,
     http::{header, StatusCode},
+    response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::evaluator;
-use crate::parallel::ParallelSolver;
+use crate::parallel::{ParallelSolver, Progress};
 use crate::solver::Solver;
 use crate::types::*;
 
@@ -340,53 +347,54 @@ const MIN_SOLVE_LENGTH: usize = 3;
 /// Maximum number of threads allowed for a single solve request
 const MAX_THREADS: usize = 256;
 
-/// POST /api/solve
-async fn solve_handler(
-    Query(query): Query<SolveQuery>,
-    Json(body): Json<SolveRequest>,
-) -> Response {
+/// Validate a solve request and build the solver, shared by `/api/solve`,
+/// `/api/solve/progress`, and `/api/solve/stream`. On success returns the
+/// prepared `Solver`, the clamped thread count, and the requested top-N value;
+/// on failure returns the HTTP status and error message the caller should send.
+fn prepare_solve(
+    query: &SolveQuery,
+    body: &SolveRequest,
+) -> Result<(Solver, usize, usize), (StatusCode, String)> {
     // Validate length: only a lower bound is enforced — the search engine
     // supports arbitrary expression lengths, so there is no upper limit.
     if body.length < MIN_SOLVE_LENGTH {
-        return (
+        return Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Length must be at least {}, got {}",
-                    MIN_SOLVE_LENGTH, body.length
-                ),
-            }),
-        )
-            .into_response();
+            format!(
+                "Length must be at least {}, got {}",
+                MIN_SOLVE_LENGTH, body.length
+            ),
+        ));
     }
 
-    // Clamp thread count to a reasonable maximum
-    let threads = if query.threads > MAX_THREADS {
-        MAX_THREADS
-    } else {
-        query.threads
-    };
+    // Clamp thread count to a reasonable maximum.
+    let threads = query.threads.min(MAX_THREADS);
     let top = query.top;
 
-    // Convert API rows to internal GuessRow format
+    // Convert API rows to internal GuessRow format and build global knowledge.
     let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
-
-    // Build global knowledge from guess rows
     let gk = match GlobalKnowledge::from_guess_rows(body.length, &guess_rows) {
         Ok(gk) => gk,
         Err(e) => {
-            return (
+            return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid constraints: {}", e),
-                }),
-            )
-                .into_response();
+                format!("Invalid constraints: {}", e),
+            ));
         }
     };
 
-    let solver = Solver::new(body.length, gk);
+    Ok((Solver::new(body.length, gk), threads, top))
+}
 
+/// Run a solve and assemble the full [`SolveResponse`].
+///
+/// Shared by the plain `/api/solve` handler and the SSE `/api/solve/progress`
+/// handler so scores, character probabilities, the recommendation, and
+/// `found_count` are computed identically. `progress` receives branch-completion
+/// updates during the parallel search (pass a fresh [`Progress`] when nothing is
+/// observing it). This is synchronous and CPU-bound; callers on the async
+/// runtime that must not block should invoke it inside `spawn_blocking`.
+fn run_solve(solver: Solver, threads: usize, top: usize, progress: &Progress) -> SolveResponse {
     let start = std::time::Instant::now();
 
     // `scores` is populated (aligned with `solutions`) only in top-N mode.
@@ -412,7 +420,8 @@ async fn solve_handler(
             threads
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        let (scored, counts, searched) = parallel_solver.solve_top_n_with_counts(top);
+        let (scored, counts, searched) =
+            parallel_solver.solve_top_n_with_counts_progress(top, progress);
         let mut exprs = Vec::with_capacity(scored.len());
         let mut scs = Vec::with_capacity(scored.len());
         for (score, expr) in scored {
@@ -432,6 +441,8 @@ async fn solve_handler(
             counts.total as usize,
         )
     } else if threads == 1 {
+        // True single-threaded path: no branch partitioning, so progress is not
+        // reported (the SSE client simply receives the result when it lands).
         let (r, s) = solver.solve();
         let found = r.len();
         (r, Vec::new(), None, s, found)
@@ -442,13 +453,12 @@ async fn solve_handler(
             threads
         };
         let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        let (r, s) = parallel_solver.solve();
+        let (r, s) = parallel_solver.solve_with_progress(progress);
         let found = r.len();
         (r, Vec::new(), None, s, found)
     };
 
-    let elapsed = start.elapsed();
-    let elapsed_ms = elapsed.as_millis() as u64;
+    let elapsed_ms = start.elapsed().as_millis() as u64;
     let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
 
     // Character probabilities: in top-N mode they were computed over the full
@@ -463,7 +473,7 @@ async fn solve_handler(
         compute_recommended(&results, &char_probabilities)
     };
 
-    let response = SolveResponse {
+    SolveResponse {
         solutions: results,
         stats: SolverStats {
             searched_count,
@@ -475,9 +485,198 @@ async fn solve_handler(
         recommended,
         top,
         scores,
+    }
+}
+
+/// POST /api/solve
+async fn solve_handler(
+    Query(query): Query<SolveQuery>,
+    Json(body): Json<SolveRequest>,
+) -> Response {
+    let (solver, threads, top) = match prepare_solve(&query, &body) {
+        Ok(v) => v,
+        Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
     };
 
+    // `run_solve` is CPU-bound and can run for seconds; keep it off the async
+    // worker threads so it doesn't block the Tokio reactor and stall other
+    // requests (the streaming/progress handlers spawn_blocking for the same
+    // reason).
+    let response = match tokio::task::spawn_blocking(move || {
+        run_solve(solver, threads, top, &Progress::new())
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "solve task failed".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    };
     (StatusCode::OK, Json(response)).into_response()
+}
+
+/// POST /api/solve/progress
+///
+/// Same request shape as `/api/solve`, but streams **Server-Sent Events** so the
+/// frontend can show a real progress bar (issue #22):
+///
+/// - `event: progress` with `{"done","total","phase"}` roughly every 150 ms,
+///   where `done`/`total` count completed search branches across the threads.
+/// - a final `event: result` carrying the full `SolveResponse` JSON.
+/// - `event: error` if the solve task fails.
+///
+/// The CPU-bound solve runs on a blocking thread so it never blocks the async
+/// runtime; a ticker task samples the shared [`Progress`] and forwards events.
+async fn solve_progress_handler(
+    Query(query): Query<SolveQuery>,
+    Json(body): Json<SolveRequest>,
+) -> Response {
+    let (solver, threads, top) = match prepare_solve(&query, &body) {
+        Ok(v) => v,
+        Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
+    };
+
+    let progress = Arc::new(Progress::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+
+    // Run the CPU-bound solve off the async runtime.
+    let solve_progress = Arc::clone(&progress);
+    let mut solve_task =
+        tokio::task::spawn_blocking(move || run_solve(solver, threads, top, &solve_progress));
+
+    let progress_for_ticks = Arc::clone(&progress);
+    tokio::spawn(async move {
+        let progress_event = |p: &Progress| {
+            let (done, total, phase) = p.snapshot();
+            let data = format!("{{\"done\":{done},\"total\":{total},\"phase\":{phase}}}");
+            Event::default().event("progress").data(data)
+        };
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(150));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if tx.send(Ok(progress_event(&progress_for_ticks))).await.is_err() {
+                        // Client disconnected — tell the worker threads to stop
+                        // so the abandoned solve doesn't keep all cores busy.
+                        progress_for_ticks.cancel();
+                        break;
+                    }
+                }
+                res = &mut solve_task => {
+                    // Emit a final progress frame (so the bar reaches 100%) then
+                    // the result, then close the stream.
+                    let _ = tx.send(Ok(progress_event(&progress_for_ticks))).await;
+                    match res {
+                        Ok(response) => {
+                            let data = serde_json::to_string(&response).unwrap_or_default();
+                            let _ = tx.send(Ok(Event::default().event("result").data(data))).await;
+                        }
+                        Err(_) => {
+                            let _ = tx
+                                .send(Ok(Event::default().event("error").data("solve task failed")))
+                                .await;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// A [`std::io::Write`] that forwards each write as a chunk over a blocking mpsc
+/// sender, bridging the synchronous `solve_to_writer` (run in `spawn_blocking`)
+/// into a streaming HTTP body. `blocking_send` applies natural backpressure when
+/// the client reads slowly, so server memory stays bounded.
+struct ChannelWriter {
+    tx: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    /// Flipped when the channel is closed (client disconnected) so the solver's
+    /// worker threads can stop searching instead of running to completion.
+    cancelled: Arc<AtomicBool>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tx.blocking_send(Ok(buf.to_vec())).map_err(|_| {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// POST /api/solve/stream
+///
+/// Streams every solution to the client as chunked NDJSON (one
+/// `{"solution":"..."}` per line, `application/x-ndjson`) without materializing
+/// the full solution set on the server (issue #21). The frontend pipes the
+/// response straight to a file via the File System Access API. The `top` query
+/// param is ignored — streaming always returns the complete set.
+async fn solve_stream_handler(
+    Query(query): Query<SolveQuery>,
+    Json(body): Json<SolveRequest>,
+) -> Response {
+    let (solver, threads, _top) = match prepare_solve(&query, &body) {
+        Ok(v) => v,
+        Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
+    };
+    let num_threads = if threads == 0 {
+        num_cpus::get()
+    } else {
+        threads
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(16);
+    // Shared between the writer (which trips it on a broken pipe) and the solver
+    // (whose workers check it before each branch), so an abandoned stream stops
+    // searching instead of burning every core to completion.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let writer_flag = Arc::clone(&cancelled);
+    tokio::task::spawn_blocking(move || {
+        // Buffer the per-line NDJSON writes into ~8 KB chunks before they hit the
+        // channel. `solve_to_writer` writes one solution per `write` call, which
+        // unbuffered would mean thousands of tiny `Vec<u8>` allocations and
+        // `blocking_send`s (one per solution) plus an HTTP chunk each. `BufWriter`
+        // coalesces them, cutting allocation/contention/chunking overhead. The
+        // final `BufWriter` flush is guaranteed by `solve_to_writer`, which calls
+        // `flush()?` on the writer before returning (see `parallel.rs`).
+        let writer = std::io::BufWriter::new(ChannelWriter {
+            tx,
+            cancelled: writer_flag,
+        });
+        let parallel = ParallelSolver::new(solver, Some(num_threads));
+        // Errors here are almost always the client disconnecting; the stream is
+        // already closing, so there is nothing further to report. Dropping the
+        // writer (and its sender) ends the response body.
+        let _ = parallel.solve_to_writer(writer, &cancelled);
+    });
+
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/x-ndjson; charset=utf-8".to_string(),
+        )],
+        Body::from_stream(ReceiverStream::new(rx)),
+    )
+        .into_response()
 }
 
 /// POST /api/download
@@ -687,6 +886,8 @@ pub fn create_router() -> Router {
 
     let api_routes = Router::new()
         .route("/api/solve", post(solve_handler))
+        .route("/api/solve/stream", post(solve_stream_handler))
+        .route("/api/solve/progress", post(solve_progress_handler))
         .route("/api/download", post(download_handler))
         .route("/api/validate", post(validate_handler))
         .route("/api/eval", post(eval_handler));
@@ -948,6 +1149,132 @@ mod tests {
             "top-N found_count must be the total solutions found, not the kept top-N"
         );
         assert_eq!(topn.stats.found_count, all.solutions.len());
+    }
+
+    /// Pull the concatenated `data:` payload of the first SSE frame whose
+    /// `event:` field equals `event`. Tolerant of the optional space after the
+    /// field colon. Returns `None` if no such frame is present.
+    fn extract_sse_event(text: &str, event: &str) -> Option<String> {
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            let is_match = line
+                .strip_prefix("event:")
+                .map(|v| v.trim() == event)
+                .unwrap_or(false);
+            if is_match {
+                let mut data = String::new();
+                for l in lines.by_ref() {
+                    if let Some(rest) = l.strip_prefix("data:") {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
+                        data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+                    } else if l.is_empty() {
+                        break;
+                    }
+                }
+                return Some(data);
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn test_solve_stream_endpoint_returns_all_as_ndjson() {
+        // Issue #21: /api/solve/stream streams every solution as NDJSON (one
+        // {"solution":"..."} per line). The streamed set must equal the full
+        // solution set from a normal solve.
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        let body_str = serde_json::to_string(&req_body).unwrap();
+
+        let mut app = test_app();
+        let (_, all_body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve?threads=1&top=0",
+            body_str.clone(),
+        )
+        .await;
+        let all: SolveResponse = serde_json::from_slice(&all_body).unwrap();
+
+        let mut app = test_app();
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve/stream?threads=2",
+            body_str,
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+
+        let text = String::from_utf8(body).unwrap();
+        let streamed: std::collections::HashSet<String> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).expect("each line is JSON");
+                v["solution"]
+                    .as_str()
+                    .expect("a string \"solution\" field")
+                    .to_string()
+            })
+            .collect();
+        let expected: std::collections::HashSet<String> = all.solutions.iter().cloned().collect();
+        assert!(!expected.is_empty());
+        assert_eq!(
+            streamed, expected,
+            "streamed NDJSON must contain exactly the full solution set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_solve_progress_sse_emits_progress_and_result() {
+        // Issue #22: /api/solve/progress streams SSE progress frames followed by
+        // a final `result` frame carrying the full SolveResponse.
+        let req_body = SolveRequest {
+            length: 5,
+            rows: vec![],
+        };
+        let body_str = serde_json::to_string(&req_body).unwrap();
+
+        let mut app = test_app();
+        let (status, body) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve/progress?threads=2",
+            body_str,
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::OK);
+
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            text.contains("event: progress") || text.contains("event:progress"),
+            "expected at least one progress event, got: {text}"
+        );
+
+        let result_data = extract_sse_event(&text, "result").expect("a result SSE frame");
+        let resp: SolveResponse = serde_json::from_str(&result_data).unwrap();
+        assert!(!resp.solutions.is_empty());
+        assert!(resp.stats.found_count > 0);
+        assert!(resp.recommended.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_solve_stream_rejects_bad_length() {
+        // The streaming endpoint shares request validation with /api/solve.
+        let mut app = test_app();
+        let (status, _) = send_request(
+            &mut app,
+            http::Method::POST,
+            "/api/solve/stream",
+            r#"{"length": 2, "rows": []}"#.to_string(),
+        )
+        .await;
+        assert_eq!(status, HttpStatusCode::BAD_REQUEST);
     }
 
     /// Regression test for issue #20: the server builds and frees a large

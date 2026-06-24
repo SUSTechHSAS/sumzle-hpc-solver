@@ -1,5 +1,5 @@
-import type { SolveResponse, DownloadFormat } from '../types';
-import { displayChar } from '../types';
+import type { SolveResponse, DownloadFormat, SolveProgress } from '../types';
+import { displayChar, progressPhaseLabel } from '../types';
 import { formatSpeed, formatTime } from '../utils';
 import CharacterProbability from './CharacterProbability';
 import RecommendedSolution from './RecommendedSolution';
@@ -12,21 +12,41 @@ interface ResultsProps {
   error: string | null;
   onDownload: (format: DownloadFormat) => void;
   onRetry?: () => void;
+  /** Live solve progress (issue #22); null for a plain non-streaming solve. */
+  progress?: SolveProgress | null;
 }
 
 const MAX_DISPLAY_SOLUTIONS = 500;
 
-export default function Results({ data, loading, error, onDownload, onRetry }: ResultsProps) {
+export default function Results({ data, loading, error, onDownload, onRetry, progress }: ResultsProps) {
   if (loading) {
+    // Determinate bar when we have branch-completion progress; otherwise the
+    // original indeterminate pulse (plain solve, or before the first event).
+    const live = progress && progress.total > 0 ? progress : null;
+    const pct = live ? Math.min(100, Math.round((live.done / live.total) * 100)) : null;
     return (
       <div className="results-section">
         <div className="results-loading" role="status" aria-live="polite">
           <div className="spinner" />
-          <span>正在搜索候选表达式…</span>
+          <span>
+            {live ? `${progressPhaseLabel(live.phase)}… ${pct}%` : '正在搜索候选表达式…'}
+          </span>
         </div>
         <div className="progress-bar-container">
-          <div className="progress-bar animated" />
+          {live ? (
+            <div
+              className="progress-bar determinate"
+              style={{ transform: `scaleX(${(pct ?? 0) / 100})` }}
+            />
+          ) : (
+            <div className="progress-bar animated" />
+          )}
         </div>
+        {live && (
+          <div className="progress-detail">
+            {live.done.toLocaleString()} / {live.total.toLocaleString()} 分支
+          </div>
+        )}
       </div>
     );
   }

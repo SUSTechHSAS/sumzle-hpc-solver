@@ -4,7 +4,7 @@ A high-performance solver for the [Sumzle](https://sustechhsas.github.io/Sumzle/
 
 ## About Sumzle
 
-Sumzle is a Wordle-like game for mathematical equations. Players guess equations of a given length using digits (0-9), operators (+, -, ×, ÷, %, ^), brackets, factorial (!), permutation (A), and comparison operators (=, >=). After each guess, tiles are colored green (correct position), yellow (present but wrong position), or gray (absent), just like Wordle.
+Sumzle is a Wordle-like game for mathematical equations. Players guess equations of a given length using digits (0-9), operators (+, -, ×, ÷, %, ^), brackets, factorial (!), permutation (A), and comparison operators (`=`, `>`). After each guess, tiles are colored green (correct position), yellow (present but wrong position), or gray (absent), just like Wordle.
 
 ## Features
 
@@ -13,9 +13,13 @@ Sumzle is a Wordle-like game for mathematical equations. Players guess equations
 - **Distributed computing** via TCP coordinator/worker architecture
 - **Web API server** using [axum](https://github.com/tokio-rs/axum) with REST endpoints
 - **Modern web frontend** built with React + TypeScript + Vite
+- **Top-N mode** — return only the N highest-scoring solutions with bounded memory (CLI `--top`, API `?top=`)
+- **Streaming output** — stream solutions as NDJSON to a file without ever holding the full set in memory (CLI `--output`, API `POST /api/solve/stream`)
+- **Real-time progress** — a Server-Sent Events endpoint (`POST /api/solve/progress`) reports live multi-thread search progress to drive a real progress bar
+- **Steady server memory** — the [mimalloc](https://github.com/microsoft/mimalloc) global allocator returns freed memory to the OS, so the server's resident set stays flat across many solves
 - **Behavioral consistency** with the reference JavaScript implementation
 - **Cross-platform** builds for Linux, macOS, and Windows
-- **Comprehensive test suite with 58 tests (37 Rust core + 7 API integration + 29 frontend)
+- **Comprehensive test suite** — 180 automated tests (120 Rust: unit, API, and consistency; 60 frontend)
 - **Benchmark suite** using Criterion
 - **Docker support** with multi-stage builds
 
@@ -38,7 +42,7 @@ Multi-core parallelism provides near-linear speedup with the number of cores.
 ### Prerequisites
 
 - Rust 1.82+ (install via [rustup](https://rustup.rs/))
-- Node.js 18+ and npm (for frontend development)
+- Node.js 20+ and npm (for frontend development)
 
 ### Build Backend
 
@@ -82,6 +86,8 @@ Then open http://localhost:5173 in your browser.
 
 For production, build the frontend and serve static files through the Rust server or a reverse proxy.
 
+The server uses the mimalloc allocator so its memory stays steady across many solves. On memory-constrained hosts, set `MIMALLOC_PURGE_DELAY=0` to return freed memory to the OS immediately after each request.
+
 ### Solve a puzzle (CLI)
 
 Create a JSON input file:
@@ -115,6 +121,13 @@ Run the solver:
 
 # Specific number of threads
 ./sumzle-solver solve -i puzzle.json -t 4 -f text
+
+# Top-N: keep only the 10 highest-scoring solutions (bounded memory)
+./sumzle-solver solve -i puzzle.json --top 10 -f text
+
+# Stream every solution to a file as JSON Lines (never held in memory);
+# stdout shows only the statistics
+./sumzle-solver solve -i puzzle.json -o solutions.jsonl
 ```
 
 ### Web API
@@ -142,17 +155,58 @@ curl -X POST http://localhost:3000/api/solve?threads=0 \
   }'
 ```
 
+**Query parameters:**
+
+- `threads` — worker threads (`0` = auto-detect cores, `1` = single-threaded). Default `0`.
+- `top` — return only the N highest-scoring solutions (`0` = every solution). Default `0`. Top-N uses a bounded-memory two-pass scorer; `found_count` and the character probabilities still reflect the **full** solution set, only the returned `solutions` list is capped at N.
+
 Response:
 ```json
 {
-  "solutions": ["1+2=3", "1+3=4", ...],
+  "solutions": ["1+2=3", "1+3=4"],
   "stats": {
     "searched_count": 86281,
     "found_count": 6049,
     "elapsed_ms": 37,
     "speed": 2329216
-  }
+  },
+  "char_probabilities": [
+    { "char": "=", "display": "=", "count": 6049, "probability": 100.0 }
+  ],
+  "recommended": "1+2=3",
+  "top": 0,
+  "scores": []
 }
+```
+
+When `top` > 0, `solutions` is sorted by score (descending) and `scores` holds the matching per-solution scores; `recommended` is the top-ranked solution.
+
+#### Stream solutions to a file
+
+For very large result sets, stream every solution as [NDJSON](https://ndjson.org/)
+(`application/x-ndjson`, one `{"solution":"..."}` per line) instead of buffering
+them. Server memory stays bounded regardless of the solution count. The `top`
+parameter is ignored — streaming always returns the complete set.
+
+```bash
+curl -X POST "http://localhost:3000/api/solve/stream?threads=0" \
+  -H "Content-Type: application/json" \
+  -d '{"length": 7, "rows": []}' \
+  -o solutions.ndjson
+```
+
+#### Solve with live progress (Server-Sent Events)
+
+Same request shape as `/api/solve`, but the response is an SSE stream: repeated
+`event: progress` frames with `{"done","total","phase"}` (counting completed
+search branches across the worker threads), followed by a final `event: result`
+frame carrying the full solve response. The web frontend uses this to render a
+real progress bar.
+
+```bash
+curl -N -X POST "http://localhost:3000/api/solve/progress?threads=0" \
+  -H "Content-Type: application/json" \
+  -d '{"length": 7, "rows": []}'
 ```
 
 #### Validate an equation
@@ -258,6 +312,8 @@ The frontend is a React + TypeScript application built with Vite:
 - **Puzzle Input**: Interactive Wordle-style tile interface with color-coded states
 - **Solve**: Submits puzzles to the backend API and displays results
 - **Results**: Shows solutions with statistics (count, search time, speed)
+- **Real-time progress**: Optional live progress bar driven by the SSE endpoint
+- **Stream to file**: Save the full solution set straight to disk via the File System Access API (with a download fallback)
 - **Tools**: Expression evaluator and equation validator utilities
 
 ## Testing
@@ -313,8 +369,8 @@ sumzle-hpc-solver/
 ├── benches/
 │   └── benchmark.rs
 ├── .github/workflows/
-│   ├── ci.yml              # Full CI pipeline
-│   └── pr-validation.yml   # PR checks
+│   ├── ci.yml              # Full CI pipeline (build, lint, test, benchmarks)
+│   └── codeql.yml          # CodeQL security analysis
 ├── Cargo.toml
 ├── Makefile
 ├── Dockerfile

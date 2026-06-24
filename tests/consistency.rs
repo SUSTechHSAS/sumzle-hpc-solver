@@ -1078,7 +1078,8 @@ fn test_streaming_output_matches_default_set() {
 
     let tmp = std::env::temp_dir().join("sumzle_stream_test.jsonl");
     let file = std::io::BufWriter::new(std::fs::File::create(&tmp).unwrap());
-    let (written, _searched) = ps.solve_to_writer(file).unwrap();
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let (written, _searched) = ps.solve_to_writer(file, &never).unwrap();
 
     let content = std::fs::read_to_string(&tmp).unwrap();
     let mut got: Vec<String> = content
