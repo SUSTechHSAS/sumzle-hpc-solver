@@ -244,11 +244,11 @@ textarea:focus-visible {
   margin-bottom: var(--space-md);
 }
 
-/* .puzzle-controls overrides align-items to flex-start so the row buttons
-   (.row-buttons) stay pinned to the top instead of shifting vertically to
-   re-center when the .length-control column grows taller on error. The
-   mobile media query below sets align-items: stretch + flex-direction:
-   column, which takes precedence there. .solve-options keeps center. */
+/* Pin line-1 children (.length-control, .row-buttons) to the top so they
+   can't re-center vertically if a future change ever puts the dynamic
+   .length-error on the same row. Today the error takes its own line via
+   width: 100% so this is defense-in-depth, not a current fix. The
+   mobile media query overrides this with align-items: stretch + column. */
 .puzzle-controls {
   align-items: flex-start;
 }
@@ -260,15 +260,7 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--fluent-blue) 6%, var(--color-surface));
 }
 
-.length-control {
-  /* Column so the label+input row and the inline error stack vertically,
-     without the error forcing sibling controls (.row-buttons) to wrap. */
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
-
-.length-control-row,
+.length-control,
 .option-control {
   display: flex;
   align-items: center;
@@ -324,6 +316,19 @@ textarea:focus-visible {
      errors read at the same size across the left panel. */
   font-size: 0.82rem;
   overflow-wrap: anywhere;
+  /* The error is a direct child of .puzzle-controls (NOT inside
+     .length-control), placed after .row-buttons. width: 100% forces it onto
+     its own line below the input + buttons row, so it spans the full panel
+     width and uses the empty space on the right instead of wrapping into a
+     narrow column under the input (issue #33 aesthetic fix). Because it
+     comes AFTER .row-buttons in source order, the buttons stay on line 1
+     and never shift when the error appears or changes length.
+     width: 100% (not flex-basis: 100%) is deliberate: on mobile
+     .puzzle-controls switches to flex-direction: column, where
+     flex-basis applies to the main axis (height) and could stretch the
+     element vertically. width: 100% targets the cross axis and behaves
+     correctly in both row (desktop) and column (mobile) layouts. */
+  width: 100%;
 }
 
 .option-hint {
@@ -516,17 +521,33 @@ textarea:focus-visible {
     flex-direction: column;
   }
 
-  .length-control-row,
+  .length-control,
   .row-buttons {
     justify-content: center;
   }
 
-  /* The label+input row is centered on mobile, so the inline error must
-     center too — otherwise a left-aligned error reads as misaligned with
-     the input directly above it. Desktop keeps the default left align
-     because the input row there is left-aligned. */
+  /* On mobile .puzzle-controls is a column. The DOM source order is
+     .length-control → .row-buttons → .length-error (error last, so it
+     can't push the buttons on desktop). In a column that would render the
+     buttons BETWEEN the input and its error — disjointed. Use `order` to
+     visually place the error directly under the input, with the buttons
+     last. Desktop is unaffected (it's a row with flex-wrap, order doesn't
+     change the line-1 layout). */
+  .length-control {
+    order: 1;
+  }
+
   .length-error {
+    order: 2;
+    /* The label+input row is centered on mobile, so the inline error must
+       center too — otherwise a left-aligned error reads as misaligned with
+       the input directly above it. Desktop keeps the default left align
+       because the input row there is left-aligned. */
     text-align: center;
+  }
+
+  .row-buttons {
+    order: 3;
   }
 
   .option-control {

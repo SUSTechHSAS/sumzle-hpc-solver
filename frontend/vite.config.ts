@@ -1,5 +1,5 @@
-/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
+import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
@@ -14,5 +14,11 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // Playwright layout tests live in ./layout-tests and run via
+    // `npm run test:layout` (a real Chromium engine). Exclude them from
+    // vitest so `npm test` (jsdom) doesn't try to load them. Extend
+    // configDefaults.exclude rather than duplicating it, so any future
+    // vitest default excludes are inherited automatically.
+    exclude: [...configDefaults.exclude, 'layout-tests/**'],
   },
 })
