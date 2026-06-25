@@ -86,6 +86,7 @@ enum Commands {
         parallel: bool,
     },
     /// Start the web API server
+    #[cfg(feature = "server")]
     Serve {
         /// Host to bind to
         // `long` only: a `short` here would be `-h`, which collides with clap's
@@ -366,6 +367,7 @@ fn main() -> Result<()> {
             }
         }
 
+        #[cfg(feature = "server")]
         Commands::Serve { host, port } => {
             let addr = format!("{}:{}", host, port);
             println!("Starting web server on {}", addr);

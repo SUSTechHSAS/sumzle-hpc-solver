@@ -228,7 +228,7 @@ fn bench_char_probability(c: &mut Criterion) {
         let solutions: Vec<String> = (1..=54)
             .map(|i| format!("{}+{}={}", i % 5 + 1, i % 3, (i % 5 + 1) + (i % 3)))
             .collect();
-        b.iter(|| sumzle_solver::server::compute_char_probabilities(black_box(&solutions)));
+        b.iter(|| sumzle_solver::api::compute_char_probabilities(black_box(&solutions)));
     });
 
     group.bench_function("large_solution_set", |b| {
@@ -246,7 +246,7 @@ fn bench_char_probability(c: &mut Criterion) {
                 )
             })
             .collect();
-        b.iter(|| sumzle_solver::server::compute_char_probabilities(black_box(&solutions)));
+        b.iter(|| sumzle_solver::api::compute_char_probabilities(black_box(&solutions)));
     });
 
     group.finish();
@@ -259,20 +259,16 @@ fn bench_recommended_solution(c: &mut Criterion) {
         let gk = empty_gk(3);
         let solver = Solver::new(3, gk);
         let (results, _) = solver.solve();
-        let probs = sumzle_solver::server::compute_char_probabilities(&results);
-        b.iter(|| {
-            sumzle_solver::server::compute_recommended(black_box(&results), black_box(&probs))
-        });
+        let probs = sumzle_solver::api::compute_char_probabilities(&results);
+        b.iter(|| sumzle_solver::api::compute_recommended(black_box(&results), black_box(&probs)));
     });
 
     group.bench_function("large_set", |b| {
         let gk = empty_gk(5);
         let solver = Solver::new(5, gk);
         let (results, _) = solver.solve();
-        let probs = sumzle_solver::server::compute_char_probabilities(&results);
-        b.iter(|| {
-            sumzle_solver::server::compute_recommended(black_box(&results), black_box(&probs))
-        });
+        let probs = sumzle_solver::api::compute_char_probabilities(&results);
+        b.iter(|| sumzle_solver::api::compute_recommended(black_box(&results), black_box(&probs)));
     });
 
     group.finish();

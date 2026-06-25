@@ -8,6 +8,7 @@ import type {
   EvalResponse,
   DownloadFormat,
 } from './types';
+import { invoke, isTauri, Channel } from '@tauri-apps/api/core';
 
 const API_BASE = '/api';
 
@@ -25,6 +26,10 @@ export async function solvePuzzle(
 ): Promise<SolveResponse> {
   const threads = options.threads ?? 0;
   const top = options.top ?? 0;
+  // Standalone app (Tauri): call the embedded Rust solver over IPC — no HTTP.
+  if (isTauri()) {
+    return invoke<SolveResponse>('solve', { length, rows, threads, top });
+  }
   const params = new URLSearchParams({ threads: String(threads) });
   if (top > 0) {
     params.set('top', String(top));
@@ -113,6 +118,9 @@ export function downloadResults(
 }
 
 export async function validateEquation(equation: string): Promise<ValidateResponse> {
+  if (isTauri()) {
+    return { valid: await invoke<boolean>('validate', { equation }) };
+  }
   const body: ValidateRequest = { equation };
   const res = await fetch(`${API_BASE}/validate`, {
     method: 'POST',
@@ -124,6 +132,9 @@ export async function validateEquation(equation: string): Promise<ValidateRespon
 }
 
 export async function evaluateExpression(expression: string): Promise<EvalResponse> {
+  if (isTauri()) {
+    return { result: await invoke<string | null>('eval', { expression }) };
+  }
   const body: EvalRequest = { expression };
   const res = await fetch(`${API_BASE}/eval`, {
     method: 'POST',
@@ -176,6 +187,19 @@ export async function solveWithProgress(
   options: SolveOptions = {},
   onProgress?: (progress: SolveProgress) => void,
 ): Promise<SolveResponse> {
+  // Standalone app (Tauri): stream progress over an IPC Channel, then resolve
+  // with the final result — same contract as the SSE path below.
+  if (isTauri()) {
+    const channel = new Channel<SolveProgress>();
+    if (onProgress) channel.onmessage = onProgress;
+    return invoke<SolveResponse>('solve_progress', {
+      length,
+      rows,
+      threads: options.threads ?? 0,
+      top: options.top ?? 0,
+      onProgress: channel,
+    });
+  }
   const res = await fetch(`${API_BASE}/solve/progress?${solveParams(options, true)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -296,6 +320,12 @@ export async function solveStreamToFile(
   options: SolveOptions = {},
   onCount?: (count: number) => void,
 ): Promise<StreamToFileResult> {
+  // The streaming endpoint and the File System Access API are browser-only.
+  // In the standalone app, file export will go through the Tauri dialog/fs
+  // plugins (planned); fail clearly for now instead of hitting a missing server.
+  if (isTauri()) {
+    throw new Error('文件导出暂未在 App 中支持');
+  }
   const suggestedName = `sumzle_solutions_${Math.floor(Date.now() / 1000)}.ndjson`;
 
   // Open the save dialog first, while we still have user activation.

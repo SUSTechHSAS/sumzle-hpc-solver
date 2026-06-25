@@ -12,3 +12,11 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 sumzle-hpc-solver/
+
+# Tauri (Android Gradle project + build outputs are regenerated on the build
+# host by `cargo tauri android init` / `build`; the generated icons are too).
+src-tauri/target/
+src-tauri/gen/
+
+# Fetched APKs (scp'd back from the remote build host).
+/build/

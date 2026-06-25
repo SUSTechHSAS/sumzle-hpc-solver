@@ -1,0 +1,99 @@
+name: Android
+
+# Builds the standalone Tauri Android app. Heavy (Rust + NDK + Gradle), so it
+# only runs on main/tags, manual dispatch, and PRs that touch the mobile crate,
+# the solver core, the frontend, or this workflow.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'frontend/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: '27.2.12479018'
+
+jobs:
+  build-apk:
+    name: Build APK (${{ matrix.abi }}, debug)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: x86_64 # emulators / waydroid
+            rust_target: x86_64-linux-android
+          - abi: aarch64 # physical phones
+            rust_target: aarch64-linux-android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Rust (+ Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes 2>/dev/null | "$SDKMANAGER" \
+            "ndk;${NDK_VERSION}" "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo (+ cargo-tauri binary, target dir)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-tauri
+            target
+          key: ${{ runner.os }}-android-${{ matrix.abi }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-android-${{ matrix.abi }}-
+
+      - name: Install cargo-tauri CLI
+        # The cargo-tauri CLI (not the npm CLI) is required: the npm CLI makes
+        # Gradle's rust task invoke `node tauri …`, which fails to resolve.
+        run: command -v cargo-tauri >/dev/null 2>&1 || cargo install tauri-cli --version "^2" --locked
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Initialize Android project
+        run: cargo tauri android init
+
+      - name: Build debug APK
+        run: cargo tauri android build --debug --apk --target ${{ matrix.abi }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sumzle-solver-${{ matrix.abi }}-debug-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*-debug.apk
+          if-no-files-found: error

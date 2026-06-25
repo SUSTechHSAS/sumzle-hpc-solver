@@ -17,13 +17,24 @@
 // immediately). Defined here, in the library crate, rather than in `main.rs` so
 // the same allocator backs the binary *and* every test/bench binary — which is
 // what lets the memory regression test in `server` measure the real allocator.
+//
+// Gated to non-Android targets: the rationale is server-RSS-only, and the Tauri
+// mobile build (Cargo.toml drops the mimalloc dependency on Android) uses the
+// system allocator to avoid cross-compiling mimalloc's bundled C with the NDK.
+#[cfg(not(target_os = "android"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+pub mod api;
 pub mod constraints;
 pub mod distributed;
 pub mod evaluator;
 pub mod parallel;
+// HTTP web server (axum). Behind the `server` feature so the Tauri mobile crate
+// can depend on this crate with `default-features = false` and never compile
+// axum/tokio/tower into the Android binary. The framework-agnostic solve core
+// lives in `api` (always compiled).
+#[cfg(feature = "server")]
 pub mod server;
 pub mod solver;
 pub mod types;

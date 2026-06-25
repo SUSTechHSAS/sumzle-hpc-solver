@@ -1126,7 +1126,7 @@ fn test_top_n_large_n_equals_full_set() {
 
 #[test]
 fn test_top_n_best_matches_compute_recommended() {
-    use sumzle_solver::server::{compute_char_probabilities, compute_recommended};
+    use sumzle_solver::api::{compute_char_probabilities, compute_recommended};
 
     let length = 6;
 
