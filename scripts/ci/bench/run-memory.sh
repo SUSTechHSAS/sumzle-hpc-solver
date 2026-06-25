@@ -38,7 +38,7 @@ echo "| Length | Mode | Peak RSS | Wall Time |" >> $GITHUB_STEP_SUMMARY
 echo "|--------|------|----------|-----------|" >> $GITHUB_STEP_SUMMARY
 while IFS=: read -r LEN MODE PEAK WALL; do
   if [ "$PEAK" -ge 1048576 ]; then
-    RSS_HR="$(awk "BEGIN {printf \"%.1f MB\", $PEAK/1048576}")"
+    RSS_HR="$(awk "BEGIN {printf \"%.1f GB\", $PEAK/1048576}")"
   elif [ "$PEAK" -ge 1024 ]; then
     RSS_HR="$(awk "BEGIN {printf \"%.1f MB\", $PEAK/1024}")"
   else

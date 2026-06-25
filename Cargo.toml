@@ -55,9 +55,11 @@ tokio-stream = { version = "0.1", optional = true }
 # process builds and frees large solution sets each request; glibc's malloc
 # retains those freed pages in per-thread arenas, so RSS grows and never comes
 # back down. mimalloc decommits freed memory back to the OS. Restricted to
-# non-Android targets — the rationale is server-RSS-only, and excluding it keeps
-# mimalloc's bundled C off the Android NDK cross-compile. See `lib.rs`.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# non-mobile targets — the rationale is server-RSS-only, and excluding it keeps
+# mimalloc's bundled C off the Android NDK cross-compile and the iOS toolchain
+# (where the system malloc is preferred for background-suspend cooperation).
+# See `lib.rs`.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]

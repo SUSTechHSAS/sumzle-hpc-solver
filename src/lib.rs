@@ -18,10 +18,12 @@
 // the same allocator backs the binary *and* every test/bench binary — which is
 // what lets the memory regression test in `server` measure the real allocator.
 //
-// Gated to non-Android targets: the rationale is server-RSS-only, and the Tauri
-// mobile build (Cargo.toml drops the mimalloc dependency on Android) uses the
-// system allocator to avoid cross-compiling mimalloc's bundled C with the NDK.
-#[cfg(not(target_os = "android"))]
+// Gated to non-mobile targets: the rationale is server-RSS-only, and the Tauri
+// mobile build (Cargo.toml drops the mimalloc dependency on Android and iOS)
+// uses the system allocator — both to avoid cross-compiling mimalloc's bundled
+// C with the NDK, and because iOS's malloc integrates with the OS background-
+// suspend memory pressure system in ways mimalloc would bypass.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -17,9 +17,12 @@ echo "| Benchmark Group | Benchmark | Mean Time |" >> $GITHUB_STEP_SUMMARY
 echo "|----------------|-----------|-----------|" >> $GITHUB_STEP_SUMMARY
 
 # Extract benchmark results from criterion output
+# Criterion prints time: [lower estimate upper] (three values + units).
+# We want the middle (estimate), so awk field $3 + $4, NOT $1 + $2
+# (which would be the lower bound of the confidence interval).
 grep -E '^\S+.*time:\s+\[' criterion-output.txt | while IFS= read -r LINE; do
   BENCH_NAME=$(echo "$LINE" | sed -E 's/\s+time:.*//')
-  MEAN_TIME=$(echo "$LINE" | sed -E 's/.*time:\s+\[\s*([^]]+)\].*/\1/' | awk '{print $1, $2}')
+  MEAN_TIME=$(echo "$LINE" | sed -E 's/.*time:\s+\[\s*([^]]+)\].*/\1/' | awk '{print $3, $4}')
   GROUP=$(echo "$BENCH_NAME" | cut -d'/' -f1)
   BENCH=$(echo "$BENCH_NAME" | cut -d'/' -f2-)
   echo "| $GROUP | $BENCH | $MEAN_TIME |" >> $GITHUB_STEP_SUMMARY
