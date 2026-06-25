@@ -20,3 +20,12 @@ src-tauri/gen/
 
 # Fetched APKs (scp'd back from the remote build host).
 /build/
+
+# Android release signing material — NEVER commit. The keystore + its base64
+# are secrets; store the base64 in GitHub Actions secrets and back up the
+# keystore file somewhere safe (losing it means you can't ship app updates).
+# `*.keystore*` also covers the .base64 and .creds.txt sidecars.
+*.keystore*
+*.jks
+keystore.properties
+
