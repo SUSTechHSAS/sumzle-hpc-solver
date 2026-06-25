@@ -5,6 +5,17 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // Tauri's Android system WebView can be very old. Huawei WebView 11 on
+    // Android 10 (SDK 29) can't parse the logical-assignment operators
+    // (`??=`/`||=`/`&&=`) esbuild emits at Vite's modern default target, so the
+    // app loaded to a blank screen with "Uncaught SyntaxError: Unexpected
+    // token '='". When building for Tauri, lower the esbuild target to es2015
+    // so that modern syntax is transpiled down; the plain web build keeps
+    // Vite's modern default (`undefined` → Vite's built-in default target).
+    // Tauri sets TAURI_ENV_PLATFORM while running the beforeBuildCommand.
+    target: process.env.TAURI_ENV_PLATFORM ? 'es2015' : undefined,
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:3000',
