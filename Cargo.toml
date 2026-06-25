@@ -7,6 +7,13 @@ description = "High-performance Sumzle puzzle solver with multi-core and distrib
 license = "MIT"
 repository = "https://github.com/sumzle-solver/sumzle-solver"
 
+# Workspace: the root crate (`sumzle-solver`, lib + CLI/server bin) plus the
+# Tauri mobile app crate in `src-tauri/`, which depends on this crate with
+# `default-features = false` to keep axum/tokio out of the Android binary.
+[workspace]
+members = [".", "src-tauri"]
+resolver = "2"
+
 [[bin]]
 name = "sumzle-solver"
 path = "src/main.rs"
@@ -16,27 +23,43 @@ name = "benchmark"
 harness = false
 path = "benches/benchmark.rs"
 
+[features]
+default = ["server"]
+# The axum web server and its async stack (issue #22/#21 streaming endpoints).
+# Enabled by default — the CLI `serve` command and the web frontend need it —
+# but disabled by the Tauri mobile crate, which depends on this crate with
+# `default-features = false` so the Android build never compiles axum/tokio/
+# tower. The framework-agnostic solve/validate/eval core lives in `api.rs`
+# (always compiled); only the HTTP glue in `server.rs` sits behind this flag.
+server = ["dep:axum", "dep:tower-http", "dep:tokio", "dep:tokio-stream"]
+
 [dependencies]
 rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "1.0"
 log = "0.4"
 env_logger = "0.11"
 num_cpus = "1.16"
-axum = "0.8"
-tower-http = { version = "0.6", features = ["cors", "fs"] }
-# Bridges a tokio mpsc channel into a `Stream` for the SSE progress endpoint
-# and the chunked NDJSON solution-stream endpoint.
-tokio-stream = "0.1"
-# Returning-friendly global allocator. The long-running `serve` process builds
-# and frees large solution sets each request; glibc's default malloc retains
-# those freed pages in per-thread arenas, so RSS grows and never comes back
-# down across solves (issue #20). mimalloc decommits freed memory back to the
-# OS, keeping server memory steady. Cross-platform (Linux/macOS/Windows).
+# Web-server-only dependencies, gated behind the `server` feature above.
+# `tokio-stream` bridges a tokio mpsc channel into a `Stream` for the SSE
+# progress endpoint and the chunked NDJSON solution-stream endpoint.
+tokio = { version = "1", features = ["full"], optional = true }
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["cors", "fs"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+# Returning-friendly global allocator (issue #20): the long-running `serve`
+# process builds and frees large solution sets each request; glibc's malloc
+# retains those freed pages in per-thread arenas, so RSS grows and never comes
+# back down. mimalloc decommits freed memory back to the OS. Restricted to
+# non-mobile targets — the rationale is server-RSS-only, and excluding it keeps
+# mimalloc's bundled C off the Android NDK cross-compile and the iOS toolchain
+# (where the system malloc is preferred for background-suspend cooperation).
+# See `lib.rs`.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
@@ -48,6 +71,17 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Used only by the Linux memory regression test to query the real page size
 # (libc::sysconf(_SC_PAGESIZE)) instead of assuming 4 KiB.
 libc = "0.2"
+
+[profile.dev]
+# Strip DWARF debuginfo from dev builds. The Android debug `.so` is otherwise
+# ~120 MB (debuginfo from the whole statically-linked Rust tree: tauri/wry/etc.),
+# which makes the APK impractical to install/iterate on in waydroid; stripped it
+# is ~20 MB and keeps the symbol table (logcat backtraces stay readable). This is
+# workspace-wide — it can't be scoped to the Android target alone, since the
+# Tauri mobile build overrides per-target rustflags. The only desktop effect is
+# that debug backtraces lose source line numbers (set `debug = true` locally for
+# a full debugger session).
+strip = "debuginfo"
 
 [profile.release]
 opt-level = 3

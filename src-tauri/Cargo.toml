@@ -1,0 +1,31 @@
+[package]
+name = "sumzle-solver-tauri"
+version = "0.1.0"
+description = "Sumzle Solver — standalone mobile/desktop app"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+
+# The Tauri app library. `cdylib`/`staticlib` are what the Android (and iOS)
+# native build links; `rlib` lets the thin `main.rs` binary call `run()` on
+# desktop.
+[lib]
+name = "sumzle_solver_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "sumzle-solver-tauri"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+
+# The solver core, with the web stack (axum/tokio/tower) compiled out — the app
+# calls the solver directly over Tauri IPC, no in-process HTTP server.
+sumzle-solver = { path = "..", default-features = false }

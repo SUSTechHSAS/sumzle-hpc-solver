@@ -1,0 +1,182 @@
+name: Android
+
+# Builds the standalone Tauri Android app. Heavy (Rust + NDK + Gradle), so it
+# only runs on main/tags, manual dispatch, and PRs that touch the mobile crate,
+# the solver core, the frontend, or this workflow.
+#
+#   * push / PR / dispatch  -> debug APKs, uploaded as build artifacts.
+#   * v* tags               -> signed release APKs, uploaded as artifacts AND
+#                              attached to the GitHub Release that ci.yml makes.
+#
+# Release signing reads four repo secrets — ANDROID_KEYSTORE_BASE64,
+# ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. If the
+# keystore secret is absent (e.g. a fork tag), the build falls back to a debug
+# APK so the workflow never hard-fails.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'frontend/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/ci/android-inject-signing.sh'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: '27.2.12479018'
+
+jobs:
+  build-apk:
+    name: Build APK (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    # Tag builds attach the signed APK to the GitHub Release, which needs write.
+    # On push/PR the attach step is skipped, and fork-PR tokens stay read-only
+    # regardless, so this is only ever exercised by trusted tag builds.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: x86_64 # emulators / waydroid
+            rust_target: x86_64-linux-android
+          - abi: aarch64 # physical phones
+            rust_target: aarch64-linux-android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Signed release on a v* tag when the keystore secret is present; debug
+      # otherwise. `flag` is the cargo-tauri profile switch ("" = release).
+      - name: Determine build profile
+        id: profile
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* && -n "$KEYSTORE_B64" ]]; then
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=debug" >> "$GITHUB_OUTPUT"
+            echo "flag=--debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Rust (+ Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes 2>/dev/null | "$SDKMANAGER" \
+            "ndk;${NDK_VERSION}" "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo (+ cargo-tauri binary, target dir)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-tauri
+            target
+          key: ${{ runner.os }}-android-${{ matrix.abi }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-android-${{ matrix.abi }}-
+
+      - name: Install cargo-tauri CLI
+        # The cargo-tauri CLI (not the npm CLI) is required: the npm CLI makes
+        # Gradle's rust task invoke `node tauri …`, which fails to resolve.
+        run: command -v cargo-tauri >/dev/null 2>&1 || cargo install tauri-cli --version "^2" --locked
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Initialize Android project
+        run: cargo tauri android init
+
+      # Release only: materialize the keystore from secrets and wire signing
+      # into the (freshly generated) Gradle script.
+      - name: Configure release signing
+        if: steps.profile.outputs.kind == 'release'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/sumzle-release.keystore"
+          echo "$KEYSTORE_B64" | base64 -d > "$KS"
+          cat > src-tauri/gen/android/keystore.properties <<EOF
+          storeFile=$KS
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          scripts/ci/android-inject-signing.sh
+
+      - name: Build ${{ steps.profile.outputs.kind }} APK
+        run: cargo tauri android build ${{ steps.profile.outputs.flag }} --apk --target ${{ matrix.abi }}
+
+      # Find the produced APK (path/name vary by profile) and give it a stable,
+      # ABI-tagged name for both the artifact and the release asset.
+      - name: Stage APK
+        id: stage
+        run: |
+          set -euo pipefail
+          KIND="${{ steps.profile.outputs.kind }}"
+          SRC=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-${KIND}.apk" | head -1)
+          if [ -z "$SRC" ]; then
+            echo "error: no ${KIND} APK produced; outputs were:" >&2
+            find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' >&2 || true
+            exit 1
+          fi
+          OUT="sumzle-solver-${{ matrix.abi }}-${KIND}.apk"
+          mkdir -p dist-apk
+          cp "$SRC" "dist-apk/$OUT"
+          echo "path=dist-apk/$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sumzle-solver-${{ matrix.abi }}-${{ steps.profile.outputs.kind }}-apk
+          path: ${{ steps.stage.outputs.path }}
+          if-no-files-found: error
+
+      # Tag builds: attach the signed APK to the GitHub Release ci.yml creates
+      # for this tag (action-gh-release appends assets to the existing release).
+      - name: Attach APK to release
+        if: steps.profile.outputs.kind == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.stage.outputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

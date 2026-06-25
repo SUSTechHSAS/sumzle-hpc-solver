@@ -15,7 +15,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -24,68 +23,19 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-use crate::evaluator;
+// The framework-agnostic request/response types and the solve/validate/eval
+// core live in `crate::api` (shared with the Tauri mobile commands). This
+// module is only the HTTP glue around them.
+use crate::api::{self, CharProbability, SolveRequest, SolveResponse};
 use crate::parallel::{ParallelSolver, Progress};
-use crate::solver::Solver;
-use crate::types::*;
+use crate::types::SolverStats;
 
 // ---------------------------------------------------------------------------
 // API request / response types
 // ---------------------------------------------------------------------------
 
-/// A single guess row in the API request, containing tiles
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolveRow {
-    /// The tiles in this guess row
-    pub tiles: Vec<SolveTile>,
-}
-
-/// A single tile in an API request row
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolveTile {
-    /// The character at this position (may be empty string for blank tiles)
-    pub char: String,
-    /// The state: "correct", "present", or "empty"
-    pub state: String,
-}
-
-impl SolveRow {
-    /// Convert an API request row into an internal GuessRow.
-    /// Tiles with empty `char` fields are treated as having `Empty` state
-    /// since they provide no constraint information.
-    fn to_guess_row(&self) -> GuessRow {
-        self.tiles
-            .iter()
-            .map(|t| {
-                let ch = t.char.chars().next().unwrap_or('\0');
-                let state = if ch == '\0' {
-                    // Blank tile (empty char) always means no constraint
-                    TileState::Empty
-                } else {
-                    parse_tile_state(&t.state)
-                };
-                Tile { char: ch, state }
-            })
-            .collect()
-    }
-}
-
-fn parse_tile_state(s: &str) -> TileState {
-    match s.to_lowercase().as_str() {
-        "correct" | "green" | "g" => TileState::Correct,
-        "present" | "yellow" | "y" => TileState::Present,
-        _ => TileState::Empty,
-    }
-}
-
-/// Request body for the solve endpoint
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolveRequest {
-    /// Expression length to solve for
-    pub length: usize,
-    /// Guess rows providing constraints (each row has a `tiles` array)
-    pub rows: Vec<SolveRow>,
-}
+// `SolveRow`, `SolveTile`, and `SolveRequest` now live in `crate::api` (shared
+// with the Tauri mobile commands); imported via `use crate::api::...` above.
 
 /// Query parameters for the solve endpoint
 #[derive(Debug, Clone, Deserialize)]
@@ -99,39 +49,7 @@ pub struct SolveQuery {
     pub top: usize,
 }
 
-/// Character probability entry
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CharProbability {
-    /// The character
-    pub char: String,
-    /// Display character (e.g. × for *, ÷ for /)
-    pub display: String,
-    /// Number of solutions containing this character
-    pub count: usize,
-    /// Percentage of solutions containing this character
-    pub probability: f64,
-}
-
-/// Response body for the solve endpoint
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SolveResponse {
-    /// Valid solutions found — every solution, or the top-N ranked by score
-    /// (descending) when `top` was requested.
-    pub solutions: Vec<String>,
-    /// Solver statistics
-    pub stats: SolverStats,
-    /// Character probabilities (how often each char appears across solutions)
-    pub char_probabilities: Vec<CharProbability>,
-    /// Recommended solution (highest probability score)
-    pub recommended: Option<String>,
-    /// The top-N value used (0 means all solutions were returned).
-    #[serde(default)]
-    pub top: usize,
-    /// Score of each entry in `solutions`, aligned by index. Empty unless
-    /// `top` > 0 (in which case `solutions` is sorted by it, descending).
-    #[serde(default)]
-    pub scores: Vec<f64>,
-}
+// `CharProbability` and `SolveResponse` now live in `crate::api`.
 
 /// Query parameters for the download endpoint
 #[derive(Debug, Clone, Deserialize)]
@@ -205,305 +123,37 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-// ---------------------------------------------------------------------------
-// Character probability computation
-// ---------------------------------------------------------------------------
-
-/// Map internal solver characters to their display representations
-fn display_char(ch: char) -> String {
-    match ch {
-        '*' => "×".to_string(),
-        '/' => "÷".to_string(),
-        _ => ch.to_string(),
-    }
-}
-
-/// Build the sorted [`CharProbability`] list from per-character solution counts
-/// and the total number of solutions.
-///
-/// `char_counts` yields `(char, count)` pairs where `count` is how many of the
-/// `total` solutions contain that character. Shared by
-/// [`compute_char_probabilities`] (which derives the counts from a materialized
-/// solution list) and the top-N path (which gets them from the solver's
-/// `CountSink`, computed over the full solution set rather than the kept
-/// top-N). Sorted by probability descending, then character ascending.
-fn char_probabilities_from_counts(
-    char_counts: impl IntoIterator<Item = (char, usize)>,
-    total: usize,
-) -> Vec<CharProbability> {
-    if total == 0 {
-        return Vec::new();
-    }
-
-    let total = total as f64;
-    let mut probs: Vec<CharProbability> = char_counts
-        .into_iter()
-        .map(|(ch, count)| CharProbability {
-            char: ch.to_string(),
-            display: display_char(ch),
-            count,
-            probability: (count as f64 / total) * 100.0,
-        })
-        .collect();
-
-    // Sort by probability descending, then by char ascending
-    probs.sort_by(|a, b| {
-        b.probability
-            .partial_cmp(&a.probability)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.char.cmp(&b.char))
-    });
-
-    probs
-}
-
-/// Compute character probabilities from a list of solutions.
-///
-/// For each unique character that appears in any solution, we count how many
-/// solutions contain that character and express it as a percentage of total
-/// solutions. Results are sorted by probability descending, then alphabetically.
-pub fn compute_char_probabilities(solutions: &[String]) -> Vec<CharProbability> {
-    if solutions.is_empty() {
-        return Vec::new();
-    }
-
-    let mut char_counts: HashMap<char, usize> = HashMap::new();
-
-    let mut seen = std::collections::HashSet::new();
-    for sol in solutions {
-        seen.clear();
-        for ch in sol.chars() {
-            if seen.insert(ch) {
-                *char_counts.entry(ch).or_insert(0) += 1;
-            }
-        }
-    }
-
-    char_probabilities_from_counts(char_counts, solutions.len())
-}
-
-/// Compute the recommended solution based on character probability scores.
-///
-/// The scoring algorithm:
-/// 1. Base score = sum of probabilities of all unique characters in the solution
-/// 2. Bonus: +50 points per character from the top 5 most probable characters
-///    that appears in the solution
-///
-/// The solution with the highest score is recommended.
-pub fn compute_recommended(solutions: &[String], probs: &[CharProbability]) -> Option<String> {
-    if solutions.is_empty() {
-        return None;
-    }
-
-    // Build a map from char to probability for quick lookup
-    let prob_map: HashMap<char, f64> = probs
-        .iter()
-        .filter_map(|p| p.char.chars().next().map(|c| (c, p.probability)))
-        .collect();
-
-    // Get top 5 characters by probability
-    let top_chars: std::collections::HashSet<char> = probs
-        .iter()
-        .take(5)
-        .filter_map(|p| p.char.chars().next())
-        .collect();
-
-    let mut best_solution: Option<String> = None;
-    let mut best_score: f64 = f64::NEG_INFINITY;
-
-    let mut seen = std::collections::HashSet::new();
-    for sol in solutions {
-        seen.clear();
-        let mut score: f64 = 0.0;
-
-        for ch in sol.chars() {
-            if seen.insert(ch) {
-                // Add probability score
-                score += prob_map.get(&ch).copied().unwrap_or(0.0);
-                // Bonus for top 5 characters
-                if top_chars.contains(&ch) {
-                    score += 50.0;
-                }
-            }
-        }
-
-        if score > best_score {
-            best_score = score;
-            best_solution = Some(sol.clone());
-        }
-    }
-
-    best_solution
-}
+// Character-probability computation (`compute_char_probabilities`,
+// `compute_recommended`, and helpers) now lives in `crate::api`.
 
 // ---------------------------------------------------------------------------
 // API handlers
 // ---------------------------------------------------------------------------
 
-/// Minimum expression length supported by the solver. There is intentionally
-/// no maximum: the search engine handles any length, so the web API enforces
-/// only this lower bound (very large lengths can be slow and memory-hungry).
-const MIN_SOLVE_LENGTH: usize = 3;
-/// Maximum number of threads allowed for a single solve request
-const MAX_THREADS: usize = 256;
-
-/// Validate a solve request and build the solver, shared by `/api/solve`,
-/// `/api/solve/progress`, and `/api/solve/stream`. On success returns the
-/// prepared `Solver`, the clamped thread count, and the requested top-N value;
-/// on failure returns the HTTP status and error message the caller should send.
-fn prepare_solve(
-    query: &SolveQuery,
-    body: &SolveRequest,
-) -> Result<(Solver, usize, usize), (StatusCode, String)> {
-    // Validate length: only a lower bound is enforced — the search engine
-    // supports arbitrary expression lengths, so there is no upper limit.
-    if body.length < MIN_SOLVE_LENGTH {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Length must be at least {}, got {}",
-                MIN_SOLVE_LENGTH, body.length
-            ),
-        ));
-    }
-
-    // Clamp thread count to a reasonable maximum.
-    let threads = query.threads.min(MAX_THREADS);
-    let top = query.top;
-
-    // Convert API rows to internal GuessRow format and build global knowledge.
-    let guess_rows: Vec<GuessRow> = body.rows.iter().map(|r| r.to_guess_row()).collect();
-    let gk = match GlobalKnowledge::from_guess_rows(body.length, &guess_rows) {
-        Ok(gk) => gk,
-        Err(e) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Invalid constraints: {}", e),
-            ));
-        }
-    };
-
-    Ok((Solver::new(body.length, gk), threads, top))
-}
-
-/// Run a solve and assemble the full [`SolveResponse`].
-///
-/// Shared by the plain `/api/solve` handler and the SSE `/api/solve/progress`
-/// handler so scores, character probabilities, the recommendation, and
-/// `found_count` are computed identically. `progress` receives branch-completion
-/// updates during the parallel search (pass a fresh [`Progress`] when nothing is
-/// observing it). This is synchronous and CPU-bound; callers on the async
-/// runtime that must not block should invoke it inside `spawn_blocking`.
-fn run_solve(solver: Solver, threads: usize, top: usize, progress: &Progress) -> SolveResponse {
-    let start = std::time::Instant::now();
-
-    // `scores` is populated (aligned with `solutions`) only in top-N mode.
-    // `full_char_probs` is `Some` only in top-N mode, where the character
-    // probabilities must be computed over the *entire* solution set — the
-    // returned `solutions` are just the ranked top-N subset, so their own
-    // frequencies would be misleading. In the other modes `results` already
-    // holds every solution, so the probabilities are derived from it below.
-    //
-    // `found_count` is the total number of solutions found across the *full*
-    // search. In top-N mode `results` is only the ranked top-N subset, so its
-    // length would under-report the total — the count comes from the pass-1
-    // `CountSink::total` instead (matching how `searched_count` and the
-    // character probabilities already report over the full set). See issue #19.
-    let (results, scores, full_char_probs, searched_count, found_count) = if top > 0 {
-        // Top-N: bounded-memory two-pass scoring through the shared, tested
-        // `solve_top_n` — identical scoring to `compute_recommended`. Routing
-        // both the single- and multi-threaded cases through it keeps the
-        // ranking from diverging between them.
-        let num_threads = if threads == 0 {
-            num_cpus::get()
-        } else {
-            threads
-        };
-        let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        let (scored, counts, searched) =
-            parallel_solver.solve_top_n_with_counts_progress(top, progress);
-        let mut exprs = Vec::with_capacity(scored.len());
-        let mut scs = Vec::with_capacity(scored.len());
-        for (score, expr) in scored {
-            exprs.push(expr);
-            scs.push(score);
-        }
-        // Character probabilities over ALL solutions (from pass-1 counts), not
-        // just the kept top-N.
-        let char_probs =
-            char_probabilities_from_counts(counts.char_count_pairs(), counts.total as usize);
-        // Total solutions found is the full-set count, not the kept top-N.
-        (
-            exprs,
-            scs,
-            Some(char_probs),
-            searched,
-            counts.total as usize,
-        )
-    } else if threads == 1 {
-        // True single-threaded path: no branch partitioning, so progress is not
-        // reported (the SSE client simply receives the result when it lands).
-        let (r, s) = solver.solve();
-        let found = r.len();
-        (r, Vec::new(), None, s, found)
-    } else {
-        let num_threads = if threads == 0 {
-            num_cpus::get()
-        } else {
-            threads
-        };
-        let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-        let (r, s) = parallel_solver.solve_with_progress(progress);
-        let found = r.len();
-        (r, Vec::new(), None, s, found)
-    };
-
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
-
-    // Character probabilities: in top-N mode they were computed over the full
-    // solution set above; otherwise derive them from the complete `results`.
-    let char_probabilities =
-        full_char_probs.unwrap_or_else(|| compute_char_probabilities(&results));
-    // In top-N mode `results` is already ranked by (full-set) score, so the
-    // first entry is the recommendation; otherwise scan for the best.
-    let recommended = if top > 0 {
-        results.first().cloned()
-    } else {
-        compute_recommended(&results, &char_probabilities)
-    };
-
-    SolveResponse {
-        solutions: results,
-        stats: SolverStats {
-            searched_count,
-            found_count,
-            elapsed_ms,
-            speed,
-        },
-        char_probabilities,
-        recommended,
-        top,
-        scores,
-    }
-}
+// The solve constants (`MIN_SOLVE_LENGTH`, `MAX_THREADS`) and the
+// `prepare_solve` / `run_solve` core now live in `crate::api`. The handlers
+// below compose `api::prepare_solve` + `api::run_solve` (the streaming handler
+// needs the raw `Solver`), mapping any validation error to HTTP 400.
 
 /// POST /api/solve
 async fn solve_handler(
     Query(query): Query<SolveQuery>,
     Json(body): Json<SolveRequest>,
 ) -> Response {
-    let (solver, threads, top) = match prepare_solve(&query, &body) {
-        Ok(v) => v,
-        Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
-    };
+    let (solver, threads, top) =
+        match api::prepare_solve(body.length, &body.rows, query.threads, query.top) {
+            Ok(v) => v,
+            Err(error) => {
+                return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response()
+            }
+        };
 
     // `run_solve` is CPU-bound and can run for seconds; keep it off the async
     // worker threads so it doesn't block the Tokio reactor and stall other
     // requests (the streaming/progress handlers spawn_blocking for the same
     // reason).
     let response = match tokio::task::spawn_blocking(move || {
-        run_solve(solver, threads, top, &Progress::new())
+        api::run_solve(solver, threads, top, &Progress::new())
     })
     .await
     {
@@ -537,10 +187,13 @@ async fn solve_progress_handler(
     Query(query): Query<SolveQuery>,
     Json(body): Json<SolveRequest>,
 ) -> Response {
-    let (solver, threads, top) = match prepare_solve(&query, &body) {
-        Ok(v) => v,
-        Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
-    };
+    let (solver, threads, top) =
+        match api::prepare_solve(body.length, &body.rows, query.threads, query.top) {
+            Ok(v) => v,
+            Err(error) => {
+                return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response()
+            }
+        };
 
     let progress = Arc::new(Progress::new());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -548,7 +201,7 @@ async fn solve_progress_handler(
     // Run the CPU-bound solve off the async runtime.
     let solve_progress = Arc::clone(&progress);
     let mut solve_task =
-        tokio::task::spawn_blocking(move || run_solve(solver, threads, top, &solve_progress));
+        tokio::task::spawn_blocking(move || api::run_solve(solver, threads, top, &solve_progress));
 
     let progress_for_ticks = Arc::clone(&progress);
     tokio::spawn(async move {
@@ -633,10 +286,13 @@ async fn solve_stream_handler(
     Query(query): Query<SolveQuery>,
     Json(body): Json<SolveRequest>,
 ) -> Response {
-    let (solver, threads, _top) = match prepare_solve(&query, &body) {
-        Ok(v) => v,
-        Err((status, error)) => return (status, Json(ErrorResponse { error })).into_response(),
-    };
+    let (solver, threads, _top) =
+        match api::prepare_solve(body.length, &body.rows, query.threads, query.top) {
+            Ok(v) => v,
+            Err(error) => {
+                return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response()
+            }
+        };
     let num_threads = if threads == 0 {
         num_cpus::get()
     } else {
@@ -792,26 +448,13 @@ fn chrono_now_string() -> String {
 
 /// POST /api/validate
 async fn validate_handler(Json(body): Json<ValidateRequest>) -> Response {
-    let valid = evaluator::is_valid_equation(&body.equation);
+    let valid = api::validate(&body.equation);
     (StatusCode::OK, Json(ValidateResponse { valid })).into_response()
 }
 
 /// POST /api/eval
 async fn eval_handler(Json(body): Json<EvalRequest>) -> Response {
-    let result = evaluator::evaluate_expression(&body.expression).map(|v| {
-        if v == v.floor() && v.is_finite() {
-            // Format integral floats without narrowing through i64.
-            // For values within i64 range, format as integer; otherwise use
-            // float formatting to avoid truncation/saturation.
-            if v >= i64::MIN as f64 && v <= i64::MAX as f64 {
-                (v as i64).to_string()
-            } else {
-                format!("{:.0}", v)
-            }
-        } else {
-            format!("{}", v)
-        }
-    });
+    let result = api::eval(&body.expression);
     (StatusCode::OK, Json(EvalResponse { result })).into_response()
 }
 
@@ -926,6 +569,16 @@ pub async fn run_server(addr: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The pure solve/probability helpers and the request types moved to
+    // `crate::api`; `Solver`/`GlobalKnowledge`/`TileState` are no longer pulled
+    // into this module's scope (the handlers go through `api::`). The unit tests
+    // below exercise those items directly, so bring them in here.
+    use crate::api::{
+        compute_char_probabilities, compute_recommended, display_char, parse_tile_state, SolveRow,
+        SolveTile,
+    };
+    use crate::solver::Solver;
+    use crate::types::{GlobalKnowledge, TileState};
     use axum::body::Body;
     use http::{Request, StatusCode as HttpStatusCode};
     use tower::ServiceExt;

@@ -22,7 +22,12 @@ const STATE_COPY: Record<TileState, { label: string; next: string }> = {
   empty: { label: '不存在', next: '正确位置' },
 };
 
-const VALID_DIRECT_INPUT = new Set(VALID_CHARS.flat().filter((key) => key !== '⌫'));
+// Flatten via concat/spread rather than Array.prototype.flat(): flat() needs
+// Chrome 69+, and this module-load code path must also run on the very old
+// Android WebViews the Tauri build targets (see frontend/vite.config.ts).
+const VALID_DIRECT_INPUT = new Set(
+  ([] as string[]).concat(...VALID_CHARS).filter((key) => key !== '⌫'),
+);
 const DIRECT_INPUT_ALIASES: Record<string, string> = {
   '×': '*',
   '÷': '/',

@@ -68,7 +68,68 @@ npm run build
 docker build -t sumzle-solver .
 ```
 
+## Android App (Tauri)
+
+The solver can be packaged as a **standalone Android app** (Tauri 2) that runs the
+Rust solver **on-device** — no server, works fully offline. The React UI calls the
+solver over Tauri IPC (`invoke` + a `Channel` for live progress); the same frontend
+still runs on the web unchanged (`frontend/src/api.ts` branches on `isTauri()`).
+
+The mobile crate (`src-tauri/`) depends on the core with `default-features = false`,
+so the web stack (axum/tokio/tower) is **not** compiled into the APK — only the
+solver core (`src/api.rs`: `solve_core` / `validate` / `eval`).
+
+### Build workflow
+
+Android builds are heavy (Rust + NDK + Gradle), so they run on a **remote build host**
+while a local **waydroid** instance is used for debugging. Both are scripted:
+
+```bash
+# 1. One-time: install the toolchain on the remote (rustup + android targets,
+#    JDK, Android SDK/NDK, cargo-tauri). The host is passed each time.
+REMOTE=user@host ./scripts/remote-bootstrap.sh
+
+# 2. Build the APK on the remote and fetch it to ./build/
+#    abi: x86_64 (waydroid, default) | aarch64 (phones) | armv7 | i686
+REMOTE=user@host ./scripts/remote-build.sh x86_64
+
+# 3. Install + launch in local waydroid (container service must be running)
+./scripts/waydroid-run.sh
+```
+
+To build directly (toolchain already present locally), from the repo root:
+
+```bash
+cargo tauri android init                                   # once, scaffolds src-tauri/gen/android
+cargo tauri android build --debug --apk --target x86_64    # → app-universal-debug.apk
+```
+
+### Continuous integration
+
+`.github/workflows/android.yml` builds both ABIs (`x86_64` for emulators/waydroid,
+`aarch64` for phones) as debug APKs and uploads them as workflow artifacts — on
+pushes to `main`, tags, manual dispatch, and PRs touching `src-tauri/`, `src/`,
+`frontend/`, or the Cargo manifests. The main `ci.yml` (fmt/clippy/test) is
+unaffected: the workspace's default member is the core crate, so its bare `cargo`
+commands don't build `src-tauri`.
+
+### Notes & gotchas
+
+- **Use the `cargo-tauri` CLI** (`cargo install tauri-cli`), *not* the npm-global
+  `tauri` — the npm CLI makes Gradle's rust task call `node tauri …` which fails to
+  resolve. If you switched, `rm -rf src-tauri/gen/android && cargo tauri android init`.
+- **waydroid on a PC is x86_64**, so build the `x86_64` ABI for it; real phones need
+  `aarch64`.
+- The debug `[profile.dev]` strips DWARF debuginfo (`strip = "debuginfo"`) to keep the
+  Android `.so` ~20 MB instead of ~120 MB; backtraces keep symbol names.
+- **Release / Play Store**: `RELEASE=1 ./scripts/remote-build.sh aarch64` builds a
+  release APK, but release builds must be signed with your own keystore (configure
+  `src-tauri/gen/android` signing) — debug builds are auto-signed and fine for waydroid.
+- File export on mobile (`流式保存到文件`) is not yet wired to the Tauri fs/dialog
+  plugins; it is disabled in the app for now (the core solve/eval/validate all work).
+
 ## Usage
+
 
 ### Web Interface
 
