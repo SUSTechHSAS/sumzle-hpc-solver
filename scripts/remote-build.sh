@@ -39,7 +39,14 @@ ssh -o BatchMode=yes "$REMOTE" REMOTE_DIR="$REMOTE_DIR" ABI="$ABI" \
 set -euo pipefail
 source "$HOME/android-env.sh"
 cd "$HOME/$REMOTE_DIR"
-[ -d frontend/node_modules ] || (cd frontend && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci)
+# Install frontend deps when missing, or when package-lock.json changed since
+# the last `npm ci` (which stamps node_modules/.package-lock.json). A bare
+# `[ -d node_modules ]` would skip reinstalling after a dependency bump and
+# build a stale frontend.
+if [ ! -d frontend/node_modules ] \
+   || [ frontend/package-lock.json -nt frontend/node_modules/.package-lock.json ]; then
+  (cd frontend && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci)
+fi
 # First-time only: scaffold the Gradle project (idempotent-ish; skip if present).
 [ -d src-tauri/gen/android ] || cargo tauri android init
 cargo tauri android build $PROFILE_FLAG --apk --target "$ABI"

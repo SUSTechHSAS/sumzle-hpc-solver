@@ -9,7 +9,6 @@
 //! straight into here — keeping axum/tokio/tower out of the Android binary.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::evaluator;
 use crate::parallel::{ParallelSolver, Progress};
@@ -170,18 +169,29 @@ pub fn compute_char_probabilities(solutions: &[String]) -> Vec<CharProbability> 
         return Vec::new();
     }
 
-    let mut char_counts: HashMap<char, usize> = HashMap::new();
+    // Sumzle expressions are pure ASCII (digits + operators), so we can count
+    // with stack-allocated arrays indexed by byte value instead of hashing —
+    // no heap allocation in this hot, on-device loop. `counts` accumulates how
+    // many solutions contain each character; `seen` dedupes within one solution
+    // so a repeated character still counts once. Any non-ASCII byte (which a
+    // valid expression never contains) is simply ignored.
+    let mut counts = [0usize; 128];
+    let mut seen = [false; 128];
 
-    let mut seen = std::collections::HashSet::new();
     for sol in solutions {
-        seen.clear();
-        for ch in sol.chars() {
-            if seen.insert(ch) {
-                *char_counts.entry(ch).or_insert(0) += 1;
+        seen.fill(false);
+        for b in sol.bytes() {
+            let i = b as usize;
+            if i < 128 && !seen[i] {
+                seen[i] = true;
+                counts[i] += 1;
             }
         }
     }
 
+    let char_counts = (0u8..128)
+        .filter(|&b| counts[b as usize] > 0)
+        .map(|b| (b as char, counts[b as usize]));
     char_probabilities_from_counts(char_counts, solutions.len())
 }
 
@@ -198,33 +208,39 @@ pub fn compute_recommended(solutions: &[String], probs: &[CharProbability]) -> O
         return None;
     }
 
-    // Build a map from char to probability for quick lookup
-    let prob_map: HashMap<char, f64> = probs
-        .iter()
-        .filter_map(|p| p.char.chars().next().map(|c| (c, p.probability)))
-        .collect();
+    // ASCII lookup tables (Sumzle characters are ASCII): the probability of
+    // each character and whether it is among the top-5 most probable. Indexing
+    // by byte value avoids hashing on every character of every solution in this
+    // on-device hot loop. Characters absent from `probs` keep probability 0.0.
+    let mut prob_table = [0f64; 128];
+    let mut is_top = [false; 128];
+    for (rank, p) in probs.iter().enumerate() {
+        if let Some(b) = p.char.bytes().next() {
+            let i = b as usize;
+            if i < 128 {
+                prob_table[i] = p.probability;
+                if rank < 5 {
+                    is_top[i] = true;
+                }
+            }
+        }
+    }
 
-    // Get top 5 characters by probability
-    let top_chars: std::collections::HashSet<char> = probs
-        .iter()
-        .take(5)
-        .filter_map(|p| p.char.chars().next())
-        .collect();
-
-    let mut best_solution: Option<String> = None;
+    let mut best_solution: Option<&String> = None;
     let mut best_score: f64 = f64::NEG_INFINITY;
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = [false; 128];
     for sol in solutions {
-        seen.clear();
+        seen.fill(false);
         let mut score: f64 = 0.0;
 
-        for ch in sol.chars() {
-            if seen.insert(ch) {
-                // Add probability score
-                score += prob_map.get(&ch).copied().unwrap_or(0.0);
-                // Bonus for top 5 characters
-                if top_chars.contains(&ch) {
+        for b in sol.bytes() {
+            let i = b as usize;
+            if i < 128 && !seen[i] {
+                seen[i] = true;
+                // Add probability score, plus a bonus for top-5 characters.
+                score += prob_table[i];
+                if is_top[i] {
                     score += 50.0;
                 }
             }
@@ -232,11 +248,11 @@ pub fn compute_recommended(solutions: &[String], probs: &[CharProbability]) -> O
 
         if score > best_score {
             best_score = score;
-            best_solution = Some(sol.clone());
+            best_solution = Some(sol);
         }
     }
 
-    best_solution
+    best_solution.cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +370,9 @@ pub fn run_solve(solver: Solver, threads: usize, top: usize, progress: &Progress
     };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
-    let speed = (searched_count * 1000).checked_div(elapsed_ms.max(1)).unwrap_or(0);
+    let speed = (searched_count * 1000)
+        .checked_div(elapsed_ms.max(1))
+        .unwrap_or(0);
 
     // Character probabilities: in top-N mode they were computed over the full
     // solution set above; otherwise derive them from the complete `results`.

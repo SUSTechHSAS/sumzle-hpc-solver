@@ -20,9 +20,17 @@ if ! waydroid status 2>/dev/null | grep -q 'Session:[[:space:]]*RUNNING'; then
   echo ">>> starting waydroid session ..."
   nohup waydroid session start >/tmp/waydroid-session.log 2>&1 &
   for _ in $(seq 1 30); do
-    grep -q 'Android with user 0 is ready' /tmp/waydroid-session.log 2>/dev/null && break
+    waydroid status 2>/dev/null | grep -q 'Session:[[:space:]]*RUNNING' && break
     sleep 2
   done
+fi
+
+# Fail loudly if the session never reached RUNNING, rather than proceeding to a
+# confusing `waydroid app install` failure.
+if ! waydroid status 2>/dev/null | grep -q 'Session:[[:space:]]*RUNNING'; then
+  echo "error: waydroid session did not reach RUNNING within ~60s" >&2
+  echo "       check: sudo systemctl status waydroid-container; cat /tmp/waydroid-session.log" >&2
+  exit 1
 fi
 waydroid status 2>/dev/null | head -5
 

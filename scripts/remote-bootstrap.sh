@@ -29,14 +29,27 @@ ssh -o BatchMode=yes "$REMOTE" NDK_VERSION="$NDK_VERSION" PLATFORM="$PLATFORM" \
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# Most cloud build hosts log in as a non-root user; apt-get then needs sudo.
+# Root containers (e.g. the CNB image) have no sudo, so only prepend it when we
+# are actually unprivileged.
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+  else
+    echo "error: running as non-root but 'sudo' is not available" >&2
+    exit 1
+  fi
+fi
+
 # --- C toolchain (Rust build scripts + NDK need a linker) -------------------
-apt-get update -qq
-apt-get install -y -qq build-essential pkg-config curl unzip
+$SUDO apt-get update -qq
+$SUDO apt-get install -y -qq build-essential pkg-config curl unzip
 
 # --- JDK (Android Gradle Plugin needs 17+; Debian 13 ships 21) --------------
 if ! command -v javac >/dev/null 2>&1; then
-  apt-get install -y -qq openjdk-17-jdk-headless 2>/dev/null \
-    || apt-get install -y -qq openjdk-21-jdk-headless
+  $SUDO apt-get install -y -qq openjdk-17-jdk-headless 2>/dev/null \
+    || $SUDO apt-get install -y -qq openjdk-21-jdk-headless
 fi
 JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
 
