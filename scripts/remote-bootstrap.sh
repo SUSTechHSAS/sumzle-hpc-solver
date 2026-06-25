@@ -42,9 +42,10 @@ if [ "$(id -u)" -ne 0 ]; then
   fi
 fi
 
-# --- C toolchain (Rust build scripts + NDK need a linker) -------------------
+# --- C toolchain + rsync (Rust build scripts + NDK need a linker; remote-build
+#     .sh rsyncs the working tree onto this host, so rsync must exist here too).
 $SUDO apt-get update -qq
-$SUDO apt-get install -y -qq build-essential pkg-config curl unzip
+$SUDO apt-get install -y -qq build-essential pkg-config curl unzip rsync
 
 # --- JDK (Android Gradle Plugin needs 17+; Debian 13 ships 21) --------------
 if ! command -v javac >/dev/null 2>&1; then
@@ -52,6 +53,16 @@ if ! command -v javac >/dev/null 2>&1; then
     || $SUDO apt-get install -y -qq openjdk-21-jdk-headless
 fi
 JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+
+# --- Node.js >= 20 (the frontend / Vite build requires it; remote-build.sh
+#     runs `npm ci`). The CNB base image already ships Node 22 in /usr/local;
+#     only install via NodeSource when the host lacks a new-enough node, so an
+#     existing newer install is never downgraded (Debian's apt node can lag). -
+NODE_MAJOR="$( (command -v node >/dev/null 2>&1 && node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/') || echo 0 )"
+if [ "${NODE_MAJOR:-0}" -lt 20 ]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO bash -
+  $SUDO apt-get install -y -qq nodejs
+fi
 
 # --- Rust + Android targets -------------------------------------------------
 if [ ! -x "$HOME/.cargo/bin/rustc" ]; then
