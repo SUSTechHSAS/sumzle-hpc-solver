@@ -50,7 +50,9 @@ awk '
   { print }
   # Wire that signing config into the release build type.
   /getByName\("release"\)[[:space:]]*\{/ && !rel {
-    print "            signingConfig = signingConfigs.getByName(\"release\")"
+    print "            if (rootProject.file(\"keystore.properties\").exists()) {"
+    print "                signingConfig = signingConfigs.getByName(\"release\")"
+    print "            }"
     rel = 1
   }
 ' "$GRADLE" > "$GRADLE.tmp"

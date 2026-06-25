@@ -30,18 +30,24 @@ def main():
     if not args:
         print("usage: measure_rss.py [--quiet] <cmd> [args...]", file=sys.stderr)
         sys.exit(2)
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
-    def pump(src, dst):
-        try:
-            for chunk in iter(lambda: src.read(4096), ""):
-                if not quiet:
+
+    if quiet:
+        # Discard child output entirely -- no pipes, no threads.
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    else:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        def pump(src, dst):
+            try:
+                for chunk in iter(lambda: src.read(4096), ""):
                     dst.write(chunk); dst.flush()
-        except Exception:
-            pass
-    t_out = threading.Thread(target=pump, args=(proc.stdout, sys.stdout), daemon=True)
-    t_err = threading.Thread(target=pump, args=(proc.stderr, sys.stderr), daemon=True)
-    t_out.start(); t_err.start()
+            except Exception:
+                pass
+        t_out = threading.Thread(target=pump, args=(proc.stdout, sys.stdout), daemon=True)
+        t_err = threading.Thread(target=pump, args=(proc.stderr, sys.stderr), daemon=True)
+        t_out.start(); t_err.start()
+
     peak = 0
     start = time.monotonic()
     while proc.poll() is None:
@@ -54,7 +60,8 @@ def main():
         peak = v
     wall_ms = int((time.monotonic() - start) * 1000)
     proc.wait()
-    t_out.join(timeout=1); t_err.join(timeout=1)
+    if not quiet:
+        t_out.join(timeout=1); t_err.join(timeout=1)
     print(f"\nPEAK_RSS_KB={peak} WALL_MS={wall_ms} EXIT={proc.returncode}")
 
 if __name__ == "__main__":

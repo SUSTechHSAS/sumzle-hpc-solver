@@ -684,9 +684,14 @@ lines.append("")
 lines.append("</details>")
 
 # Write to step summary
-summary_path = os.environ["GITHUB_STEP_SUMMARY"]
-with open(summary_path, "a") as f:
-    f.write("\n".join(lines) + "\n")
+summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+if summary_path:
+    with open(summary_path, "a") as f:
+        f.write("\n".join(lines) + "\n")
+else:
+    # When run outside GitHub Actions (local debugging), print to stdout
+    # instead of crashing with KeyError.
+    print("\n".join(lines))
 
 # Print summary for the log
 if has_mismatch:
