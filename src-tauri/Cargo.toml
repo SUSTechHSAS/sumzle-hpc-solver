@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["time"] }
 
 # The solver core, with the web stack (axum/tokio/tower) compiled out — the app
 # calls the solver directly over Tauri IPC, no in-process HTTP server.

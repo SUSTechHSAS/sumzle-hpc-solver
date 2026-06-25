@@ -61,29 +61,32 @@ async fn solve_progress(
     let progress = Arc::new(Progress::new());
     let done = Arc::new(AtomicBool::new(false));
 
-    // Sampler thread: emit progress snapshots until the solve signals done or
-    // the channel closes.
+    // Sampler task: emit progress snapshots until the solve signals done or
+    // the channel closes. Uses an async task (not a blocking OS thread) so
+    // the join on completion doesn't stall the Tauri event loop.
     let sampler_progress = Arc::clone(&progress);
     let sampler_done = Arc::clone(&done);
     let sampler_channel = on_progress.clone();
-    let sampler = std::thread::spawn(move || loop {
-        let (d, t, phase) = sampler_progress.snapshot();
-        if sampler_channel
-            .send(SolveProgress {
-                done: d,
-                total: t,
-                phase,
-            })
-            .is_err()
-        {
-            // Frontend went away — stop the solve early.
-            sampler_progress.cancel();
-            break;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if sampler_done.load(Ordering::Relaxed) {
+                break;
+            }
+            let (d, t, phase) = sampler_progress.snapshot();
+            if sampler_channel
+                .send(SolveProgress {
+                    done: d,
+                    total: t,
+                    phase,
+                })
+                .is_err()
+            {
+                // Frontend went away — stop the solve early.
+                sampler_progress.cancel();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
         }
-        if sampler_done.load(Ordering::Relaxed) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(150));
     });
 
     // Run the CPU-bound solve off the event loop.
@@ -96,7 +99,6 @@ async fn solve_progress(
 
     // Stop the sampler and emit one final snapshot so the bar reaches 100%.
     done.store(true, Ordering::Relaxed);
-    let _ = sampler.join();
     let (d, t, phase) = progress.snapshot();
     let _ = on_progress.send(SolveProgress {
         done: d,

@@ -354,7 +354,7 @@ pub fn run_solve(solver: Solver, threads: usize, top: usize, progress: &Progress
     };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
-    let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
+    let speed = (searched_count * 1000).checked_div(elapsed_ms.max(1)).unwrap_or(0);
 
     // Character probabilities: in top-N mode they were computed over the full
     // solution set above; otherwise derive them from the complete `results`.
@@ -417,7 +417,7 @@ pub fn eval(expression: &str) -> Option<String> {
             // Format integral floats without narrowing through i64.
             // For values within i64 range, format as integer; otherwise use
             // float formatting to avoid truncation/saturation.
-            if v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+            if v >= i64::MIN as f64 && v < i64::MAX as f64 {
                 (v as i64).to_string()
             } else {
                 format!("{:.0}", v)

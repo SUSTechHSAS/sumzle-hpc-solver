@@ -3,6 +3,10 @@ name: Android
 # Builds the standalone Tauri Android app. Heavy (Rust + NDK + Gradle), so it
 # only runs on main/tags, manual dispatch, and PRs that touch the mobile crate,
 # the solver core, the frontend, or this workflow.
+
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
