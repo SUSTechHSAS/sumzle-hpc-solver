@@ -355,9 +355,10 @@ function renderChart(points) {
   fragment.appendChild(area);
 
   /* Line path with draw animation */
+  let line = null;
   const linePathD = smoothPath(coords);
   if (linePathD) {
-    const line = svgEl("path", { d: linePathD, fill: "none", "stroke-width": "2.5" });
+    line = svgEl("path", { d: linePathD, fill: "none", "stroke-width": "2.5" });
     line.classList.add("chart-line");
     fragment.appendChild(line);
   }
@@ -431,7 +432,7 @@ function renderChart(points) {
   svg.appendChild(fragment);
 
   /* Post-append: line draw animation requires element in DOM for getTotalLength() */
-  if (!prefersReducedMotionNow()) {
+  if (!prefersReducedMotionNow() && line) {
     const lineLength = line.getTotalLength();
     line.style.strokeDasharray = lineLength;
     line.style.strokeDashoffset = lineLength;

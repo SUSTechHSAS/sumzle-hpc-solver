@@ -100,6 +100,7 @@ def github_api_json(path: str) -> Any:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "sumzle-benchmark-dashboard",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
