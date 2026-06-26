@@ -1,0 +1,119 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run CLI benchmarks
+        run: bash scripts/ci/bench/run-cli.sh
+
+      - name: Run parallel CLI benchmarks
+        run: bash scripts/ci/bench/run-parallel-cli.sh
+
+      - name: Generate benchmark puzzle files
+        run: bash scripts/ci/bench/gen-puzzles.sh
+
+      - name: Run Top-N benchmarks
+        run: bash scripts/ci/bench/run-topn.sh
+
+      - name: Run Streaming benchmarks
+        run: bash scripts/ci/bench/run-streaming.sh
+
+      - name: Run memory benchmarks
+        run: bash scripts/ci/bench/run-memory.sh
+
+      - name: Run server multi-solve benchmarks
+        run: bash scripts/ci/bench/run-server.sh
+
+      - name: Checkout base ref for baseline
+        if: github.event_name == 'pull_request'
+        run: git worktree add "$RUNNER_TEMP/baseline" "${{ github.base_ref }}"
+
+      - name: Build baseline release binary
+        if: github.event_name == 'pull_request'
+        run: |
+          cd "$RUNNER_TEMP/baseline"
+          cargo build --release --target-dir "$RUNNER_TEMP/baseline-target"
+
+      - name: Run CLI benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci/bench/run-cli-baseline.sh
+
+      - name: Run Top-N benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci/bench/run-topn-baseline.sh
+
+      - name: Run Streaming benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci/bench/run-streaming-baseline.sh
+
+      - name: Run memory benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci/bench/run-memory-baseline.sh
+
+      - name: Run server multi-solve benchmarks (baseline)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/ci/bench/run-server-baseline.sh
+
+      - name: Compare benchmark results with main branch
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: python3 scripts/ci/bench/compare.py
+
+      - name: Run Criterion benchmarks
+        run: bash scripts/ci/bench/criterion.sh
+
+      - name: Emit benchmark JSON
+        if: always()
+        run: python3 scripts/ci/bench/emit-json.py --output benchmark-result.json
+
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-result
+          path: benchmark-result.json
+          if-no-files-found: error
+
+      - name: Finalize benchmark summary
+        if: always()
+        run: bash scripts/ci/bench/finalize-summary.sh

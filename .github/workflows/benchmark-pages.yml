@@ -1,0 +1,153 @@
+name: Benchmark Pages
+
+on:
+  workflow_run:
+    workflows: ["Benchmark"]
+    types: [completed]
+
+concurrency:
+  group: benchmark-pages
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pages: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish benchmark dashboard
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download benchmark result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run download "$RUN_ID" --name benchmark-result --dir incoming
+
+      - name: Trust workflow metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/ci/bench/trust-workflow-run.py --result incoming/benchmark-result.json
+
+      - name: Verify CI success for benchmarked commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="$(python3 - <<'PY'
+          import json
+          print(json.load(open("incoming/benchmark-result.json", encoding="utf-8")).get("sha", ""))
+          PY
+          )"
+          if [ -z "$sha" ]; then
+            echo "Benchmark result does not contain a trusted sha" >&2
+            exit 1
+          fi
+          python3 - "$sha" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+
+          sha = sys.argv[1]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          required = {
+              "Check",
+              "Frontend Build & Test",
+              "Test on ubuntu-latest",
+              "Test on windows-latest",
+              "Test on macOS-latest",
+          }
+          deadline = time.time() + 15 * 60
+          while True:
+              raw = subprocess.check_output(
+                  ["gh", "api", f"repos/{repository}/commits/{sha}/check-runs", "--paginate", "--slurp"],
+                  text=True,
+              )
+              pages = json.loads(raw) if raw else []
+              runs = [run for page in pages for run in page.get("check_runs", [])]
+              by_name = {}
+              for run in runs:
+                  name = run.get("name")
+                  if not name:
+                      continue
+                  previous = by_name.get(name)
+                  run_time = run.get("started_at") or run.get("completed_at") or ""
+                  previous_time = (previous or {}).get("started_at") or (previous or {}).get("completed_at") or ""
+                  if previous is None or run_time > previous_time:
+                      by_name[name] = run
+              missing = sorted(required - by_name.keys())
+              incomplete = sorted(
+                  name for name in required if name in by_name and by_name[name].get("status") != "completed"
+              )
+              failed = sorted(
+                  name
+                  for name in required
+                  if name in by_name and by_name[name].get("status") == "completed" and by_name[name].get("conclusion") != "success"
+              )
+              if not missing and not incomplete and not failed:
+                  print(f"CI checks passed for {sha}")
+                  break
+              if failed:
+                  raise SystemExit(f"Required CI checks failed for {sha}: {', '.join(failed)}")
+              if time.time() >= deadline:
+                  details = []
+                  if missing:
+                      details.append("missing: " + ", ".join(missing))
+                  if incomplete:
+                      details.append("incomplete: " + ", ".join(incomplete))
+                  raise SystemExit(f"Timed out waiting for CI checks for {sha} ({'; '.join(details)})")
+              print(f"Waiting for CI checks for {sha}; missing={missing}, incomplete={incomplete}")
+              time.sleep(30)
+          PY
+
+      - name: Prepare dashboard site
+        run: |
+          set -euo pipefail
+          mkdir -p _site/data
+          cp -r scripts/ci/bench/dashboard/. _site/
+          PAGE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/history.json"
+          status="$(curl -sS -L -w "%{http_code}" "$PAGE_URL" -o _site/data/history.json || true)"
+          if [ "$status" = "404" ]; then
+            printf '{"schema_version":1,"runs":[]}\n' > _site/data/history.json
+          elif [ "$status" != "200" ]; then
+            echo "Failed to fetch existing benchmark history from $PAGE_URL (HTTP $status)" >&2
+            exit 1
+          fi
+          python3 scripts/ci/bench/update-history.py \
+            --history _site/data/history.json \
+            --result incoming/benchmark-result.json \
+            --output _site/data/history.json
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Comment on pull request
+        if: github.event.workflow_run.event == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/ci/bench/upsert-pr-comment.py \
+            --result incoming/benchmark-result.json \
+            --pages-url "${{ steps.deployment.outputs.page_url }}"
