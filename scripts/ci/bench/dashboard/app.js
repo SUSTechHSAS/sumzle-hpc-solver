@@ -280,6 +280,9 @@ function render() {
 
 async function main() {
   const response = await fetch("data/history.json", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP error while loading history: ${response.status}`);
+  }
   state.history = await response.json();
   buildPoints();
   const runCount = (state.history.runs || []).length;

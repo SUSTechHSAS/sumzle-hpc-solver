@@ -39,6 +39,8 @@ def main() -> None:
         raise SystemExit(f"Error: event path is not a file: {event_path}")
     result = json.loads(result_path.read_text(encoding="utf-8"))
     event = json.loads(event_path.read_text(encoding="utf-8"))
+    if "workflow_run" not in event:
+        raise SystemExit("Error: GITHUB_EVENT_PATH does not contain 'workflow_run' metadata")
     workflow_run = event["workflow_run"]
 
     repository = os.environ.get("GITHUB_REPOSITORY") or (event.get("repository") or {}).get("full_name", "")

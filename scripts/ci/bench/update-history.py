@@ -33,9 +33,11 @@ def main() -> None:
     output_path = Path(args.output)
 
     history = load_json(history_path, {"schema_version": 1, "runs": []})
+    if not isinstance(history, dict):
+        history = {"schema_version": 1, "runs": []}
     result = load_json(result_path, None)
-    if result is None:
-        raise SystemExit(f"could not read result JSON: {result_path}")
+    if not isinstance(result, dict):
+        raise SystemExit(f"Error: result JSON is not a valid dictionary: {result_path}")
 
     runs = [run for run in history.get("runs", []) if run_key(run) != run_key(result)]
     runs.append(result)

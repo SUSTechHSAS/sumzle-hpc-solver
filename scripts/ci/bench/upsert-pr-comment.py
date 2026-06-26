@@ -65,4 +65,7 @@ PR benchmark commits are shown as a separate curve from `main`.
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001 - PR comments are non-critical.
+        print(f"Warning: Failed to upsert PR comment: {exc}")
