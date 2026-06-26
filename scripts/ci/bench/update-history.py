@@ -11,8 +11,10 @@ from typing import Any
 def load_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         return default
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Error: {path} contains invalid JSON: {exc}") from exc
 
 
 def run_key(run: dict[str, Any]) -> tuple[str, str, str]:

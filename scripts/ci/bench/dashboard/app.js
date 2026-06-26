@@ -512,19 +512,7 @@ function showTooltip(event, point) {
   let tx = xCoord + 18;
   let ty = yCoord + 18;
 
-  /* Show tooltip to measure size */
-  els.tooltip.setAttribute("data-visible", "");
-  const tooltipRect = els.tooltip.getBoundingClientRect();
-  const maxX = rect.width - tooltipRect.width - 8;
-  if (tx > maxX) tx = Math.max(0, maxX);
-  if (tooltipRect.bottom - rect.top > rect.height) {
-    ty = rect.height - tooltipRect.height - 8;
-  }
-
-  els.tooltip.style.setProperty("--tx", `${tx}px`);
-  els.tooltip.style.setProperty("--ty", `${ty}px`);
-
-  /* Structured tooltip content with visual hierarchy */
+  /* Build tooltip content first so dimensions reflect actual content */
   els.tooltip.textContent = "";
 
   const titleDiv = document.createElement("div");
@@ -548,6 +536,18 @@ function showTooltip(event, point) {
   metaDiv.className = "tooltip-meta";
   metaDiv.textContent = point.generatedAt;
   els.tooltip.appendChild(metaDiv);
+
+  /* Now show and measure with correct dimensions */
+  els.tooltip.setAttribute("data-visible", "");
+  const tooltipRect = els.tooltip.getBoundingClientRect();
+  const maxX = rect.width - tooltipRect.width - 8;
+  if (tx > maxX) tx = Math.max(0, maxX);
+  if (tooltipRect.bottom - rect.top > rect.height) {
+    ty = rect.height - tooltipRect.height - 8;
+  }
+
+  els.tooltip.style.setProperty("--tx", `${tx}px`);
+  els.tooltip.style.setProperty("--ty", `${ty}px`);
 }
 
 function hideTooltip() {

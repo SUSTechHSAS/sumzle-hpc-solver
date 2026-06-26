@@ -72,8 +72,10 @@ PR benchmark commits are shown as a separate curve from `main`.
     existing_id = None
     for comment in comments:
         if isinstance(comment, dict) and MARKER in (comment.get("body") or ""):
-            existing_id = comment.get("id")
-            break
+            author = (comment.get("user") or {}).get("login", "")
+            if author == "github-actions[bot]":
+                existing_id = comment.get("id")
+                break
 
     if existing_id:
         run(["gh", "api", f"repos/{repository}/issues/comments/{existing_id}", "-X", "PATCH", "-f", f"body={body}"])
