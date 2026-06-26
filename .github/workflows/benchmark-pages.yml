@@ -78,7 +78,16 @@ jobs:
               )
               pages = json.loads(raw) if raw else []
               runs = [run for page in pages for run in page.get("check_runs", [])]
-              by_name = {run.get("name"): run for run in runs}
+              by_name = {}
+              for run in runs:
+                  name = run.get("name")
+                  if not name:
+                      continue
+                  previous = by_name.get(name)
+                  run_time = run.get("started_at") or run.get("completed_at") or ""
+                  previous_time = (previous or {}).get("started_at") or (previous or {}).get("completed_at") or ""
+                  if previous is None or run_time > previous_time:
+                      by_name[name] = run
               missing = sorted(required - by_name.keys())
               incomplete = sorted(
                   name for name in required if name in by_name and by_name[name].get("status") != "completed"

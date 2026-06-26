@@ -7,9 +7,65 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+MAX_METRICS = 10_000
+MAX_STRING_LEN = 256
+MAX_PARAMS = 16
+
+
+def clean_string(value: Any, max_len: int = MAX_STRING_LEN) -> str:
+    return str(value or "")[:max_len]
+
+
+def clean_bool(value: Any) -> bool:
+    return bool(value)
+
+
+def clean_metric(metric: Any) -> dict[str, Any] | None:
+    if not isinstance(metric, dict):
+        return None
+    value = metric.get("value")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    params_payload = metric.get("params")
+    params: dict[str, Any] = {}
+    if isinstance(params_payload, dict):
+        for key, param_value in list(params_payload.items())[:MAX_PARAMS]:
+            if isinstance(param_value, (int, float, str, bool)) or param_value is None:
+                params[clean_string(key, 64)] = clean_string(param_value, 128) if isinstance(param_value, str) else param_value
+    return {
+        "suite": clean_string(metric.get("suite"), 80),
+        "metric": clean_string(metric.get("metric"), 80),
+        "value": value,
+        "unit": clean_string(metric.get("unit"), 40),
+        "params": params,
+        "lower_is_better": clean_bool(metric.get("lower_is_better", True)),
+    }
+
+
+def clean_metrics(metrics: Any) -> list[dict[str, Any]]:
+    if not isinstance(metrics, list):
+        return []
+    clean: list[dict[str, Any]] = []
+    for metric in metrics[:MAX_METRICS]:
+        clean_item = clean_metric(metric)
+        if clean_item is not None:
+            clean.append(clean_item)
+    return clean
+
+
+def clean_environment(environment: Any) -> dict[str, Any]:
+    if not isinstance(environment, dict):
+        return {}
+    clean: dict[str, Any] = {}
+    for key in ("runner_os", "runner_arch", "rustc", "cargo"):
+        clean[key] = clean_string(environment.get(key), 160)
+    cpu_count = environment.get("cpu_count")
+    if isinstance(cpu_count, int) and not isinstance(cpu_count, bool):
+        clean["cpu_count"] = cpu_count
+    return clean
 
 
 def pull_request_payload(pr: dict[str, Any], workflow_run: dict[str, Any]) -> dict[str, Any] | None:
@@ -118,21 +174,26 @@ def main() -> None:
     repository_payload = event.get("repository")
     repository_dict = repository_payload if isinstance(repository_payload, dict) else {}
     repository = os.environ.get("GITHUB_REPOSITORY") or repository_dict.get("full_name", "")
-    result["repository"] = repository
-    result["event"] = workflow_run.get("event") or ""
-    result["branch"] = workflow_run.get("head_branch") or ""
-    result["sha"] = workflow_run.get("head_sha") or ""
-    result["generated_at"] = trusted_generated_at(workflow_run)
-    result["run"] = {
-        "id": str(workflow_run.get("id") or ""),
-        "attempt": str(workflow_run.get("run_attempt") or ""),
-        "url": workflow_run.get("html_url") or "",
-        "workflow": workflow_run.get("name") or "",
+    trusted_result = {
+        "schema_version": 1,
+        "generated_at": trusted_generated_at(workflow_run),
+        "repository": clean_string(repository, 160),
+        "event": clean_string(workflow_run.get("event"), 80),
+        "branch": clean_string(workflow_run.get("head_branch"), 160),
+        "sha": clean_string(workflow_run.get("head_sha"), 80),
+        "run": {
+            "id": str(workflow_run.get("id") or ""),
+            "attempt": str(workflow_run.get("run_attempt") or ""),
+            "url": clean_string(workflow_run.get("html_url"), 512),
+            "workflow": clean_string(workflow_run.get("name"), 160),
+        },
+        "pull_request": first_pull_request(workflow_run) or pull_request_by_head_sha(repository, workflow_run),
+        "environment": clean_environment(result.get("environment")),
+        "metrics": clean_metrics(result.get("metrics")),
     }
-    result["pull_request"] = first_pull_request(workflow_run) or pull_request_by_head_sha(repository, workflow_run)
 
-    Path(args.output).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"Trusted benchmark metadata for run {result['run']['id']}")
+    Path(args.output).write_text(json.dumps(trusted_result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Trusted benchmark metadata for run {trusted_result['run']['id']}")
 
 
 if __name__ == "__main__":

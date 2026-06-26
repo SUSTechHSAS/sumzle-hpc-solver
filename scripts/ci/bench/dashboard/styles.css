@@ -17,7 +17,7 @@
   /* ── Motion tokens ── */
   --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-fast: 150ms;
   --dur-normal: 300ms;
   --dur-slow: 500ms;
@@ -166,8 +166,7 @@ label {
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 /* Range input: inline with output */
@@ -232,7 +231,6 @@ input:disabled {
   position: relative;
   padding: var(--sp-4);
   border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
   border-radius: var(--sp-2);
   background: var(--panel);
   contain: content;
@@ -300,7 +298,7 @@ input:disabled {
   cursor: pointer;
   transition: r var(--dur-fast) var(--ease-out),
               filter var(--dur-fast) var(--ease-out);
-  animation: dot-in var(--dur-normal) var(--ease-spring) both;
+  animation: dot-in var(--dur-normal) var(--ease-out-quint) both;
 }
 
 @keyframes dot-in {
@@ -462,8 +460,7 @@ th {
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 /* Row entrance animation */

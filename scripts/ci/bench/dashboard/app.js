@@ -17,6 +17,23 @@ const state = {
   points: [],
 };
 
+const safeStorage = {
+  get(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {
+      /* Ignore storage failures in private or locked-down browsing modes. */
+    }
+  },
+};
+
 const els = {
   summary: document.getElementById("summary"),
   welcome: document.getElementById("welcome"),
@@ -246,6 +263,7 @@ let crosshairLine = null;
 function renderChart(points) {
   const svg = els.chart;
   clearSvg(svg);
+  chartPointData = [];
 
   /* Read dimensions once, then batch all DOM writes via fragment */
   const width = svg.clientWidth || 900;
@@ -328,18 +346,21 @@ function renderChart(points) {
   const coords = points.map((point, index) => [x(index), y(point.value)]);
 
   /* Area fill under the curve */
-  const areaPathD =
-    smoothPath(coords) +
-    ` L ${coords[coords.length - 1][0]} ${margin.top + plotH} L ${coords[0][0]} ${margin.top + plotH} Z`;
+  const areaPathD = coords.length === 1
+    ? `M ${coords[0][0]} ${coords[0][1]} L ${coords[0][0]} ${margin.top + plotH} Z`
+    : smoothPath(coords) +
+      ` L ${coords[coords.length - 1][0]} ${margin.top + plotH} L ${coords[0][0]} ${margin.top + plotH} Z`;
   const area = svgEl("path", { d: areaPathD, "stroke-width": "0" });
   area.classList.add("chart-area");
   fragment.appendChild(area);
 
   /* Line path with draw animation */
   const linePathD = smoothPath(coords);
-  const line = svgEl("path", { d: linePathD, fill: "none", "stroke-width": "2.5" });
-  line.classList.add("chart-line");
-  fragment.appendChild(line);
+  if (linePathD) {
+    const line = svgEl("path", { d: linePathD, fill: "none", "stroke-width": "2.5" });
+    line.classList.add("chart-line");
+    fragment.appendChild(line);
+  }
 
   /* Data point dots with invisible hit areas */
   points.forEach((point, index) => {
@@ -541,10 +562,9 @@ function showTooltip(event, point) {
   els.tooltip.setAttribute("data-visible", "");
   const tooltipRect = els.tooltip.getBoundingClientRect();
   const maxX = rect.width - tooltipRect.width - 8;
-  if (tx > maxX) tx = Math.max(0, maxX);
-  if (tooltipRect.bottom - rect.top > rect.height) {
-    ty = rect.height - tooltipRect.height - 8;
-  }
+  const maxY = rect.height - tooltipRect.height - 8;
+  tx = Math.min(Math.max(0, tx), Math.max(0, maxX));
+  ty = Math.min(Math.max(0, ty), Math.max(0, maxY));
 
   els.tooltip.style.setProperty("--tx", `${tx}px`);
   els.tooltip.style.setProperty("--ty", `${ty}px`);
@@ -700,7 +720,7 @@ async function main() {
     els.summary.appendChild(document.createTextNode(" metrics. Use filters and the recent-run slider to zoom."));
 
     /* Show chart interaction tip on first visit (dismissed per browser) */
-    if (els.chartTip && !localStorage.getItem("bench-tip-dismissed")) {
+    if (els.chartTip && !safeStorage.get("bench-tip-dismissed")) {
       els.chartTip.hidden = false;
     }
   }
@@ -722,7 +742,7 @@ async function main() {
   if (els.chartTipDismiss) {
     els.chartTipDismiss.addEventListener("click", () => {
       if (els.chartTip) els.chartTip.hidden = true;
-      localStorage.setItem("bench-tip-dismissed", "1");
+      safeStorage.set("bench-tip-dismissed", "1");
     });
   }
 
@@ -735,7 +755,7 @@ async function main() {
   });
 }
 
-main().catch((error) => {
+function renderLoadError(error) {
   const spinner = els.summary.querySelector(".spinner");
   if (spinner) spinner.remove();
   const msg = error.name === "AbortError"
@@ -756,20 +776,9 @@ main().catch((error) => {
     newSpinner.setAttribute("aria-hidden", "true");
     els.summary.appendChild(newSpinner);
     els.summary.appendChild(document.createTextNode(" Retrying\u2026 this usually takes a few seconds"));
-    main().catch((retryError) => {
-      /* Re-show error so user can retry again */
-      const spin = els.summary.querySelector(".spinner");
-      if (spin) spin.remove();
-      const msg2 = retryError.name === "AbortError"
-        ? "Loading timed out \u2014 the server took too long to respond."
-        : `Failed to load benchmark history: ${retryError.message}`;
-      els.summary.textContent = msg2;
-      els.summary.classList.add("summary-error");
-      const retryBtn2 = document.createElement("button");
-      retryBtn2.textContent = "Retry";
-      retryBtn2.className = "retry-btn";
-      els.summary.appendChild(retryBtn2);
-    });
+    main().catch(renderLoadError);
   });
   els.summary.appendChild(retryBtn);
-});
+}
+
+main().catch(renderLoadError);
