@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 
 MARKER = "<!-- sumzle-benchmark-dashboard -->"
@@ -22,7 +23,14 @@ def main() -> None:
     parser.add_argument("--pages-url", required=True)
     args = parser.parse_args()
 
-    result = json.loads(Path(args.result).read_text(encoding="utf-8"))
+    result_path = Path(args.result)
+    if not result_path.is_file():
+        print(f"Error: result path is not a file: {result_path}")
+        return
+    result: Any = json.loads(result_path.read_text(encoding="utf-8"))
+    if not isinstance(result, dict):
+        print("Error: result is not a valid JSON object")
+        return
     pr = result.get("pull_request")
     if not isinstance(pr, dict) or not pr.get("number"):
         print("Not a pull request benchmark; skipping comment")
@@ -31,10 +39,13 @@ def main() -> None:
     repository = os.environ["GITHUB_REPOSITORY"]
     pr_number = str(pr["number"])
     dashboard_url = f"{args.pages_url.rstrip('/')}/?pr={pr_number}"
-    run_url = (result.get("run") or {}).get("url", "")
+    run_payload = result.get("run")
+    run_dict = run_payload if isinstance(run_payload, dict) else {}
+    run_url = run_dict.get("url", "")
     sha = result.get("sha", "")
     short_sha = sha[:7] if sha else "unknown"
-    metric_count = len(result.get("metrics", []))
+    metrics = result.get("metrics")
+    metric_count = len(metrics) if isinstance(metrics, list) else 0
 
     body = f"""{MARKER}
 ## Benchmark History

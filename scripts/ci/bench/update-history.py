@@ -43,7 +43,10 @@ def main() -> None:
     if not isinstance(result, dict):
         raise SystemExit(f"Error: result JSON is not a valid dictionary: {result_path}")
 
-    runs = [run for run in history.get("runs", []) if isinstance(run, dict) and run_key(run) != run_key(result)]
+    history_runs = history.get("runs")
+    if not isinstance(history_runs, list):
+        history_runs = []
+    runs = [run for run in history_runs if isinstance(run, dict) and run_key(run) != run_key(result)]
     runs.append(result)
     runs.sort(key=lambda run: (run.get("generated_at") or "", run.get("sha") or ""))
     if args.max_runs > 0:

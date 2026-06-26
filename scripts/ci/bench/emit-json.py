@@ -208,13 +208,17 @@ def github_context() -> dict[str, Any]:
 
     pull_request = event.get("pull_request")
     pr_payload = None
-    if pull_request:
+    if isinstance(pull_request, dict):
+        head = pull_request.get("head")
+        head_dict = head if isinstance(head, dict) else {}
+        base = pull_request.get("base")
+        base_dict = base if isinstance(base, dict) else {}
         pr_payload = {
             "number": pull_request.get("number"),
             "title": pull_request.get("title"),
-            "head_sha": pull_request.get("head", {}).get("sha"),
-            "head_ref": pull_request.get("head", {}).get("ref"),
-            "base_ref": pull_request.get("base", {}).get("ref"),
+            "head_sha": head_dict.get("sha"),
+            "head_ref": head_dict.get("ref"),
+            "base_ref": base_dict.get("ref"),
             "url": pull_request.get("html_url"),
         }
 

@@ -10,16 +10,20 @@ from typing import Any
 
 
 def first_pull_request(workflow_run: dict[str, Any]) -> dict[str, Any] | None:
-    prs = workflow_run.get("pull_requests") or []
-    if not prs:
+    prs = workflow_run.get("pull_requests")
+    if not isinstance(prs, list) or not prs:
         return None
     pr = prs[0]
+    if not isinstance(pr, dict):
+        return None
+    base = pr.get("base")
+    base_dict = base if isinstance(base, dict) else {}
     return {
         "number": pr.get("number"),
         "title": pr.get("title"),
         "head_sha": workflow_run.get("head_sha"),
         "head_ref": workflow_run.get("head_branch"),
-        "base_ref": (pr.get("base") or {}).get("ref"),
+        "base_ref": base_dict.get("ref"),
         "url": pr.get("html_url"),
     }
 
@@ -40,12 +44,20 @@ def main() -> None:
     if not event_path.is_file():
         raise SystemExit(f"Error: event path is not a file: {event_path}")
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    if not isinstance(result, dict):
+        raise SystemExit(f"Error: result JSON is not a valid dictionary: {result_path}")
     event = json.loads(event_path.read_text(encoding="utf-8"))
+    if not isinstance(event, dict):
+        raise SystemExit(f"Error: event JSON is not a valid dictionary: {event_path}")
     if "workflow_run" not in event:
         raise SystemExit("Error: GITHUB_EVENT_PATH does not contain 'workflow_run' metadata")
     workflow_run = event["workflow_run"]
+    if not isinstance(workflow_run, dict):
+        raise SystemExit("Error: GITHUB_EVENT_PATH workflow_run metadata is not a dictionary")
 
-    repository = os.environ.get("GITHUB_REPOSITORY") or (event.get("repository") or {}).get("full_name", "")
+    repository_payload = event.get("repository")
+    repository_dict = repository_payload if isinstance(repository_payload, dict) else {}
+    repository = os.environ.get("GITHUB_REPOSITORY") or repository_dict.get("full_name", "")
     result["repository"] = repository
     result["event"] = workflow_run.get("event", "")
     result["branch"] = workflow_run.get("head_branch", "")
