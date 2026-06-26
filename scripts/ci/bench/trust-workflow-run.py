@@ -52,7 +52,7 @@ def github_api_json(path: str) -> Any:
     try:
         with urlopen(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         print(f"Warning: GitHub API lookup failed for {path}: {exc}")
         return None
 
