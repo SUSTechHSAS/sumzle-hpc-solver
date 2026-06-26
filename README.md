@@ -311,6 +311,10 @@ Response: `{"result": "120"}`
 ./sumzle-solver bench -l 5 6
 ```
 
+CI benchmark runs publish a structured `benchmark-result.json` artifact. The
+dedicated benchmark dashboard workflow merges those artifacts into GitHub Pages
+history so `main` and PR performance can be inspected as interactive curves.
+
 ### Distributed computing
 
 ```bash
@@ -400,6 +404,18 @@ make test
 cargo bench
 ```
 
+The repository also has a dedicated GitHub Actions benchmark pipeline:
+
+- `.github/workflows/benchmark.yml` runs CLI, parallel, Top-N, streaming,
+  memory, server, and Criterion benchmarks.
+- `.github/workflows/benchmark-pages.yml` publishes a static dashboard backed by
+  `data/history.json`.
+- PR runs stay on separate PR curves; only post-merge `main` runs enter the
+  main trend.
+
+For first-time setup, configure GitHub Pages to use **GitHub Actions** as its
+publishing source.
+
 ## Project Structure
 
 ```
@@ -430,7 +446,9 @@ sumzle-hpc-solver/
 ├── benches/
 │   └── benchmark.rs
 ├── .github/workflows/
-│   ├── ci.yml              # Full CI pipeline (build, lint, test, benchmarks)
+│   ├── ci.yml              # Main CI pipeline (build, lint, tests, release)
+│   ├── benchmark.yml       # Benchmark runs and JSON artifact upload
+│   ├── benchmark-pages.yml # Benchmark dashboard deployment
 │   └── codeql.yml          # CodeQL security analysis
 ├── Cargo.toml
 ├── Makefile

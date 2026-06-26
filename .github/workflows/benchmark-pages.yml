@@ -1,0 +1,72 @@
+name: Benchmark Pages
+
+on:
+  workflow_run:
+    workflows: ["Benchmark"]
+    types: [completed]
+
+concurrency:
+  group: benchmark-pages
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pages: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish benchmark dashboard
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download benchmark result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run download "$RUN_ID" --name benchmark-result --dir incoming
+
+      - name: Trust workflow metadata
+        run: python3 scripts/ci/bench/trust-workflow-run.py --result incoming/benchmark-result.json
+
+      - name: Prepare dashboard site
+        run: |
+          set -euo pipefail
+          mkdir -p _site/data
+          cp -r scripts/ci/bench/dashboard/. _site/
+          PAGE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/history.json"
+          curl -fsSL "$PAGE_URL" -o _site/data/history.json || printf '{"schema_version":1,"runs":[]}\n' > _site/data/history.json
+          python3 scripts/ci/bench/update-history.py \
+            --history _site/data/history.json \
+            --result incoming/benchmark-result.json \
+            --output _site/data/history.json
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Comment on pull request
+        if: github.event.workflow_run.event == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/ci/bench/upsert-pr-comment.py \
+            --result incoming/benchmark-result.json \
+            --pages-url "${{ steps.deployment.outputs.page_url }}"
