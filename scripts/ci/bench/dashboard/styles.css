@@ -23,7 +23,7 @@ body {
 
 header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
   padding: 24px clamp(16px, 4vw, 48px);

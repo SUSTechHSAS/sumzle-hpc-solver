@@ -20,7 +20,10 @@ def parse_time_ns(value: str) -> float | None:
     match = TIME_RE.match(value.strip())
     if not match:
         return None
-    return float(match.group(1)) * TIME_MULTIPLIERS[match.group(2)]
+    try:
+        return float(match.group(1)) * TIME_MULTIPLIERS[match.group(2)]
+    except ValueError:
+        return None
 
 
 def read_lines(path: Path) -> list[str]:

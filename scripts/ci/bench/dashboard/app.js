@@ -190,6 +190,8 @@ function renderChart(points) {
     circle.addEventListener("mouseenter", (event) => showTooltip(event, point));
     circle.addEventListener("mousemove", (event) => showTooltip(event, point));
     circle.addEventListener("mouseleave", hideTooltip);
+    circle.addEventListener("focus", (event) => showTooltip(event, point));
+    circle.addEventListener("blur", hideTooltip);
     svg.appendChild(circle);
   });
 
@@ -210,8 +212,18 @@ function renderChart(points) {
 function showTooltip(event, point) {
   els.tooltip.hidden = false;
   const rect = els.chart.parentElement.getBoundingClientRect();
-  els.tooltip.style.left = `${event.clientX - rect.left + 18}px`;
-  els.tooltip.style.top = `${event.clientY - rect.top + 18}px`;
+  let xCoord;
+  let yCoord;
+  if (event.clientX !== undefined && event.clientY !== undefined) {
+    xCoord = event.clientX - rect.left;
+    yCoord = event.clientY - rect.top;
+  } else {
+    const targetRect = event.target.getBoundingClientRect();
+    xCoord = targetRect.left - rect.left + targetRect.width / 2;
+    yCoord = targetRect.top - rect.top - 10;
+  }
+  els.tooltip.style.left = `${xCoord + 18}px`;
+  els.tooltip.style.top = `${yCoord + 18}px`;
   els.tooltip.textContent = "";
   const lines = [
     `${point.series} ${(point.run.sha || "").slice(0, 7)}`,
@@ -284,7 +296,9 @@ async function main() {
   els.metric.addEventListener("change", refreshCaseOptions);
   els.case.addEventListener("change", render);
   els.range.addEventListener("input", render);
-  window.addEventListener("resize", render);
+  window.addEventListener("resize", () => {
+    renderChart(visiblePoints());
+  });
 }
 
 main().catch((error) => {
