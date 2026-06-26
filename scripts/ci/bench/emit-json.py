@@ -42,14 +42,14 @@ def run_text(args: list[str]) -> str:
 
 def parse_ints(*values: str) -> tuple[int, ...] | None:
     try:
-        return tuple(int(value) for value in values)
+        return tuple(int(value.replace(",", "")) for value in values)
     except ValueError:
         return None
 
 
 def parse_floats(*values: str) -> tuple[float, ...] | None:
     try:
-        return tuple(float(value) for value in values)
+        return tuple(float(value.replace(",", "")) for value in values)
     except ValueError:
         return None
 

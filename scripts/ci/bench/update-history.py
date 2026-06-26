@@ -21,7 +21,11 @@ def run_key(run: dict[str, Any]) -> tuple[str, str, str]:
     run_meta = run.get("run")
     if not isinstance(run_meta, dict):
         run_meta = {}
-    return (str(run_meta.get("id", "")), str(run_meta.get("attempt", "")), str(run.get("sha", "")))
+    return (
+        str(run_meta.get("id") or ""),
+        str(run_meta.get("attempt") or ""),
+        str(run.get("sha") or ""),
+    )
 
 
 def main() -> None:
@@ -48,7 +52,7 @@ def main() -> None:
         history_runs = []
     runs = [run for run in history_runs if isinstance(run, dict) and run_key(run) != run_key(result)]
     runs.append(result)
-    runs.sort(key=lambda run: (run.get("generated_at") or "", run.get("sha") or ""))
+    runs.sort(key=lambda run: (str(run.get("generated_at") or ""), str(run.get("sha") or "")))
     if args.max_runs > 0:
         runs = runs[-args.max_runs :]
 

@@ -20,11 +20,11 @@ def first_pull_request(workflow_run: dict[str, Any]) -> dict[str, Any] | None:
     base_dict = base if isinstance(base, dict) else {}
     return {
         "number": pr.get("number"),
-        "title": pr.get("title"),
-        "head_sha": workflow_run.get("head_sha"),
-        "head_ref": workflow_run.get("head_branch"),
-        "base_ref": base_dict.get("ref"),
-        "url": pr.get("html_url"),
+        "title": pr.get("title") or "",
+        "head_sha": workflow_run.get("head_sha") or "",
+        "head_ref": workflow_run.get("head_branch") or "",
+        "base_ref": base_dict.get("ref") or "",
+        "url": pr.get("html_url") or "",
     }
 
 
@@ -59,14 +59,14 @@ def main() -> None:
     repository_dict = repository_payload if isinstance(repository_payload, dict) else {}
     repository = os.environ.get("GITHUB_REPOSITORY") or repository_dict.get("full_name", "")
     result["repository"] = repository
-    result["event"] = workflow_run.get("event", "")
-    result["branch"] = workflow_run.get("head_branch", "")
-    result["sha"] = workflow_run.get("head_sha", "")
+    result["event"] = workflow_run.get("event") or ""
+    result["branch"] = workflow_run.get("head_branch") or ""
+    result["sha"] = workflow_run.get("head_sha") or ""
     result["run"] = {
-        "id": str(workflow_run.get("id", "")),
-        "attempt": str(workflow_run.get("run_attempt", "")),
-        "url": workflow_run.get("html_url", ""),
-        "workflow": workflow_run.get("name", ""),
+        "id": str(workflow_run.get("id") or ""),
+        "attempt": str(workflow_run.get("run_attempt") or ""),
+        "url": workflow_run.get("html_url") or "",
+        "workflow": workflow_run.get("name") or "",
     }
     result["pull_request"] = first_pull_request(workflow_run)
 

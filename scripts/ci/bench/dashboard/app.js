@@ -167,9 +167,13 @@ function renderChart(points) {
   let min = Math.min(...values);
   let max = Math.max(...values);
   if (min === max) {
-    min *= 0.95;
-    max *= 1.05;
-    if (min === max) max = min + 1;
+    if (min === 0) {
+      max = 1;
+    } else {
+      const delta = Math.abs(min) * 0.05;
+      min -= delta;
+      max += delta;
+    }
   }
   const pad = (max - min) * 0.08;
   min -= pad;

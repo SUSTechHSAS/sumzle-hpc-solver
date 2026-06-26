@@ -36,7 +36,10 @@ def main() -> None:
         print("Not a pull request benchmark; skipping comment")
         return
 
-    repository = os.environ["GITHUB_REPOSITORY"]
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if not repository:
+        print("Error: GITHUB_REPOSITORY environment variable is not set")
+        return
     pr_number = str(pr["number"])
     dashboard_url = f"{args.pages_url.rstrip('/')}/?pr={pr_number}"
     run_payload = result.get("run")
@@ -63,7 +66,7 @@ PR benchmark commits are shown as a separate curve from `main`.
     comments = [comment for page in pages for comment in page]
     existing_id = None
     for comment in comments:
-        if MARKER in (comment.get("body") or ""):
+        if isinstance(comment, dict) and MARKER in (comment.get("body") or ""):
             existing_id = comment.get("id")
             break
 
