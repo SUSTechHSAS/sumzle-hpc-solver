@@ -17,7 +17,7 @@ const els = {
 };
 
 function seriesName(run) {
-  if (run.pull_request && run.pull_request.number) {
+  if (run.pull_request?.number) {
     return `PR #${run.pull_request.number}`;
   }
   return run.branch || "main";
@@ -52,7 +52,7 @@ function setOptions(select, values, selected) {
 
 function buildPoints() {
   state.points = [];
-  for (const run of state.history.runs || []) {
+  for (const run of state.history?.runs || []) {
     if (!run) continue;
     for (const metric of run.metrics || []) {
       if (!metric) continue;
@@ -131,7 +131,7 @@ function formatValue(value, unit) {
     if (value >= 1e6) return `${(value / 1e6).toFixed(1)} ms`;
     if (value >= 1e3) return `${(value / 1e3).toFixed(1)} us`;
   }
-  return `${Number.isInteger(value) ? value : value.toFixed(2)} ${unit}`;
+  return `${Number.isInteger(value) ? value : value.toFixed(2)}${unit ? ` ${unit}` : ""}`;
 }
 
 function clearSvg(svg) {
@@ -255,7 +255,7 @@ function renderTable(points) {
   els.table.replaceChildren();
   [...points].reverse().forEach((point) => {
     const tr = document.createElement("tr");
-    const runUrl = point.run.run && point.run.run.url ? point.run.run.url : "";
+    const runUrl = point.run.run?.url || "";
     const cells = [
       point.generatedAt,
       point.series,
@@ -296,7 +296,7 @@ async function main() {
     state.history = await response.json();
   }
   buildPoints();
-  const runCount = (state.history.runs || []).length;
+  const runCount = (state.history?.runs || []).length;
   const metricCount = state.points.length;
   els.summary.textContent = `${runCount} runs, ${metricCount} metrics. Use filters and the recent-run slider to zoom.`;
   initControls();
