@@ -19,7 +19,7 @@ def first_pull_request(workflow_run: dict[str, Any]) -> dict[str, Any] | None:
         "title": pr.get("title"),
         "head_sha": workflow_run.get("head_sha"),
         "head_ref": workflow_run.get("head_branch"),
-        "base_ref": pr.get("base", {}).get("ref"),
+        "base_ref": (pr.get("base") or {}).get("ref"),
         "url": pr.get("html_url"),
     }
 
@@ -41,7 +41,7 @@ def main() -> None:
     event = json.loads(event_path.read_text(encoding="utf-8"))
     workflow_run = event["workflow_run"]
 
-    repository = os.environ.get("GITHUB_REPOSITORY") or event.get("repository", {}).get("full_name", "")
+    repository = os.environ.get("GITHUB_REPOSITORY") or (event.get("repository") or {}).get("full_name", "")
     result["repository"] = repository
     result["event"] = workflow_run.get("event", "")
     result["branch"] = workflow_run.get("head_branch", "")

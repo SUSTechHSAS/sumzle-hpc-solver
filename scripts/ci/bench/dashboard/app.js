@@ -296,8 +296,12 @@ async function main() {
   els.metric.addEventListener("change", refreshCaseOptions);
   els.case.addEventListener("change", render);
   els.range.addEventListener("input", render);
+  let resizeTimeout;
   window.addEventListener("resize", () => {
-    renderChart(visiblePoints());
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => {
+      renderChart(visiblePoints());
+    }, 100);
   });
 }
 

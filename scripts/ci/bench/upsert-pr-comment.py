@@ -31,7 +31,7 @@ def main() -> None:
     repository = os.environ["GITHUB_REPOSITORY"]
     pr_number = str(pr["number"])
     dashboard_url = f"{args.pages_url.rstrip('/')}/?pr={pr_number}"
-    run_url = result.get("run", {}).get("url", "")
+    run_url = (result.get("run") or {}).get("url", "")
     sha = result.get("sha", "")
     short_sha = sha[:7] if sha else "unknown"
     metric_count = len(result.get("metrics", []))
