@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-TIME_RE = re.compile(r"^([0-9.]+)\s*(ns|µs|μs|us|ms|s)$")
+TIME_RE = re.compile(r"^~?([0-9.]+)\s*(ns|µs|μs|us|ms|s)$")
 TIME_MULTIPLIERS = {"ns": 1, "µs": 1_000, "μs": 1_000, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
 
 

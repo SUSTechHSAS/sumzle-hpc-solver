@@ -32,6 +32,8 @@ def main() -> None:
     args = parser.parse_args()
 
     result_path = Path(args.result)
+    if not result_path.is_file():
+        raise SystemExit(f"Error: result path is not a file: {result_path}")
     if not args.event_path:
         raise SystemExit("Error: --event-path is required or GITHUB_EVENT_PATH must be set")
     event_path = Path(args.event_path)
