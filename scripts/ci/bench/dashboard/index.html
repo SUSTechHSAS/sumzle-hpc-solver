@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Sumzle Benchmark History</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -10,56 +10,89 @@
     <header>
       <div>
         <h1>Sumzle Benchmark History</h1>
-        <p id="summary">Loading benchmark history...</p>
+        <p id="summary" aria-live="polite"><span class="spinner" aria-hidden="true"></span> Loading benchmark history…</p>
       </div>
-      <a id="repo-link" href="https://github.com/SUSTechHSAS/sumzle-hpc-solver">Repository</a>
+      <a id="repo-link" href="https://github.com/SUSTechHSAS/sumzle-hpc-solver">View Source on GitHub</a>
     </header>
 
     <main>
+      <section id="welcome" class="welcome" hidden>
+        <div class="welcome-content">
+          <div class="welcome-icon" aria-hidden="true">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+              <rect x="4" y="8" width="40" height="32" rx="3" stroke="currentColor" stroke-width="2"/>
+              <polyline points="10,34 18,24 26,28 38,18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="38" cy="18" r="2.5" fill="currentColor"/>
+            </svg>
+          </div>
+          <div class="welcome-text">
+            <h2>Benchmark Dashboard</h2>
+            <p>Track performance trends across CI runs. Filter by series, suite, and metric to compare results over time.</p>
+            <p class="welcome-hint">Data will appear here once CI benchmark runs complete. <a href="https://github.com/SUSTechHSAS/sumzle-hpc-solver">View the repository</a> to learn about setup.</p>
+          </div>
+        </div>
+      </section>
+
       <section class="controls" aria-label="Benchmark filters">
-        <label>
-          Series
+        <label title="Filter by branch or pull request">
+          Branch / PR
           <select id="series-filter"></select>
         </label>
-        <label>
-          Suite
+        <label title="Filter by benchmark suite">
+          Benchmark Suite
           <select id="suite-filter"></select>
         </label>
-        <label>
-          Metric
+        <label title="Filter by performance metric">
+          Metric Name
           <select id="metric-filter"></select>
         </label>
-        <label>
-          Case
+        <label title="Filter by benchmark parameter configuration">
+          Benchmark Parameters
           <select id="case-filter"></select>
         </label>
-        <label>
-          Recent runs
-          <input id="range-filter" type="range" min="2" max="100" value="40" />
-          <output id="range-output">40</output>
+        <label title="Adjust the number of recent runs shown">
+          Recent Runs
+          <span class="range-row">
+            <input id="range-filter" type="range" min="2" max="100" value="40" />
+            <output id="range-output">40</output>
+          </span>
         </label>
       </section>
 
       <section class="chart-panel">
-        <svg id="chart" role="img" aria-label="Benchmark chart"></svg>
-        <div id="tooltip" hidden></div>
+        <div class="chart-header">
+          <h2 id="chart-title">Benchmark Trend</h2>
+          <span id="chart-subtitle" class="chart-subtitle"></span>
+        </div>
+        <svg id="chart" role="group" aria-roledescription="chart" aria-label="Benchmark trend chart — use arrow keys to navigate data points"></svg>
+        <div id="chart-tip" class="chart-tip" hidden>
+          <span id="chart-tip-text">Hover data points for details — use arrow keys to navigate the chart</span>
+          <button id="chart-tip-dismiss" type="button" class="chart-tip-dismiss" aria-label="Dismiss tip" title="Dismiss">&times;</button>
+        </div>
+        <div id="tooltip" role="tooltip"></div>
+        <p id="chart-status" class="sr-only" aria-live="polite"></p>
       </section>
 
       <section class="table-panel">
-        <h2>Visible Runs</h2>
+        <div class="table-header">
+          <h2>Visible Runs</h2>
+          <span id="range-context" class="range-context"></span>
+        </div>
         <div class="table-scroll">
           <table>
+            <caption class="sr-only">Benchmark run results for the selected filters</caption>
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Series</th>
-                <th>Commit</th>
-                <th>Value</th>
-                <th>Run</th>
+                <th scope="col">Time</th>
+                <th scope="col">Branch / PR</th>
+                <th scope="col">Commit</th>
+                <th scope="col">Value</th>
+                <th scope="col">CI Run</th>
               </tr>
             </thead>
             <tbody id="run-table"></tbody>
           </table>
+          <p id="table-empty" class="empty-state" hidden>No runs match the current filters. Try selecting a different branch, benchmark suite, or metric name.</p>
         </div>
       </section>
     </main>

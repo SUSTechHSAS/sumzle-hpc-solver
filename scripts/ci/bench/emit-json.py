@@ -35,8 +35,8 @@ def read_lines(path: Path) -> list[str]:
 
 def run_text(args: list[str]) -> str:
     try:
-        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=30).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return ""
 
 

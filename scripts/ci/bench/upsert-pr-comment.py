@@ -14,7 +14,7 @@ MARKER = "<!-- sumzle-benchmark-dashboard -->"
 
 
 def run(args: list[str], input_text: str | None = None) -> str:
-    return subprocess.check_output(args, input=input_text, text=True).strip()
+    return subprocess.check_output(args, input=input_text, text=True, timeout=30).strip()
 
 
 def main() -> None:
