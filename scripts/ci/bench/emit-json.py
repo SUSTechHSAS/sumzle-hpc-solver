@@ -98,10 +98,12 @@ def parse_topn(path: Path) -> list[dict[str, Any]]:
         parts = line.split(":")
         if len(parts) != 6:
             continue
-        parsed = parse_ints(*parts)
-        if parsed is None:
+        parsed_ints = parse_ints(*parts[:4])
+        parsed_floats = parse_floats(*parts[4:])
+        if parsed_ints is None or parsed_floats is None:
             continue
-        length, n, solutions, searched, time_ms, speed = parsed
+        length, n, solutions, searched = parsed_ints
+        time_ms, speed = parsed_floats
         params = {"length": length, "n": n}
         metrics.append(metric("topn", "solutions_kept", solutions, "count", params, lower_is_better=False))
         metrics.append(metric("topn", "expressions_searched", searched, "count", params, lower_is_better=False))
@@ -116,10 +118,12 @@ def parse_streaming(path: Path) -> list[dict[str, Any]]:
         parts = line.split(":")
         if len(parts) != 6:
             continue
-        parsed = parse_ints(*parts)
-        if parsed is None:
+        parsed_ints = parse_ints(parts[0], parts[1], parts[2], parts[5])
+        parsed_floats = parse_floats(parts[3], parts[4])
+        if parsed_ints is None or parsed_floats is None:
             continue
-        length, solutions, searched, time_ms, speed, file_bytes = parsed
+        length, solutions, searched, file_bytes = parsed_ints
+        time_ms, speed = parsed_floats
         params = {"length": length}
         metrics.append(metric("streaming", "solutions", solutions, "count", params, lower_is_better=False))
         metrics.append(metric("streaming", "expressions_searched", searched, "count", params, lower_is_better=False))
@@ -136,10 +140,12 @@ def parse_memory(path: Path) -> list[dict[str, Any]]:
         if len(parts) != 4:
             continue
         length, mode, peak_rss_kb, wall_ms = parts
-        parsed = parse_ints(length, peak_rss_kb, wall_ms)
-        if parsed is None:
+        parsed_ints = parse_ints(length, peak_rss_kb)
+        parsed_floats = parse_floats(wall_ms)
+        if parsed_ints is None or parsed_floats is None:
             continue
-        len_val, peak_val, wall_val = parsed
+        len_val, peak_val = parsed_ints
+        wall_val = parsed_floats[0]
         params = {"length": len_val, "mode": mode}
         metrics.append(metric("memory", "peak_rss", peak_val, "KiB", params))
         metrics.append(metric("memory", "wall_time", wall_val, "ms", params))
