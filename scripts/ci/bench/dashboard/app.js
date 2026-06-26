@@ -56,6 +56,8 @@ function buildPoints() {
     if (!run) continue;
     for (const metric of run.metrics || []) {
       if (!metric) continue;
+      const value = Number(metric.value);
+      if (!Number.isFinite(value)) continue;
       state.points.push({
         run,
         metric,
@@ -64,7 +66,7 @@ function buildPoints() {
         metricName: metric.metric,
         caseName: caseName(metric),
         key: metricKey(metric),
-        value: Number(metric.value),
+        value,
         unit: metric.unit,
         generatedAt: run.generated_at || "",
       });
