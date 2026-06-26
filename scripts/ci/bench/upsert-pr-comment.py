@@ -63,7 +63,12 @@ PR benchmark commits are shown as a separate curve from `main`.
 
     comments_raw = run(["gh", "api", f"repos/{repository}/issues/{pr_number}/comments", "--paginate", "--slurp"])
     pages = json.loads(comments_raw) if comments_raw else []
-    comments = [comment for page in pages for comment in page]
+    comments = []
+    for item in pages:
+        if isinstance(item, list):
+            comments.extend(item)
+        elif isinstance(item, dict):
+            comments.append(item)
     existing_id = None
     for comment in comments:
         if isinstance(comment, dict) and MARKER in (comment.get("body") or ""):
