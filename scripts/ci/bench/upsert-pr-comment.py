@@ -24,7 +24,7 @@ def main() -> None:
 
     result = json.loads(Path(args.result).read_text(encoding="utf-8"))
     pr = result.get("pull_request")
-    if not pr or not pr.get("number"):
+    if not isinstance(pr, dict) or not pr.get("number"):
         print("Not a pull request benchmark; skipping comment")
         return
 

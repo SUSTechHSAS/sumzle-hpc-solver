@@ -53,7 +53,9 @@ function setOptions(select, values, selected) {
 function buildPoints() {
   state.points = [];
   for (const run of state.history.runs || []) {
+    if (!run) continue;
     for (const metric of run.metrics || []) {
+      if (!metric) continue;
       state.points.push({
         run,
         metric,
@@ -279,15 +281,13 @@ function render() {
 }
 
 async function main() {
-  const response = await fetch("data/history.json", { cache: "no-store" }).catch(() => null);
-  if (response && response.status === 404) {
+  const response = await fetch("data/history.json", { cache: "no-store" });
+  if (response.status === 404) {
     state.history = { runs: [] };
-  } else if (response && !response.ok) {
+  } else if (!response.ok) {
     throw new Error(`HTTP error while loading history: ${response.status}`);
-  } else if (response) {
-    state.history = await response.json();
   } else {
-    state.history = { runs: [] };
+    state.history = await response.json();
   }
   buildPoints();
   const runCount = (state.history.runs || []).length;

@@ -203,7 +203,7 @@ def parse_criterion(path: Path) -> list[dict[str, Any]]:
 def github_context() -> dict[str, Any]:
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     event: dict[str, Any] = {}
-    if event_path and Path(event_path).exists():
+    if event_path and Path(event_path).is_file():
         event = json.loads(Path(event_path).read_text(encoding="utf-8"))
 
     pull_request = event.get("pull_request")

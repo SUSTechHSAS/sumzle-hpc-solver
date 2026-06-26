@@ -16,7 +16,11 @@ def load_json(path: Path, default: Any) -> Any:
 
 
 def run_key(run: dict[str, Any]) -> tuple[str, str, str]:
-    run_meta = run.get("run") or {}
+    if not isinstance(run, dict):
+        return ("", "", "")
+    run_meta = run.get("run")
+    if not isinstance(run_meta, dict):
+        run_meta = {}
     return (str(run_meta.get("id", "")), str(run_meta.get("attempt", "")), str(run.get("sha", "")))
 
 
@@ -39,7 +43,7 @@ def main() -> None:
     if not isinstance(result, dict):
         raise SystemExit(f"Error: result JSON is not a valid dictionary: {result_path}")
 
-    runs = [run for run in history.get("runs", []) if run_key(run) != run_key(result)]
+    runs = [run for run in history.get("runs", []) if isinstance(run, dict) and run_key(run) != run_key(result)]
     runs.append(result)
     runs.sort(key=lambda run: (run.get("generated_at") or "", run.get("sha") or ""))
     if args.max_runs > 0:
