@@ -39,7 +39,7 @@ def main() -> None:
 
     runs = [run for run in history.get("runs", []) if run_key(run) != run_key(result)]
     runs.append(result)
-    runs.sort(key=lambda run: (run.get("generated_at", ""), run.get("sha", "")))
+    runs.sort(key=lambda run: (run.get("generated_at") or "", run.get("sha") or ""))
     if args.max_runs > 0:
         runs = runs[-args.max_runs :]
 

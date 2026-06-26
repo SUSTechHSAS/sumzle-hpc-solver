@@ -209,8 +209,9 @@ function renderChart(points) {
 
 function showTooltip(event, point) {
   els.tooltip.hidden = false;
-  els.tooltip.style.left = `${event.offsetX + 18}px`;
-  els.tooltip.style.top = `${event.offsetY + 18}px`;
+  const rect = els.chart.parentElement.getBoundingClientRect();
+  els.tooltip.style.left = `${event.clientX - rect.left + 18}px`;
+  els.tooltip.style.top = `${event.clientY - rect.top + 18}px`;
   els.tooltip.textContent = "";
   const lines = [
     `${point.series} ${(point.run.sha || "").slice(0, 7)}`,

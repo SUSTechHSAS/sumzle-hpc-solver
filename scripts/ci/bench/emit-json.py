@@ -37,6 +37,20 @@ def run_text(args: list[str]) -> str:
         return ""
 
 
+def parse_ints(*values: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(value) for value in values)
+    except ValueError:
+        return None
+
+
+def parse_floats(*values: str) -> tuple[float, ...] | None:
+    try:
+        return tuple(float(value) for value in values)
+    except ValueError:
+        return None
+
+
 def metric(
     suite: str,
     name: str,
@@ -62,10 +76,14 @@ def parse_cli(path: Path, suite: str) -> list[dict[str, Any]]:
         if len(parts) != 4:
             continue
         length, solutions, searched, time_raw = parts
-        params = {"length": int(length)}
+        parsed = parse_ints(length, solutions, searched)
+        if parsed is None:
+            continue
+        len_val, sol_val, search_val = parsed
+        params = {"length": len_val}
         time_ns = parse_time_ns(time_raw)
-        metrics.append(metric(suite, "solutions", int(solutions), "count", params, lower_is_better=False))
-        metrics.append(metric(suite, "expressions_searched", int(searched), "count", params, lower_is_better=False))
+        metrics.append(metric(suite, "solutions", sol_val, "count", params, lower_is_better=False))
+        metrics.append(metric(suite, "expressions_searched", search_val, "count", params, lower_is_better=False))
         if time_ns is not None:
             metrics.append(metric(suite, "time", time_ns, "ns", params))
     return metrics
@@ -77,12 +95,15 @@ def parse_topn(path: Path) -> list[dict[str, Any]]:
         parts = line.split(":")
         if len(parts) != 6:
             continue
-        length, n, solutions, searched, time_ms, speed = parts
-        params = {"length": int(length), "n": int(n)}
-        metrics.append(metric("topn", "solutions_kept", int(solutions), "count", params, lower_is_better=False))
-        metrics.append(metric("topn", "expressions_searched", int(searched), "count", params, lower_is_better=False))
-        metrics.append(metric("topn", "time", int(time_ms), "ms", params))
-        metrics.append(metric("topn", "speed", int(speed), "expr/s", params, lower_is_better=False))
+        parsed = parse_ints(*parts)
+        if parsed is None:
+            continue
+        length, n, solutions, searched, time_ms, speed = parsed
+        params = {"length": length, "n": n}
+        metrics.append(metric("topn", "solutions_kept", solutions, "count", params, lower_is_better=False))
+        metrics.append(metric("topn", "expressions_searched", searched, "count", params, lower_is_better=False))
+        metrics.append(metric("topn", "time", time_ms, "ms", params))
+        metrics.append(metric("topn", "speed", speed, "expr/s", params, lower_is_better=False))
     return metrics
 
 
@@ -92,13 +113,16 @@ def parse_streaming(path: Path) -> list[dict[str, Any]]:
         parts = line.split(":")
         if len(parts) != 6:
             continue
-        length, solutions, searched, time_ms, speed, file_bytes = parts
-        params = {"length": int(length)}
-        metrics.append(metric("streaming", "solutions", int(solutions), "count", params, lower_is_better=False))
-        metrics.append(metric("streaming", "expressions_searched", int(searched), "count", params, lower_is_better=False))
-        metrics.append(metric("streaming", "time", int(time_ms), "ms", params))
-        metrics.append(metric("streaming", "speed", int(speed), "expr/s", params, lower_is_better=False))
-        metrics.append(metric("streaming", "output_size", int(file_bytes), "bytes", params))
+        parsed = parse_ints(*parts)
+        if parsed is None:
+            continue
+        length, solutions, searched, time_ms, speed, file_bytes = parsed
+        params = {"length": length}
+        metrics.append(metric("streaming", "solutions", solutions, "count", params, lower_is_better=False))
+        metrics.append(metric("streaming", "expressions_searched", searched, "count", params, lower_is_better=False))
+        metrics.append(metric("streaming", "time", time_ms, "ms", params))
+        metrics.append(metric("streaming", "speed", speed, "expr/s", params, lower_is_better=False))
+        metrics.append(metric("streaming", "output_size", file_bytes, "bytes", params))
     return metrics
 
 
@@ -109,9 +133,13 @@ def parse_memory(path: Path) -> list[dict[str, Any]]:
         if len(parts) != 4:
             continue
         length, mode, peak_rss_kb, wall_ms = parts
-        params = {"length": int(length), "mode": mode}
-        metrics.append(metric("memory", "peak_rss", int(peak_rss_kb), "KiB", params))
-        metrics.append(metric("memory", "wall_time", int(wall_ms), "ms", params))
+        parsed = parse_ints(length, peak_rss_kb, wall_ms)
+        if parsed is None:
+            continue
+        len_val, peak_val, wall_val = parsed
+        params = {"length": len_val, "mode": mode}
+        metrics.append(metric("memory", "peak_rss", peak_val, "KiB", params))
+        metrics.append(metric("memory", "wall_time", wall_val, "ms", params))
     return metrics
 
 
@@ -122,15 +150,21 @@ def parse_server(path: Path) -> list[dict[str, Any]]:
         if len(parts) != 11:
             continue
         length, requests, concurrency, throughput, mean_ms, p50_ms, p95_ms, peak_rss_kb, found, searched, errors = parts
-        params = {"length": int(length), "requests": int(requests), "concurrency": int(concurrency)}
-        metrics.append(metric("server", "throughput", float(throughput), "req/s", params, lower_is_better=False))
-        metrics.append(metric("server", "mean_latency", float(mean_ms), "ms", params))
-        metrics.append(metric("server", "p50_latency", float(p50_ms), "ms", params))
-        metrics.append(metric("server", "p95_latency", float(p95_ms), "ms", params))
-        metrics.append(metric("server", "peak_rss", int(peak_rss_kb), "KiB", params))
-        metrics.append(metric("server", "solutions", int(found), "count", params, lower_is_better=False))
-        metrics.append(metric("server", "expressions_searched", int(searched), "count", params, lower_is_better=False))
-        metrics.append(metric("server", "errors", int(errors), "count", params))
+        parsed_ints = parse_ints(length, requests, concurrency, peak_rss_kb, found, searched, errors)
+        parsed_floats = parse_floats(throughput, mean_ms, p50_ms, p95_ms)
+        if parsed_ints is None or parsed_floats is None:
+            continue
+        len_val, req_val, conc_val, peak_val, found_val, searched_val, errors_val = parsed_ints
+        throughput_val, mean_val, p50_val, p95_val = parsed_floats
+        params = {"length": len_val, "requests": req_val, "concurrency": conc_val}
+        metrics.append(metric("server", "throughput", throughput_val, "req/s", params, lower_is_better=False))
+        metrics.append(metric("server", "mean_latency", mean_val, "ms", params))
+        metrics.append(metric("server", "p50_latency", p50_val, "ms", params))
+        metrics.append(metric("server", "p95_latency", p95_val, "ms", params))
+        metrics.append(metric("server", "peak_rss", peak_val, "KiB", params))
+        metrics.append(metric("server", "solutions", found_val, "count", params, lower_is_better=False))
+        metrics.append(metric("server", "expressions_searched", searched_val, "count", params, lower_is_better=False))
+        metrics.append(metric("server", "errors", errors_val, "count", params))
     return metrics
 
 

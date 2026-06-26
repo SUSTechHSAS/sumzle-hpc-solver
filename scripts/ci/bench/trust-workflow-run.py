@@ -32,7 +32,11 @@ def main() -> None:
     args = parser.parse_args()
 
     result_path = Path(args.result)
+    if not args.event_path:
+        raise SystemExit("Error: --event-path is required or GITHUB_EVENT_PATH must be set")
     event_path = Path(args.event_path)
+    if not event_path.is_file():
+        raise SystemExit(f"Error: event path is not a file: {event_path}")
     result = json.loads(result_path.read_text(encoding="utf-8"))
     event = json.loads(event_path.read_text(encoding="utf-8"))
     workflow_run = event["workflow_run"]
