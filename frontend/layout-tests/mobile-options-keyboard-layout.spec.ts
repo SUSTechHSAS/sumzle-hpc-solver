@@ -27,15 +27,17 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
         [
           page.locator('label[for="threads-input"]'),
           page.locator('label[for="topn-input"]'),
-          page.locator('.option-control-checkbox > label[for="progress-toggle"]'),
         ].map((locator) => box(locator)),
+      );
+      const progressLabel = await box(
+        page.locator('.option-control-checkbox > label[for="progress-toggle"]'),
       );
       const threadsInput = await box(page.locator('#threads-input'));
       const topNInput = await box(page.locator('#topn-input'));
-      const progressToggle = await box(page.locator('#progress-toggle'));
+      const progressToggle = await box(page.locator('.checkbox-box'));
       const progressHint = await box(page.locator('.checkbox-option .option-hint'));
       const hintLocator = page.locator('.option-control .option-hint');
-      await expect(hintLocator.first()).toBeVisible();
+      await expect(hintLocator).toHaveCount(3);
       const hints = await Promise.all((await hintLocator.all()).map(box));
 
       for (const label of labels.slice(1)) {
@@ -46,18 +48,27 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
 
       expect(Math.abs(threadsInput.x - topNInput.x)).toBeLessThan(EPSILON);
       expect(Math.abs(threadsInput.width - topNInput.width)).toBeLessThan(EPSILON);
-      expect(progressToggle.x).toBeGreaterThanOrEqual(threadsInput.x - EPSILON);
-      expect(progressHint.x - (progressToggle.x + progressToggle.width)).toBeLessThanOrEqual(16);
-      expect(Math.abs(progressHint.y - progressToggle.y)).toBeLessThanOrEqual(4);
+      expect(progressHint.x - (progressToggle.x + progressToggle.width)).toBeLessThanOrEqual(12);
+      expect(
+        Math.abs(
+          progressHint.y + progressHint.height / 2 - (progressToggle.y + progressToggle.height / 2),
+        ),
+      ).toBeLessThanOrEqual(3);
+
+      expect(
+        Math.abs(progressLabel.x + progressLabel.width - (labels[0].x + labels[0].width)),
+      ).toBeLessThan(EPSILON);
+      expect(Math.abs(progressToggle.x - threadsInput.x)).toBeLessThan(EPSILON);
+      expect(progressToggle.x - (progressLabel.x + progressLabel.width)).toBeLessThanOrEqual(12);
 
       for (const hint of hints.slice(1, 2)) {
         expect(Math.abs(hint.x - hints[0].x)).toBeLessThan(EPSILON);
       }
 
       const visibleOptionParts = page.locator(
-        '.option-control label, .option-control input, .option-control .option-hint',
+        '.option-control > label, .option-control .option-input, .option-control .checkbox-box, .option-control .option-hint',
       );
-      await expect(visibleOptionParts.first()).toBeVisible();
+      await expect(visibleOptionParts).toHaveCount(10);
       for (const part of await visibleOptionParts.all()) {
         const partBox = await box(part);
         expect(partBox.x).toBeGreaterThanOrEqual(solveOptions.x - EPSILON);

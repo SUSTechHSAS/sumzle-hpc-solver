@@ -354,6 +354,7 @@ export default function App() {
                       checked={useProgress}
                       onChange={(e) => setUseProgress(e.target.checked)}
                     />
+                    <span className="checkbox-box" aria-hidden="true" />
                     <span className="option-hint">显示多线程搜索的真实进度</span>
                   </label>
                 </div>
