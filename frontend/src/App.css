@@ -254,6 +254,9 @@ textarea:focus-visible {
 }
 
 .solve-options {
+  display: grid;
+  grid-template-columns: max-content 70px minmax(0, 1fr);
+  align-items: center;
   padding: var(--space-md);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-m);
@@ -265,6 +268,10 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
+}
+
+.option-control {
+  display: contents;
 }
 
 .length-control label,
@@ -297,6 +304,17 @@ textarea:focus-visible {
   width: 70px;
   padding: var(--space-xs) var(--space-sm);
   font-size: 0.95rem;
+}
+
+.option-control label {
+  justify-self: end;
+  align-self: center;
+  text-align: right;
+}
+
+.option-control .option-input,
+.option-control .option-hint {
+  align-self: center;
 }
 
 .length-input:focus,
@@ -414,17 +432,10 @@ textarea:focus-visible {
   width: 100%;
 }
 
-/* Real-time progress toggle sits inline with the numeric solve options. */
-.option-control-checkbox label {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2xs);
-  cursor: pointer;
-}
-
 .option-control-checkbox input {
   width: 16px;
   height: 16px;
+  justify-self: center;
   cursor: pointer;
   accent-color: var(--fluent-blue);
 }
@@ -548,11 +559,6 @@ textarea:focus-visible {
     flex-direction: column;
   }
 
-  .solve-options {
-    display: grid;
-    grid-template-columns: max-content 70px minmax(0, 1fr);
-  }
-
   .length-control,
   .row-buttons {
     justify-content: center;
@@ -582,15 +588,6 @@ textarea:focus-visible {
     order: 3;
   }
 
-  .option-control {
-    display: contents;
-  }
-
-  .option-control label {
-    justify-self: end;
-    text-align: right;
-  }
-
   .option-control .option-input {
     width: 70px;
   }
@@ -598,18 +595,6 @@ textarea:focus-visible {
   .option-control .option-hint {
     min-width: 0;
     white-space: normal;
-  }
-
-  .option-control-checkbox {
-    display: contents;
-  }
-
-  .option-control-checkbox label {
-    justify-self: end;
-  }
-
-  .option-control-checkbox .option-hint {
-    grid-column: 2 / -1;
   }
 
   .tools-grid {
