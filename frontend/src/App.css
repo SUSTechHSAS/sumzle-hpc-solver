@@ -415,6 +415,10 @@ textarea:focus-visible {
 }
 
 /* Real-time progress toggle sits inline with the numeric solve options. */
+.option-control-checkbox {
+  align-items: center;
+}
+
 .option-control-checkbox label {
   display: inline-flex;
   align-items: center;
@@ -422,9 +426,16 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.progress-toggle-text,
+.option-control-checkbox .option-hint {
+  line-height: 1;
+}
+
 .option-control-checkbox input {
+  flex: 0 0 auto;
   width: 16px;
   height: 16px;
+  margin: 0;
   cursor: pointer;
   accent-color: var(--fluent-blue);
 }
@@ -578,7 +589,32 @@ textarea:focus-visible {
   }
 
   .option-control {
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(6.5em, 1fr) 70px minmax(7.5em, 1fr);
+    align-items: center;
+    column-gap: var(--space-xs);
+  }
+
+  .option-control label {
+    justify-self: start;
+  }
+
+  .option-input {
+    width: 70px;
+    justify-self: center;
+  }
+
+  .option-hint {
+    justify-self: end;
+    text-align: right;
+  }
+
+  .option-control-checkbox {
+    grid-template-columns: minmax(6.5em, auto) minmax(0, 1fr);
+  }
+
+  .option-control-checkbox .option-hint {
+    justify-self: end;
   }
 
   .tools-grid {
