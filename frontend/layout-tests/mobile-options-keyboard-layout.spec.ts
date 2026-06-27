@@ -10,8 +10,6 @@ async function box(locator: Locator) {
 }
 
 test.describe('issue #36 — mobile controls and keyboard layout', () => {
-  test.use({ locale: 'zh-CN' });
-
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await page.setViewportSize({ width: 363, height: 777 });
@@ -26,10 +24,13 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
     expect(Math.abs(threadsInput.x - topNInput.x)).toBeLessThan(EPSILON);
     expect(Math.abs(threadsInput.width - topNInput.width)).toBeLessThan(EPSILON);
 
-    for (const control of await page.locator('.option-control').all()) {
-      const controlBox = await box(control);
-      expect(controlBox.x).toBeGreaterThanOrEqual(solveOptions.x - EPSILON);
-      expect(controlBox.x + controlBox.width).toBeLessThanOrEqual(
+    const visibleOptionParts = page.locator(
+      '.option-control label, .option-control input, .option-control .option-hint',
+    );
+    for (const part of await visibleOptionParts.all()) {
+      const partBox = await box(part);
+      expect(partBox.x).toBeGreaterThanOrEqual(solveOptions.x - EPSILON);
+      expect(partBox.x + partBox.width).toBeLessThanOrEqual(
         solveOptions.x + solveOptions.width + EPSILON,
       );
     }

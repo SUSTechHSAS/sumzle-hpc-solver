@@ -548,6 +548,11 @@ textarea:focus-visible {
     flex-direction: column;
   }
 
+  .solve-options {
+    display: grid;
+    grid-template-columns: max-content 70px minmax(0, 1fr);
+  }
+
   .length-control,
   .row-buttons {
     justify-content: center;
@@ -578,10 +583,7 @@ textarea:focus-visible {
   }
 
   .option-control {
-    display: grid;
-    grid-template-columns: 7rem 70px minmax(0, 1fr);
-    align-items: center;
-    column-gap: var(--space-xs);
+    display: contents;
   }
 
   .option-control label {
@@ -599,11 +601,15 @@ textarea:focus-visible {
   }
 
   .option-control-checkbox {
-    grid-template-columns: 7rem minmax(0, 1fr);
+    display: contents;
   }
 
   .option-control-checkbox label {
     justify-self: end;
+  }
+
+  .option-control-checkbox .option-hint {
+    grid-column: 2 / -1;
   }
 
   .tools-grid {
