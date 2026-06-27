@@ -317,6 +317,21 @@ textarea:focus-visible {
   align-self: center;
 }
 
+.checkbox-option {
+  grid-column: 2 / -1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.option-control .checkbox-option {
+  justify-self: start;
+  text-align: left;
+}
+
 .length-input:focus,
 .option-input:focus {
   border-color: var(--fluent-blue);
@@ -432,12 +447,16 @@ textarea:focus-visible {
   width: 100%;
 }
 
-.option-control-checkbox input {
+.checkbox-option input {
   width: 16px;
   height: 16px;
-  justify-self: center;
+  flex: 0 0 auto;
   cursor: pointer;
   accent-color: var(--fluent-blue);
+}
+
+.checkbox-option .option-hint {
+  white-space: normal;
 }
 
 .stream-status {

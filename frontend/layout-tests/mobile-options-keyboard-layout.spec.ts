@@ -27,12 +27,13 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
         [
           page.locator('label[for="threads-input"]'),
           page.locator('label[for="topn-input"]'),
-          page.locator('label[for="progress-toggle"]'),
+          page.locator('.option-control-checkbox > label[for="progress-toggle"]'),
         ].map((locator) => box(locator)),
       );
       const threadsInput = await box(page.locator('#threads-input'));
       const topNInput = await box(page.locator('#topn-input'));
       const progressToggle = await box(page.locator('#progress-toggle'));
+      const progressHint = await box(page.locator('.checkbox-option .option-hint'));
       const hintLocator = page.locator('.option-control .option-hint');
       await expect(hintLocator.first()).toBeVisible();
       const hints = await Promise.all((await hintLocator.all()).map(box));
@@ -46,11 +47,10 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
       expect(Math.abs(threadsInput.x - topNInput.x)).toBeLessThan(EPSILON);
       expect(Math.abs(threadsInput.width - topNInput.width)).toBeLessThan(EPSILON);
       expect(progressToggle.x).toBeGreaterThanOrEqual(threadsInput.x - EPSILON);
-      expect(progressToggle.x + progressToggle.width).toBeLessThanOrEqual(
-        threadsInput.x + threadsInput.width + EPSILON,
-      );
+      expect(progressHint.x - (progressToggle.x + progressToggle.width)).toBeLessThanOrEqual(16);
+      expect(Math.abs(progressHint.y - progressToggle.y)).toBeLessThanOrEqual(4);
 
-      for (const hint of hints.slice(1)) {
+      for (const hint of hints.slice(1, 2)) {
         expect(Math.abs(hint.x - hints[0].x)).toBeLessThan(EPSILON);
       }
 

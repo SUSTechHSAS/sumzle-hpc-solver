@@ -347,13 +347,15 @@ export default function App() {
                 </div>
                 <div className="option-control option-control-checkbox">
                   <label htmlFor="progress-toggle">实时进度:</label>
-                  <input
-                    id="progress-toggle"
-                    type="checkbox"
-                    checked={useProgress}
-                    onChange={(e) => setUseProgress(e.target.checked)}
-                  />
-                  <span className="option-hint">显示多线程搜索的真实进度</span>
+                  <label className="checkbox-option">
+                    <input
+                      id="progress-toggle"
+                      type="checkbox"
+                      checked={useProgress}
+                      onChange={(e) => setUseProgress(e.target.checked)}
+                    />
+                    <span className="option-hint">显示多线程搜索的真实进度</span>
+                  </label>
                 </div>
               </div>
 
