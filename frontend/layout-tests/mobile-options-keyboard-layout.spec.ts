@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type Page } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 
 const EPSILON = 1.5;
 
@@ -10,6 +10,8 @@ async function box(locator: Locator) {
 }
 
 test.describe('issue #36 — mobile controls and keyboard layout', () => {
+  test.use({ locale: 'zh-CN' });
+
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await page.setViewportSize({ width: 363, height: 777 });
