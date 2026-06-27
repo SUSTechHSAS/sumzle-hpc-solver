@@ -33,9 +33,9 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
       const threadsInput = await box(page.locator('#threads-input'));
       const topNInput = await box(page.locator('#topn-input'));
       const progressToggle = await box(page.locator('#progress-toggle'));
-      const hints = await Promise.all(
-        (await page.locator('.option-control .option-hint').all()).map(box),
-      );
+      const hintLocator = page.locator('.option-control .option-hint');
+      await expect(hintLocator.first()).toBeVisible();
+      const hints = await Promise.all((await hintLocator.all()).map(box));
 
       for (const label of labels.slice(1)) {
         expect(Math.abs(label.x + label.width - (labels[0].x + labels[0].width))).toBeLessThan(
@@ -57,6 +57,7 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
       const visibleOptionParts = page.locator(
         '.option-control label, .option-control input, .option-control .option-hint',
       );
+      await expect(visibleOptionParts.first()).toBeVisible();
       for (const part of await visibleOptionParts.all()) {
         const partBox = await box(part);
         expect(partBox.x).toBeGreaterThanOrEqual(solveOptions.x - EPSILON);
@@ -72,12 +73,16 @@ test.describe('issue #36 — mobile controls and keyboard layout', () => {
   }) => {
     await page.setViewportSize({ width: 363, height: 777 });
 
-    const rows = await page.locator('.keyboard-row').all();
+    const rowLocator = page.locator('.keyboard-row');
+    await expect(rowLocator.first()).toBeVisible();
+    const rows = await rowLocator.all();
     expect(rows.length).toBeGreaterThan(0);
 
     for (const row of rows) {
       const rowBox = await box(row);
-      const keys = await row.locator('.keyboard-key').all();
+      const keyLocator = row.locator('.keyboard-key');
+      await expect(keyLocator.first()).toBeVisible();
+      const keys = await keyLocator.all();
       expect(keys.length).toBeGreaterThan(0);
 
       const firstKeyBox = await box(keys[0]);
