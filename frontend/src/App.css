@@ -578,7 +578,32 @@ textarea:focus-visible {
   }
 
   .option-control {
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 7rem 70px minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--space-xs);
+  }
+
+  .option-control label {
+    justify-self: end;
+    text-align: right;
+  }
+
+  .option-control .option-input {
+    width: 70px;
+  }
+
+  .option-control .option-hint {
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .option-control-checkbox {
+    grid-template-columns: 7rem minmax(0, 1fr);
+  }
+
+  .option-control-checkbox label {
+    justify-self: end;
   }
 
   .tools-grid {

@@ -55,13 +55,21 @@
 }
 
 @media (max-width: 768px) {
+  .keyboard-row {
+    flex-wrap: nowrap;
+    gap: 2px;
+  }
+
   .keyboard-key {
-    min-width: 30px;
+    flex: 1 1 0;
+    min-width: 0;
     min-height: 36px;
+    padding: 0 3px;
     font-size: 0.75rem;
   }
 
   .key-backspace {
-    min-width: 44px;
+    flex-grow: 1.55;
+    min-width: 0;
   }
 }
