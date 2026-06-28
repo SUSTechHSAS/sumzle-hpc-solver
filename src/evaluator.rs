@@ -139,7 +139,10 @@ enum I64Result {
 }
 
 fn evaluate_arithmetic_i64(expr: &[u8]) -> I64Result {
-    let mut parser = I64Parser { bytes: expr, pos: 0 };
+    let mut parser = I64Parser {
+        bytes: expr,
+        pos: 0,
+    };
     match parser.parse_expression() {
         Some(result) => {
             if parser.pos < expr.len() {
@@ -157,7 +160,7 @@ struct I64Parser<'a> {
     pos: usize,
 }
 
-impl<'a> I64Parser<'a> {
+impl I64Parser<'_> {
     #[inline]
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.pos).copied()
@@ -206,7 +209,7 @@ impl<'a> I64Parser<'a> {
                     if rhs == 0 {
                         return None;
                     }
-                    result = result % rhs;
+                    result %= rhs;
                 }
                 _ => break,
             }

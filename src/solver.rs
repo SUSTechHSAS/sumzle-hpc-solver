@@ -948,6 +948,7 @@ fn fill_candidate_mask(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn dynamic_check(
     ch: u8,
     ch_idx: usize,
@@ -962,18 +963,75 @@ fn dynamic_check(
     current_num_len: u8,
     current_num_value: i64,
     current_num_leading_zero: bool,
+    floor_ctx: FloorContext,
 ) -> Option<usize> {
+    // Exact count constraint (dynamic: depends on char_counts).
     if prepared.exact_mask & (1u32 << ch_idx) != 0
         && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
     {
         return None;
     }
+
+    // Floor context constraints
+    if floor_ctx.in_floor {
+        if ch == b'[' || ch == b'(' || ch == b'A' || ch == b'!' {
+            return None;
+        }
+        if is_operator_b(ch) && ch != b'/' {
+            return None;
+        }
+        if is_main_operator_b(ch) {
+            return None;
+        }
+        if ch == b'/' {
+            if floor_ctx.has_slash_in_current_floor {
+                return None;
+            }
+            if !prev_char.is_some_and(is_digit_b) || index == 0 {
+                return None;
+            }
+        } else if ch == b']' {
+            if !prev_char.is_some_and(is_digit_b) {
+                return None;
+            }
+            if !floor_ctx.has_slash_in_current_floor {
+                return None;
+            }
+        } else if !is_digit_b(ch) {
+            return None;
+        }
+    }
+
+    // Floor bracket constraints
+    if ch == b'[' && floor_ctx.in_floor {
+        return None;
+    }
+    if ch == b']' && !floor_ctx.in_floor {
+        return None;
+    }
+    if ch == b'[' && index >= length.saturating_sub(3) {
+        return None;
+    }
+
+    // Leading zero check and operand value check
     if is_digit_b(ch) {
         let digit = (ch - b'0') as i64;
         let continuing_number = prev_char.is_some_and(is_digit_b);
-        let new_len = if continuing_number { current_num_len as usize + 1 } else { 1 };
-        let new_value = if continuing_number { current_num_value * 10 + digit } else { digit };
-        let leading_zero = if continuing_number { current_num_leading_zero } else { ch == b'0' };
+        let new_len = if continuing_number {
+            current_num_len as usize + 1
+        } else {
+            1
+        };
+        let new_value = if continuing_number {
+            current_num_value * 10 + digit
+        } else {
+            digit
+        };
+        let leading_zero = if continuing_number {
+            current_num_leading_zero
+        } else {
+            ch == b'0'
+        };
         if new_len > 1 && leading_zero {
             return None;
         }
@@ -981,6 +1039,91 @@ fn dynamic_check(
             return None;
         }
     }
+
+    // First position rules
+    if index == 0
+        && (is_binary_operator_b(ch)
+            || is_close_bracket_b(ch)
+            || is_main_operator_b(ch)
+            || is_unary_post_operator_b(ch))
+    {
+        return None;
+    }
+
+    // Previous character-based rules
+    if let Some(pc) = prev_char {
+        if is_digit_b(pc) {
+            if is_open_bracket_b(ch) && ch != b'[' {
+                return None;
+            }
+            if ch == b'[' && floor_ctx.in_floor {
+                return None;
+            }
+        } else if is_operator_b(pc) {
+            if is_binary_operator_b(ch)
+                && !(pc == b'A' && (is_open_bracket_b(ch) || is_digit_b(ch)))
+                && !is_unary_post_operator_b(pc)
+            {
+                return None;
+            }
+            if is_close_bracket_b(ch) && !is_unary_post_operator_b(pc) {
+                return None;
+            }
+            if is_main_operator_b(ch) && !is_unary_post_operator_b(pc) {
+                return None;
+            }
+            if is_unary_post_operator_b(pc) && (is_digit_b(ch) || is_open_bracket_b(ch)) {
+                return None;
+            }
+        } else if is_open_bracket_b(pc) {
+            if pc == b'[' && ch == b'(' {
+                return None;
+            }
+            if is_binary_operator_b(ch) {
+                return None;
+            }
+            if is_close_bracket_b(ch) && !matches_bracket(pc, ch) {
+                return None;
+            }
+            if is_main_operator_b(ch) {
+                return None;
+            }
+            if is_unary_post_operator_b(ch) {
+                return None;
+            }
+        } else if is_close_bracket_b(pc) {
+            if is_digit_b(ch) || is_open_bracket_b(ch) {
+                return None;
+            }
+        } else if is_main_operator_b(pc) {
+            if pc == b'=' {
+                if !is_digit_b(ch) && ch != b'-' {
+                    return None;
+                }
+            } else if is_main_operator_b(ch) || is_close_bracket_b(ch) {
+                return None;
+            }
+        }
+    }
+
+    // After main operator =, only digits and minus
+    if main_op_so_far == Some(b'=') {
+        if !is_digit_b(ch) && ch != b'-' {
+            return None;
+        }
+        if ch == b'-' && prev_char == Some(b'=') && index >= length - 1 {
+            return None;
+        }
+    }
+
+    // Last position rules
+    if index == length - 1
+        && (is_binary_operator_b(ch) || is_open_bracket_b(ch) || is_main_operator_b(ch))
+    {
+        return None;
+    }
+
+    // Incremental bracket balance check
     let new_stack_len = match ch {
         b'(' | b'[' => stack_len + 1,
         b')' | b']' => {
@@ -998,9 +1141,37 @@ fn dynamic_check(
     if index == length - 1 && new_stack_len != 0 {
         return None;
     }
-    if is_main_operator_b(ch) && main_op_so_far.is_some() {
+
+    // Main operator rules
+    if is_main_operator_b(ch) {
+        if main_op_so_far.is_some() {
+            return None;
+        }
+        if index == 0 || index >= length - 1 {
+            return None;
+        }
+    }
+
+    // Permutation A rules
+    if ch == b'A' && !prev_char.is_some_and(|pc| is_digit_b(pc) || is_close_bracket_b(pc)) {
         return None;
     }
+    if prev_char == Some(b'A') && !is_digit_b(ch) && !is_open_bracket_b(ch) {
+        return None;
+    }
+
+    // Factorial ! rules
+    if ch == b'!' {
+        if prev_char.is_none() {
+            return None;
+        }
+        if let Some(pc) = prev_char {
+            if !is_digit_b(pc) && pc != b')' {
+                return None;
+            }
+        }
+    }
+
     Some(new_stack_len)
 }
 
@@ -1023,7 +1194,11 @@ fn parse_pure_number_rhs(rhs: &[u8]) -> Option<i64> {
         let d = (b - b'0') as i64;
         value = value.checked_mul(10)?.checked_add(d)?;
     }
-    if negative { value.checked_neg() } else { Some(value) }
+    if negative {
+        value.checked_neg()
+    } else {
+        Some(value)
+    }
 }
 
 /// A3: Check if a byte slice is a pure number (all digits, or `-` followed by
@@ -1376,31 +1551,57 @@ impl Solver {
     /// score for top-N without building a `Vec<String>`.
     pub fn solve_into<S: SolutionSink>(&self, sink: &mut S) -> u64 {
         let mut searched_count: u64 = 0;
-        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
-        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
         let mut no_branches: Vec<Branch> = Vec::new();
 
-        self.recursive_search(
-            0,
-            &mut expr,
-            None,
-            None,
-            0,
-            None,
-            &mut char_counts,
-            FloorContext::new(),
-            &mut bracket_stack,
-            0,
-            &self.prepared,
-            0,
-            0,
-            false,
-            sink,
-            &mut searched_count,
-            usize::MAX,
-            &mut no_branches,
-        );
+        // L3: stack-allocated arrays for length <= MAX_STACK_LEN.
+        if self.length <= MAX_STACK_LEN {
+            let mut expr_arr = [NO_CHAR; MAX_STACK_LEN];
+            let mut bracket_arr = [NO_CHAR; MAX_STACK_LEN];
+            self.recursive_search(
+                0,
+                &mut expr_arr[..self.length],
+                None,
+                None,
+                0,
+                None,
+                &mut char_counts,
+                FloorContext::new(),
+                &mut bracket_arr[..self.length],
+                0,
+                &self.prepared,
+                0,
+                0,
+                false,
+                sink,
+                &mut searched_count,
+                usize::MAX,
+                &mut no_branches,
+            );
+        } else {
+            let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+            let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+            self.recursive_search(
+                0,
+                &mut expr,
+                None,
+                None,
+                0,
+                None,
+                &mut char_counts,
+                FloorContext::new(),
+                &mut bracket_stack,
+                0,
+                &self.prepared,
+                0,
+                0,
+                false,
+                sink,
+                &mut searched_count,
+                usize::MAX,
+                &mut no_branches,
+            );
+        }
 
         searched_count
     }
@@ -1550,6 +1751,7 @@ impl Solver {
                 current_num_len,
                 current_num_value,
                 current_num_leading_zero,
+                floor_ctx,
             ) else {
                 continue;
             };
@@ -1733,45 +1935,83 @@ impl Solver {
 
         let mut results: Vec<String> = Vec::new();
         let mut searched_count: u64 = 0;
-        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
-        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
         let mut no_branches: Vec<Branch> = Vec::new();
 
-        expr[0] = first;
-        char_counts[idx_of(first)] += 1;
-        let stack_len = match first {
-            b'(' | b'[' => {
-                bracket_stack[0] = first;
-                1
-            }
-            _ => 0,
-        };
-
-        self.recursive_search(
-            1,
-            &mut expr,
-            Some(first),
-            main_op.map(|c| c as u8),
-            0,
-            None,
-            &mut char_counts,
-            floor_ctx,
-            &mut bracket_stack,
-            stack_len,
-            &self.prepared,
-            if is_digit_b(first) { 1 } else { 0 },
-            if is_digit_b(first) {
-                (first - b'0') as i64
-            } else {
-                0
-            },
-            first == b'0',
-            &mut results,
-            &mut searched_count,
-            usize::MAX,
-            &mut no_branches,
-        );
+        // L3: stack-allocated arrays for length <= MAX_STACK_LEN.
+        if self.length <= MAX_STACK_LEN {
+            let mut expr_arr = [NO_CHAR; MAX_STACK_LEN];
+            let mut bracket_arr = [NO_CHAR; MAX_STACK_LEN];
+            expr_arr[0] = first;
+            char_counts[idx_of(first)] += 1;
+            let stack_len = match first {
+                b'(' | b'[' => {
+                    bracket_arr[0] = first;
+                    1
+                }
+                _ => 0,
+            };
+            self.recursive_search(
+                1,
+                &mut expr_arr[..self.length],
+                Some(first),
+                main_op.map(|c| c as u8),
+                0,
+                None,
+                &mut char_counts,
+                floor_ctx,
+                &mut bracket_arr[..self.length],
+                stack_len,
+                &self.prepared,
+                if is_digit_b(first) { 1 } else { 0 },
+                if is_digit_b(first) {
+                    (first - b'0') as i64
+                } else {
+                    0
+                },
+                first == b'0',
+                &mut results,
+                &mut searched_count,
+                usize::MAX,
+                &mut no_branches,
+            );
+        } else {
+            let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+            let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+            expr[0] = first;
+            char_counts[idx_of(first)] += 1;
+            let stack_len = match first {
+                b'(' | b'[' => {
+                    bracket_stack[0] = first;
+                    1
+                }
+                _ => 0,
+            };
+            self.recursive_search(
+                1,
+                &mut expr,
+                Some(first),
+                main_op.map(|c| c as u8),
+                0,
+                None,
+                &mut char_counts,
+                floor_ctx,
+                &mut bracket_stack,
+                stack_len,
+                &self.prepared,
+                if is_digit_b(first) { 1 } else { 0 },
+                if is_digit_b(first) {
+                    (first - b'0') as i64
+                } else {
+                    0
+                },
+                first == b'0',
+                &mut results,
+                &mut searched_count,
+                usize::MAX,
+                &mut no_branches,
+            );
+        }
 
         (results, searched_count)
     }
@@ -1798,30 +2038,56 @@ impl Solver {
     ) -> (Vec<Branch>, u64) {
         let mut branches: Vec<Branch> = Vec::new();
         let mut searched_count: u64 = 0;
-        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
-        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
 
-        self.recursive_search(
-            0,
-            &mut expr,
-            None,
-            None,
-            0,
-            None,
-            &mut char_counts,
-            FloorContext::new(),
-            &mut bracket_stack,
-            0,
-            &self.prepared,
-            0,
-            0,
-            false,
-            sink,
-            &mut searched_count,
-            depth,
-            &mut branches,
-        );
+        // L3: stack-allocated arrays for length <= MAX_STACK_LEN.
+        if self.length <= MAX_STACK_LEN {
+            let mut expr_arr = [NO_CHAR; MAX_STACK_LEN];
+            let mut bracket_arr = [NO_CHAR; MAX_STACK_LEN];
+            self.recursive_search(
+                0,
+                &mut expr_arr[..self.length],
+                None,
+                None,
+                0,
+                None,
+                &mut char_counts,
+                FloorContext::new(),
+                &mut bracket_arr[..self.length],
+                0,
+                &self.prepared,
+                0,
+                0,
+                false,
+                sink,
+                &mut searched_count,
+                depth,
+                &mut branches,
+            );
+        } else {
+            let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+            let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+            self.recursive_search(
+                0,
+                &mut expr,
+                None,
+                None,
+                0,
+                None,
+                &mut char_counts,
+                FloorContext::new(),
+                &mut bracket_stack,
+                0,
+                &self.prepared,
+                0,
+                0,
+                false,
+                sink,
+                &mut searched_count,
+                depth,
+                &mut branches,
+            );
+        }
 
         (branches, searched_count)
     }
@@ -1839,38 +2105,66 @@ impl Solver {
     pub fn solve_from_prefix_into<S: SolutionSink>(&self, branch: &Branch, sink: &mut S) -> u64 {
         let depth = branch.prefix.len();
         let mut searched_count: u64 = 0;
-        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
-        expr[..depth].copy_from_slice(&branch.prefix);
         let mut char_counts = [0u8; CHARSET_LEN];
         for &ch in &branch.prefix {
             char_counts[idx_of(ch)] += 1;
         }
         let stack_len = branch.bracket_stack.len();
-        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
-        bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
         let prev_char = branch.prefix.last().copied();
         let mut no_branches: Vec<Branch> = Vec::new();
 
-        self.recursive_search(
-            depth,
-            &mut expr,
-            prev_char,
-            branch.main_op,
-            branch.main_op_index,
-            branch.main_lhs_value,
-            &mut char_counts,
-            branch.floor_ctx,
-            &mut bracket_stack,
-            stack_len,
-            &self.prepared,
-            branch.num_len,
-            branch.num_value,
-            branch.num_leading_zero,
-            sink,
-            &mut searched_count,
-            usize::MAX,
-            &mut no_branches,
-        );
+        // L3: stack-allocated arrays for length <= MAX_STACK_LEN.
+        if self.length <= MAX_STACK_LEN {
+            let mut expr_arr = [NO_CHAR; MAX_STACK_LEN];
+            expr_arr[..depth].copy_from_slice(&branch.prefix);
+            let mut bracket_arr = [NO_CHAR; MAX_STACK_LEN];
+            bracket_arr[..stack_len].copy_from_slice(&branch.bracket_stack);
+            self.recursive_search(
+                depth,
+                &mut expr_arr[..self.length],
+                prev_char,
+                branch.main_op,
+                branch.main_op_index,
+                branch.main_lhs_value,
+                &mut char_counts,
+                branch.floor_ctx,
+                &mut bracket_arr[..self.length],
+                stack_len,
+                &self.prepared,
+                branch.num_len,
+                branch.num_value,
+                branch.num_leading_zero,
+                sink,
+                &mut searched_count,
+                usize::MAX,
+                &mut no_branches,
+            );
+        } else {
+            let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+            expr[..depth].copy_from_slice(&branch.prefix);
+            let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+            bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
+            self.recursive_search(
+                depth,
+                &mut expr,
+                prev_char,
+                branch.main_op,
+                branch.main_op_index,
+                branch.main_lhs_value,
+                &mut char_counts,
+                branch.floor_ctx,
+                &mut bracket_stack,
+                stack_len,
+                &self.prepared,
+                branch.num_len,
+                branch.num_value,
+                branch.num_leading_zero,
+                sink,
+                &mut searched_count,
+                usize::MAX,
+                &mut no_branches,
+            );
+        }
 
         searched_count
     }
