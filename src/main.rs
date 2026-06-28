@@ -190,10 +190,6 @@ fn build_solver_input(input: &CliInput) -> Result<(usize, GlobalKnowledge)> {
 }
 
 fn main() -> Result<()> {
-    // D3: Configure mimalloc env vars before any allocation.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    sumzle_solver::configure_mimalloc();
-
     // D6: Warm up the global Rayon thread pool so the first parallel solve
     // doesn't pay the OS-thread-spawn cost.
     sumzle_solver::parallel::warmup_thread_pool();
