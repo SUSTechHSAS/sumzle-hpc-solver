@@ -397,12 +397,15 @@ impl IncEval {
                         break;
                     }
                     if top == Op::LBracket {
+                        // Pop orphaned checkpoint (caller won't call undo).
+                        self.checkpoint_len -= 1;
                         self.invalid = true;
                         return false;
                     }
                     self.pop_op_to_rpn();
                 }
                 if !found {
+                    self.checkpoint_len -= 1;
                     self.invalid = true;
                     return false;
                 }
@@ -412,6 +415,7 @@ impl IncEval {
                 // replaced with number first). Since `[` sets invalid, we only
                 // see `!` after digits here. Reject after `)`.
                 if prev_char == Some(b')') {
+                    self.checkpoint_len -= 1;
                     self.invalid = true;
                     return false;
                 }
