@@ -1162,13 +1162,12 @@ fn dynamic_check(
 
     // Factorial ! rules
     if ch == b'!' {
-        if prev_char.is_none() {
-            return None;
-        }
         if let Some(pc) = prev_char {
             if !is_digit_b(pc) && pc != b')' {
                 return None;
             }
+        } else {
+            return None;
         }
     }
 
@@ -1437,13 +1436,12 @@ fn can_place_char(
 
     // Factorial ! rules
     if ch == b'!' {
-        if prev_char.is_none() {
-            return false;
-        }
         if let Some(pc) = prev_char {
             if !is_digit_b(pc) && pc != b')' {
                 return false;
             }
+        } else {
+            return false;
         }
     }
 
