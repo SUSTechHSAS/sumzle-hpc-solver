@@ -202,7 +202,7 @@ impl Checkpoint {
 pub struct IncEval {
     rpn: [Token; MAX_EVAL_LEN],
     rpn_len: usize,
-    ops: [u8; MAX_EVAL_LEN],
+    ops: [Op; MAX_EVAL_LEN],
     ops_len: usize,
     current: Option<i64>,
     checkpoints: [Checkpoint; MAX_EVAL_LEN],
@@ -215,7 +215,7 @@ impl IncEval {
         Self {
             rpn: [Token::Val(0.0); MAX_EVAL_LEN],
             rpn_len: 0,
-            ops: [0; MAX_EVAL_LEN],
+            ops: [Op::Add; MAX_EVAL_LEN],
             ops_len: 0,
             current: None,
             checkpoints: [Checkpoint::empty(); MAX_EVAL_LEN],
@@ -235,6 +235,11 @@ impl IncEval {
     #[inline]
     fn push_checkpoint(&mut self) {
         if self.checkpoint_len >= MAX_EVAL_LEN {
+            // Checkpoint stack overflow: mark invalid so peek_value returns
+            // None and the caller falls back to the reference evaluator.
+            // A silent return would leave a missing checkpoint, causing the
+            // next undo() to restore a stale state and corrupt backtracking.
+            self.invalid = true;
             return;
         }
         let idx = self.checkpoint_len;
@@ -277,8 +282,7 @@ impl IncEval {
     fn pop_op_to_rpn(&mut self) {
         if self.ops_len > 0 {
             self.ops_len -= 1;
-            let op_byte = self.ops[self.ops_len];
-            let op = unsafe { core::mem::transmute::<u8, Op>(op_byte) };
+            let op = self.ops[self.ops_len];
             match op {
                 Op::Neg => self.emit_tok(Token::Neg),
                 _ => self.emit_tok(op.to_bin_token()),
@@ -291,8 +295,7 @@ impl IncEval {
         let new_prec = new_op.precedence();
         let right = new_op.is_right_assoc();
         while self.ops_len > 0 {
-            let top_byte = self.ops[self.ops_len - 1];
-            let top = unsafe { core::mem::transmute::<u8, Op>(top_byte) };
+            let top = self.ops[self.ops_len - 1];
             if top.is_marker() {
                 break;
             }
@@ -333,7 +336,7 @@ impl IncEval {
                 let op = Op::from_byte(ch).unwrap();
                 self.reduce_while(op);
                 if self.ops_len < MAX_EVAL_LEN {
-                    self.ops[self.ops_len] = op as u8;
+                    self.ops[self.ops_len] = op;
                     self.ops_len += 1;
                 } else {
                     self.invalid = true;
@@ -344,14 +347,12 @@ impl IncEval {
                 // After `!` it's BINARY (reference replaces n! with number).
                 let is_unary = match prev_char {
                     None => true,
-                    Some(pc) => {
-                        !pc.is_ascii_digit() && pc != b')' && pc != b']' && pc != b'!'
-                    }
+                    Some(pc) => !pc.is_ascii_digit() && pc != b')' && pc != b']' && pc != b'!',
                 };
                 let op = if is_unary { Op::Neg } else { Op::Sub };
                 self.reduce_while(op);
                 if self.ops_len < MAX_EVAL_LEN {
-                    self.ops[self.ops_len] = op as u8;
+                    self.ops[self.ops_len] = op;
                     self.ops_len += 1;
                 } else {
                     self.invalid = true;
@@ -359,7 +360,7 @@ impl IncEval {
             }
             b'(' => {
                 if self.ops_len < MAX_EVAL_LEN {
-                    self.ops[self.ops_len] = Op::LParen as u8;
+                    self.ops[self.ops_len] = Op::LParen;
                     self.ops_len += 1;
                 } else {
                     self.invalid = true;
@@ -372,8 +373,7 @@ impl IncEval {
             b')' => {
                 let mut found = false;
                 while self.ops_len > 0 {
-                    let top_byte = self.ops[self.ops_len - 1];
-                    let top = unsafe { core::mem::transmute::<u8, Op>(top_byte) };
+                    let top = self.ops[self.ops_len - 1];
                     if top == Op::LParen {
                         self.ops_len -= 1;
                         found = true;
@@ -416,7 +416,11 @@ impl IncEval {
         let cp = self.checkpoints[self.checkpoint_len];
         self.rpn_len = cp.rpn_len as usize;
         self.ops_len = cp.ops_len as usize;
-        self.current = if cp.has_current { Some(cp.current) } else { None };
+        self.current = if cp.has_current {
+            Some(cp.current)
+        } else {
+            None
+        };
         self.invalid = false;
     }
 
@@ -496,8 +500,7 @@ impl IncEval {
         let mut ops_len = self.ops_len;
         while ops_len > 0 {
             ops_len -= 1;
-            let op_byte = self.ops[ops_len];
-            let op = unsafe { core::mem::transmute::<u8, Op>(op_byte) };
+            let op = self.ops[ops_len];
             match op {
                 Op::Neg => {
                     if stack_len < 1 {

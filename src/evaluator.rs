@@ -206,10 +206,9 @@ impl I64Parser<'_> {
                 Some(b'%') => {
                     self.advance();
                     let rhs = self.parse_unary()?;
-                    if rhs == 0 {
-                        return None;
-                    }
-                    result %= rhs;
+                    // checked_rem handles both zero-divisor AND the i64::MIN % -1
+                    // overflow panic (which the bare `%` operator would trap on).
+                    result = result.checked_rem(rhs)?;
                 }
                 _ => break,
             }

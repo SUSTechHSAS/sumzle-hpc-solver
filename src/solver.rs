@@ -1702,7 +1702,9 @@ impl Solver {
                     // A3: Fast path for pure-number RHS (no operators).
                     if is_pure_number_bytes(right_side) {
                         if let Some(rv) = parse_pure_number_rhs(right_side) {
-                            is_integer(rv as f64) && lhs_value > rv
+                            // rv is already i64, so it's always an integer —
+                            // no is_integer() check needed (unlike the f64 path).
+                            lhs_value > rv
                         } else {
                             false
                         }
