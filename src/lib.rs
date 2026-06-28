@@ -27,6 +27,17 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// D3: Configure mimalloc at startup for more aggressive memory decommit.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn configure_mimalloc() {
+    if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
+        std::env::set_var("MIMALLOC_PURGE_DELAY", "0");
+    }
+    if std::env::var_os("MIMALLOC_DECOMMIT_DELAY").is_none() {
+        std::env::set_var("MIMALLOC_DECOMMIT_DELAY", "0");
+    }
+}
+
 pub mod api;
 pub mod constraints;
 pub mod distributed;

@@ -6,6 +6,8 @@ use crate::types::*;
 const CHARSET_LEN: usize = 24;
 const NO_CHAR: u8 = 0;
 const INVALID_INDEX: u8 = u8::MAX;
+/// L3: Maximum supported expression length for stack-allocated buffers.
+const MAX_STACK_LEN: usize = 64;
 
 const fn build_char_index() -> [u8; 256] {
     let mut table = [INVALID_INDEX; 256];
@@ -63,10 +65,48 @@ const AFTER_EQ: &[u8] = b"0123456789";
 const FIRST_POSITION: &[u8] = b"123456789([";
 const AFTER_DIGIT: &[u8] = b"0123456789+-*/%^A!)][=>";
 const AFTER_BINARY_OR_OPEN: &[u8] = b"1234567890([";
+// L1: Split AFTER_CLOSE_OR_FACTORIAL into three context-specific sets.
+const AFTER_CLOSE_PAREN: &[u8] = b"+-*/%^A!)][=>";
+const AFTER_CLOSE_FLOOR: &[u8] = b"+-*/%^A)][=>";
+const AFTER_FACTORIAL: &[u8] = b"+-*/%^)][=>";
 const AFTER_CLOSE_OR_FACTORIAL: &[u8] = b"+-*/%^A!)][=>";
 const DEFAULT_ORDER: &[u8] = b"1234567890+-*/=([)]%^!A>";
 const END_CHARS: &[u8] = b"0123456789)]!";
 const LENGTH_ONE_DIGITS: &[u8] = b"0123456789";
+
+// L1: Precomputed bitmasks (one bit per charset index, u32).
+const END_CHARS_MASK: u32 = bytes_to_mask(END_CHARS);
+const FLOOR_NO_SLASH_MASK: u32 = bytes_to_mask(FLOOR_NO_SLASH);
+const FLOOR_WITH_SLASH_MASK: u32 = bytes_to_mask(FLOOR_WITH_SLASH);
+const FLOOR_DIGITS_ONLY_MASK: u32 = bytes_to_mask(b"0123456789");
+const AFTER_EQ_START_MASK: u32 = bytes_to_mask(AFTER_EQ_START);
+const AFTER_EQ_MASK: u32 = bytes_to_mask(AFTER_EQ);
+const FIRST_POSITION_MASK: u32 = bytes_to_mask(FIRST_POSITION);
+const AFTER_DIGIT_MASK: u32 = bytes_to_mask(AFTER_DIGIT);
+const AFTER_BINARY_OR_OPEN_MASK: u32 = bytes_to_mask(AFTER_BINARY_OR_OPEN);
+const AFTER_CLOSE_PAREN_MASK: u32 = bytes_to_mask(AFTER_CLOSE_PAREN);
+const AFTER_CLOSE_FLOOR_MASK: u32 = bytes_to_mask(AFTER_CLOSE_FLOOR);
+const AFTER_FACTORIAL_MASK: u32 = bytes_to_mask(AFTER_FACTORIAL);
+const DEFAULT_ORDER_MASK: u32 = bytes_to_mask(DEFAULT_ORDER);
+const LENGTH_ONE_DIGITS_MASK: u32 = bytes_to_mask(LENGTH_ONE_DIGITS);
+const OPEN_FLOOR_IDX: usize = idx_of_const(b'[');
+
+const fn bytes_to_mask(bytes: &[u8]) -> u32 {
+    let mut mask = 0u32;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let idx = CHAR_INDEX[bytes[i] as usize];
+        if idx != INVALID_INDEX {
+            mask |= 1u32 << (idx as usize);
+        }
+        i += 1;
+    }
+    mask
+}
+
+const fn idx_of_const(ch: u8) -> usize {
+    CHAR_INDEX[ch as usize] as usize
+}
 
 /// A destination for solutions discovered by the search.
 ///
@@ -533,6 +573,10 @@ impl PreparedKnowledge {
 
     #[inline]
     fn counts_can_still_succeed(&self, counts: &[u8; CHARSET_LEN], remaining_slots: usize) -> bool {
+        // L4: Fast path for unconstrained puzzles.
+        if self.constrained_indices.is_empty() {
+            return true;
+        }
         for &idx in &self.constrained_indices {
             let current = counts[idx] as usize;
             if self.exact_mask & (1u32 << idx) != 0 {
@@ -816,6 +860,184 @@ fn fill_candidate_chars(
     }
 
     push_filtered(ordered, index, prepared, out)
+}
+
+// ===== L1+L2: Bitmask candidate generation + specialized dynamic checks =====
+
+#[inline]
+fn base_candidates_mask(
+    index: usize,
+    prev_char: Option<u8>,
+    main_op_so_far: Option<u8>,
+    floor_ctx: FloorContext,
+) -> u32 {
+    if floor_ctx.in_floor {
+        if !prev_char.is_some_and(is_digit_b) {
+            FLOOR_DIGITS_ONLY_MASK
+        } else if floor_ctx.has_slash_in_current_floor {
+            FLOOR_WITH_SLASH_MASK
+        } else {
+            FLOOR_NO_SLASH_MASK
+        }
+    } else if main_op_so_far == Some(b'=') {
+        if prev_char == Some(b'=') {
+            AFTER_EQ_START_MASK
+        } else {
+            AFTER_EQ_MASK
+        }
+    } else if index == 0 {
+        FIRST_POSITION_MASK
+    } else if let Some(pc) = prev_char {
+        if is_digit_b(pc) {
+            AFTER_DIGIT_MASK
+        } else if is_binary_operator_b(pc) || is_open_bracket_b(pc) {
+            AFTER_BINARY_OR_OPEN_MASK
+        } else if pc == b')' {
+            AFTER_CLOSE_PAREN_MASK
+        } else if pc == b']' {
+            AFTER_CLOSE_FLOOR_MASK
+        } else if pc == b'!' {
+            AFTER_FACTORIAL_MASK
+        } else if is_main_operator_b(pc) {
+            AFTER_BINARY_OR_OPEN_MASK
+        } else {
+            DEFAULT_ORDER_MASK
+        }
+    } else {
+        DEFAULT_ORDER_MASK
+    }
+}
+
+#[inline]
+fn fill_candidate_mask(
+    index: usize,
+    prev_char: Option<u8>,
+    length: usize,
+    main_op_so_far: Option<u8>,
+    floor_ctx: FloorContext,
+    prepared: &PreparedKnowledge,
+) -> u32 {
+    let blocked = prepared.globally_forbidden_mask | prepared.cannot_be_at_masks[index];
+    let fixed = prepared.fixed_chars[index];
+    if fixed != NO_CHAR {
+        let fixed_mask = 1u32 << idx_of(fixed);
+        if blocked & fixed_mask != 0 {
+            return 0;
+        }
+        return fixed_mask;
+    }
+    let base = base_candidates_mask(index, prev_char, main_op_so_far, floor_ctx);
+    let base = if index >= length.saturating_sub(3) {
+        base & !(1u32 << OPEN_FLOOR_IDX)
+    } else {
+        base
+    };
+    if index == length - 1 && !floor_ctx.in_floor {
+        let end_mask = base & END_CHARS_MASK;
+        if end_mask != 0 {
+            return end_mask & !blocked;
+        }
+        if prev_char.is_some() {
+            return END_CHARS_MASK & !blocked;
+        }
+        if index == 0 && length == 1 {
+            return LENGTH_ONE_DIGITS_MASK & !blocked;
+        }
+    }
+    base & !blocked
+}
+
+#[inline]
+fn dynamic_check(
+    ch: u8,
+    ch_idx: usize,
+    index: usize,
+    prev_char: Option<u8>,
+    main_op_so_far: Option<u8>,
+    char_counts: &[u8; CHARSET_LEN],
+    bracket_stack: &[u8],
+    stack_len: usize,
+    prepared: &PreparedKnowledge,
+    length: usize,
+    current_num_len: u8,
+    current_num_value: i64,
+    current_num_leading_zero: bool,
+) -> Option<usize> {
+    if prepared.exact_mask & (1u32 << ch_idx) != 0
+        && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
+    {
+        return None;
+    }
+    if is_digit_b(ch) {
+        let digit = (ch - b'0') as i64;
+        let continuing_number = prev_char.is_some_and(is_digit_b);
+        let new_len = if continuing_number { current_num_len as usize + 1 } else { 1 };
+        let new_value = if continuing_number { current_num_value * 10 + digit } else { digit };
+        let leading_zero = if continuing_number { current_num_leading_zero } else { ch == b'0' };
+        if new_len > 1 && leading_zero {
+            return None;
+        }
+        if main_op_so_far != Some(b'=') && new_value > MAX_OPERAND_VALUE {
+            return None;
+        }
+    }
+    let new_stack_len = match ch {
+        b'(' | b'[' => stack_len + 1,
+        b')' | b']' => {
+            if stack_len == 0 {
+                return None;
+            }
+            let last_open = bracket_stack[stack_len - 1];
+            if !matches_bracket(last_open, ch) {
+                return None;
+            }
+            stack_len - 1
+        }
+        _ => stack_len,
+    };
+    if index == length - 1 && new_stack_len != 0 {
+        return None;
+    }
+    if is_main_operator_b(ch) && main_op_so_far.is_some() {
+        return None;
+    }
+    Some(new_stack_len)
+}
+
+/// A3: Parse a pure-number RHS (digits, optional leading `-`) as i64.
+#[inline]
+fn parse_pure_number_rhs(rhs: &[u8]) -> Option<i64> {
+    if rhs.is_empty() {
+        return None;
+    }
+    let (negative, digits) = if rhs[0] == b'-' {
+        if rhs.len() < 2 {
+            return None;
+        }
+        (true, &rhs[1..])
+    } else {
+        (false, rhs)
+    };
+    let mut value: i64 = 0;
+    for &b in digits {
+        let d = (b - b'0') as i64;
+        value = value.checked_mul(10)?.checked_add(d)?;
+    }
+    if negative { value.checked_neg() } else { Some(value) }
+}
+
+/// A3: Check if a byte slice is a pure number (all digits, or `-` followed by
+/// all digits). A `-` anywhere except position 0 is a binary operator.
+#[inline]
+fn is_pure_number_bytes(rhs: &[u8]) -> bool {
+    if rhs.is_empty() {
+        return false;
+    }
+    let start = if rhs[0] == b'-' { 1 } else { 0 };
+    if start == 1 && rhs.len() == 1 {
+        return false;
+    }
+    rhs[start..].iter().all(|&b| b.is_ascii_digit())
 }
 
 /// Check if a character can be placed at a given position
@@ -1277,8 +1499,19 @@ impl Solver {
             let right_side = &expr[main_op_index + 1..];
             let valid = match main_op {
                 b'=' => false,
-                b'>' => evaluate_expression_solver_bytes(right_side)
-                    .is_some_and(|rv| is_integer(rv) && lhs_value > rv as i64),
+                b'>' => {
+                    // A3: Fast path for pure-number RHS (no operators).
+                    if is_pure_number_bytes(right_side) {
+                        if let Some(rv) = parse_pure_number_rhs(right_side) {
+                            is_integer(rv as f64) && lhs_value > rv
+                        } else {
+                            false
+                        }
+                    } else {
+                        evaluate_expression_solver_bytes(right_side)
+                            .is_some_and(|rv| is_integer(rv) && lhs_value > rv as i64)
+                    }
+                }
                 _ => false,
             };
 
@@ -1288,27 +1521,28 @@ impl Solver {
             return;
         }
 
-        let mut candidates = [NO_CHAR; CHARSET_LEN];
-        let candidate_count = fill_candidate_chars(
+        let candidate_mask = fill_candidate_mask(
             index,
             prev_char,
             self.length,
             main_op_so_far,
             floor_ctx,
             prepared,
-            &mut candidates,
         );
 
-        for &ch in &candidates[..candidate_count] {
-            let ch_idx = idx_of(ch);
-            if !can_place_char(
+        let mut remaining = candidate_mask;
+        while remaining != 0 {
+            let ch_idx = remaining.trailing_zeros() as usize;
+            let ch = CHAR_FROM_INDEX[ch_idx];
+            remaining &= remaining - 1;
+
+            let Some(next_stack_len) = dynamic_check(
                 ch,
                 ch_idx,
                 index,
                 prev_char,
                 main_op_so_far,
                 char_counts,
-                floor_ctx,
                 bracket_stack,
                 stack_len,
                 prepared,
@@ -1316,9 +1550,9 @@ impl Solver {
                 current_num_len,
                 current_num_value,
                 current_num_leading_zero,
-            ) {
+            ) else {
                 continue;
-            }
+            };
 
             expr[index] = ch;
             char_counts[ch_idx] += 1;
@@ -1382,27 +1616,15 @@ impl Solver {
                 (0, 0, false)
             };
 
-            // Bracket stack is a shared scratch buffer reused across sibling
-            // branches. A push writes bracket_stack[stack_len]; a deeper branch
-            // that later closes this bracket and opens a different one can
-            // overwrite this slot, so we must save the previous occupant and
-            // restore it on backtrack — otherwise a sibling explored afterwards
-            // (e.g. the `0`/`(`/`[` candidates, which come last) would read a
-            // stale bracket type and wrongly reject a matching close bracket.
             let pushed_bracket = matches!(ch, b'(' | b'[');
             let saved_bracket_slot = if pushed_bracket {
                 bracket_stack[stack_len]
             } else {
                 NO_CHAR
             };
-            let next_stack_len = match ch {
-                b'(' | b'[' => {
-                    bracket_stack[stack_len] = ch;
-                    stack_len + 1
-                }
-                b')' | b']' => stack_len - 1,
-                _ => stack_len,
-            };
+            if pushed_bracket {
+                bracket_stack[stack_len] = ch;
+            }
 
             self.recursive_search(
                 index + 1,

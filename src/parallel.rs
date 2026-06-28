@@ -97,6 +97,19 @@ pub struct ParallelSolver {
     pub num_threads: usize,
 }
 
+/// D6: Warm up the global Rayon thread pool so the first solve doesn't pay
+/// the cost of spawning OS threads. Idempotent — safe to call multiple times.
+/// Call once at startup (e.g. from `main` or the server's `run_server`).
+pub fn warmup_thread_pool() {
+    // `rayon::current_num_threads()` initializes the global pool on first
+    // call. We then do a trivial parallel operation to actually spawn the
+    // worker threads.
+    let _ = rayon::current_num_threads();
+    rayon::scope(|s| {
+        s.spawn(|_| {});
+    });
+}
+
 impl ParallelSolver {
     pub fn new(solver: Solver, num_threads: Option<usize>) -> Self {
         let num_threads = num_threads.unwrap_or_else(num_cpus::get);
