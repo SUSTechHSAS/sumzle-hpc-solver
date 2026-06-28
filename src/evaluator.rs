@@ -106,13 +106,161 @@ pub(crate) fn evaluate_expression_solver_bytes(expr: &[u8]) -> Option<f64> {
         return None;
     }
 
+    // L5: i64 fast path. If the expression contains only digits, `+`, `-`,
+    // `*`, `%`, `(`, `)` (no `/`, `^`, `!`, `A`, `[`, `]`), use integer
+    // arithmetic. `/` is excluded (can produce fractions); `^` is excluded
+    // (can overflow i64).
+    // Scan the entire expression: floor/factorial/permutation chars ([ ] ! A)
+    // take priority — if present, use the full evaluator. Otherwise, if any
+    // slow char (/ ^ etc.) is found, use the f64 no-ws parser. If only i64-safe
+    // chars remain, use the i64 fast path. We cannot short-circuit on the first
+    // slow char because a floor char may appear later (e.g. `7/[2]`).
+    let mut has_slow = false;
     for &b in expr {
-        if matches!(b, b'[' | b']' | b'!' | b'A') {
-            return evaluate_expression_bytes(expr);
+        match b {
+            b'0'..=b'9' | b'+' | b'-' | b'*' | b'%' | b'(' | b')' => {}
+            b'[' | b']' | b'!' | b'A' => {
+                return evaluate_expression_bytes(expr);
+            }
+            _ => {
+                has_slow = true;
+            }
         }
     }
 
-    evaluate_arithmetic_no_ws_bytes(expr)
+    if has_slow {
+        return evaluate_arithmetic_no_ws_bytes(expr);
+    }
+
+    match evaluate_arithmetic_i64(expr) {
+        I64Result::Val(v) => Some(v as f64),
+        I64Result::None => None,
+    }
+}
+
+enum I64Result {
+    Val(i64),
+    None,
+}
+
+fn evaluate_arithmetic_i64(expr: &[u8]) -> I64Result {
+    let mut parser = I64Parser {
+        bytes: expr,
+        pos: 0,
+    };
+    match parser.parse_expression() {
+        Some(result) => {
+            if parser.pos < expr.len() {
+                I64Result::None
+            } else {
+                I64Result::Val(result)
+            }
+        }
+        None => I64Result::None,
+    }
+}
+
+struct I64Parser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl I64Parser<'_> {
+    #[inline]
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    #[inline]
+    fn advance(&mut self) {
+        self.pos += 1;
+    }
+
+    fn parse_expression(&mut self) -> Option<i64> {
+        let mut result = self.parse_term()?;
+        loop {
+            match self.peek() {
+                Some(b'+') => {
+                    self.advance();
+                    let rhs = self.parse_term()?;
+                    result = result.checked_add(rhs)?;
+                }
+                Some(b'-') => {
+                    self.advance();
+                    let rhs = self.parse_term()?;
+                    result = result.checked_sub(rhs)?;
+                }
+                _ => break,
+            }
+        }
+        Some(result)
+    }
+
+    fn parse_term(&mut self) -> Option<i64> {
+        let mut result = self.parse_unary()?;
+        loop {
+            match self.peek() {
+                Some(b'*') => {
+                    self.advance();
+                    if self.peek() == Some(b'*') {
+                        return None;
+                    }
+                    let rhs = self.parse_unary()?;
+                    result = result.checked_mul(rhs)?;
+                }
+                Some(b'%') => {
+                    self.advance();
+                    let rhs = self.parse_unary()?;
+                    // checked_rem handles both zero-divisor AND the i64::MIN % -1
+                    // overflow panic (which the bare `%` operator would trap on).
+                    result = result.checked_rem(rhs)?;
+                }
+                _ => break,
+            }
+        }
+        Some(result)
+    }
+
+    fn parse_unary(&mut self) -> Option<i64> {
+        if self.peek() == Some(b'-') {
+            self.advance();
+            let v = self.parse_unary()?;
+            v.checked_neg()
+        } else {
+            self.parse_primary()
+        }
+    }
+
+    fn parse_primary(&mut self) -> Option<i64> {
+        match self.peek() {
+            Some(b'(') => {
+                self.advance();
+                let result = self.parse_expression()?;
+                if self.peek() != Some(b')') {
+                    return None;
+                }
+                self.advance();
+                Some(result)
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let start = self.pos;
+                let mut value: i64 = 0;
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        value = value.checked_mul(10)?.checked_add((c - b'0') as i64)?;
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                if self.pos - start > 1 && self.bytes[start] == b'0' {
+                    return None;
+                }
+                Some(value)
+            }
+            _ => None,
+        }
+    }
 }
 
 fn resolve_floor_brackets_bytes(expr: &[u8]) -> Option<Vec<u8>> {

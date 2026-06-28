@@ -190,6 +190,10 @@ fn build_solver_input(input: &CliInput) -> Result<(usize, GlobalKnowledge)> {
 }
 
 fn main() -> Result<()> {
+    // D6: Warm up the global Rayon thread pool so the first parallel solve
+    // doesn't pay the OS-thread-spawn cost.
+    sumzle_solver::parallel::warmup_thread_pool();
+
     env_logger::init();
 
     let cli = Cli::parse();

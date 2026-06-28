@@ -1,0 +1,7 @@
+[build]
+# embed-bitcode is required for `lto = "fat"` (in Cargo.toml [profile.release])
+# to do whole-program optimization. target-cpu=native is intentionally NOT
+# checked in — it makes binaries non-portable (SIGILL on older CPUs). For
+# local performance tuning, build with:
+#   RUSTFLAGS="-C target-cpu=native" cargo build --release
+rustflags = ["-C", "embed-bitcode=yes"]
