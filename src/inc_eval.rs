@@ -322,11 +322,19 @@ impl IncEval {
         if ch.is_ascii_digit() {
             let digit = (ch - b'0') as i64;
             let new_val = match self.current {
-                Some(v) => v * 10 + digit,
-                None => digit,
+                Some(v) => v.checked_mul(10).and_then(|v| v.checked_add(digit)),
+                None => Some(digit),
             };
-            self.current = Some(new_val);
-            return true;
+            match new_val {
+                Some(v) => {
+                    self.current = Some(v);
+                    return true;
+                }
+                None => {
+                    self.invalid = true;
+                    return false;
+                }
+            }
         }
 
         self.finalize_current();
