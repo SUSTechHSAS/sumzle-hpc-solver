@@ -1818,6 +1818,11 @@ impl Solver {
                 (0, 0, false)
             };
 
+            // Bracket stack save/restore: a deeper branch that closes this
+            // bracket (decrementing stack_len) and then opens a different one
+            // at the same slot will overwrite bracket_stack[stack_len]. Without
+            // restore, the stale value persists for the next sibling, causing
+            // wrong close-bracket validation. This is NOT redundant.
             let pushed_bracket = matches!(ch, b'(' | b'[');
             let saved_bracket_slot = if pushed_bracket {
                 bracket_stack[stack_len]
