@@ -102,11 +102,13 @@ pub struct ParallelSolver {
 /// Call once at startup (e.g. from `main` or the server's `run_server`).
 pub fn warmup_thread_pool() {
     // `rayon::current_num_threads()` initializes the global pool on first
-    // call. We then do a trivial parallel operation to actually spawn the
-    // worker threads.
-    let _ = rayon::current_num_threads();
+    // call. Then spawn one task per thread to ensure every worker thread is
+    // actually spawned and its thread-local data is initialized.
+    let n = rayon::current_num_threads();
     rayon::scope(|s| {
-        s.spawn(|_| {});
+        for _ in 0..n {
+            s.spawn(|_| {});
+        }
     });
 }
 

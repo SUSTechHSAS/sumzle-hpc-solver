@@ -316,11 +316,14 @@ impl IncEval {
 
     #[inline]
     pub fn push(&mut self, ch: u8, prev_char: Option<u8>) -> bool {
-        self.push_checkpoint();
-
+        // Check invalid BEFORE push_checkpoint so a failed push does not
+        // leave an orphaned checkpoint on the stack. If push returns false,
+        // the caller will NOT call undo(), so no checkpoint should be pushed.
         if self.invalid {
             return false;
         }
+
+        self.push_checkpoint();
 
         if ch.is_ascii_digit() {
             let digit = (ch - b'0') as i64;
@@ -334,6 +337,9 @@ impl IncEval {
                     return true;
                 }
                 None => {
+                    // Overflow: pop the checkpoint we just pushed so the
+                    // stack stays synchronized (caller won't call undo).
+                    self.checkpoint_len -= 1;
                     self.invalid = true;
                     return false;
                 }
