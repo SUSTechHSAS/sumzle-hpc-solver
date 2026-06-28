@@ -186,6 +186,7 @@ struct Checkpoint {
     ops_len: u8,
     has_current: bool,
     current: i64,
+    invalid: bool,
 }
 
 impl Checkpoint {
@@ -195,6 +196,7 @@ impl Checkpoint {
             ops_len: 0,
             has_current: false,
             current: 0,
+            invalid: false,
         }
     }
 }
@@ -249,6 +251,7 @@ impl IncEval {
         cp.ops_len = self.ops_len as u8;
         cp.has_current = self.current.is_some();
         cp.current = self.current.unwrap_or(0);
+        cp.invalid = self.invalid;
     }
 
     #[inline]
@@ -429,7 +432,7 @@ impl IncEval {
         } else {
             None
         };
-        self.invalid = false;
+        self.invalid = cp.invalid;
     }
 
     /// Save current state (checkpoint) then reset to clean slate for RHS.

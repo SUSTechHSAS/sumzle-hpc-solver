@@ -110,6 +110,11 @@ pub(crate) fn evaluate_expression_solver_bytes(expr: &[u8]) -> Option<f64> {
     // `*`, `%`, `(`, `)` (no `/`, `^`, `!`, `A`, `[`, `]`), use integer
     // arithmetic. `/` is excluded (can produce fractions); `^` is excluded
     // (can overflow i64).
+    // Scan the entire expression: floor/factorial/permutation chars ([ ] ! A)
+    // take priority — if present, use the full evaluator. Otherwise, if any
+    // slow char (/ ^ etc.) is found, use the f64 no-ws parser. If only i64-safe
+    // chars remain, use the i64 fast path. We cannot short-circuit on the first
+    // slow char because a floor char may appear later (e.g. `7/[2]`).
     let mut has_slow = false;
     for &b in expr {
         match b {
