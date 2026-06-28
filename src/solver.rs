@@ -1188,6 +1188,12 @@ fn parse_pure_number_rhs(rhs: &[u8]) -> Option<i64> {
     } else {
         (false, rhs)
     };
+    // Reject leading zeros (e.g. "01", "-05") to match the reference evaluator.
+    // The DFS prunes these during search, but solve_from_prefix can receive
+    // external inputs — this check ensures strict behavioral consistency.
+    if digits.len() > 1 && digits[0] == b'0' {
+        return None;
+    }
     let mut value: i64 = 0;
     for &b in digits {
         let d = (b - b'0') as i64;
