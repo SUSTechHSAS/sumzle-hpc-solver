@@ -7,6 +7,26 @@
 use crate::types::*;
 use std::borrow::Cow;
 
+const FACTORIAL_TABLE: [u64; (MAX_FACTORIAL as usize) + 1] = [
+    1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800, 39916800, 479001600,
+];
+
+const PERMUTATION_TABLE: [[u64; (MAX_PERMUTATION as usize) + 1]; (MAX_PERMUTATION as usize) + 1] = [
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 3, 6, 6, 0, 0, 0, 0, 0, 0, 0],
+    [1, 4, 12, 24, 24, 0, 0, 0, 0, 0, 0],
+    [1, 5, 20, 60, 120, 120, 0, 0, 0, 0, 0],
+    [1, 6, 30, 120, 360, 720, 720, 0, 0, 0, 0],
+    [1, 7, 42, 210, 840, 2520, 5040, 5040, 0, 0, 0],
+    [1, 8, 56, 336, 1680, 6720, 20160, 40320, 40320, 0, 0],
+    [1, 9, 72, 504, 3024, 15120, 60480, 181440, 362880, 362880, 0],
+    [
+        1, 10, 90, 720, 5040, 30240, 151200, 604800, 1814400, 3628800, 3628800,
+    ],
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainOperator {
     Equal,
@@ -230,14 +250,7 @@ fn handle_factorials_bytes(expr: &[u8]) -> Option<Vec<u8>> {
 /// Compute factorial
 #[inline]
 fn compute_factorial(n: u64) -> u64 {
-    if n == 0 {
-        return 1;
-    }
-    let mut result: u64 = 1;
-    for i in 2..=n {
-        result *= i;
-    }
-    result
+    FACTORIAL_TABLE[n as usize]
 }
 
 /// Handle permutation expressions (nAr = n!/(n-r)!)
@@ -294,11 +307,7 @@ fn handle_permutations_bytes(expr: &[u8]) -> Option<Vec<u8>> {
 /// Compute permutation P(m,n) = m!/(m-n)!
 #[inline]
 fn compute_permutation(m: u64, n: u64) -> u64 {
-    let mut result: u64 = 1;
-    for i in 0..n {
-        result *= m - i;
-    }
-    result
+    PERMUTATION_TABLE[m as usize][n as usize]
 }
 
 #[inline]

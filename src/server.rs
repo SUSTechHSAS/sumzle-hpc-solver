@@ -27,6 +27,7 @@ use tower_http::services::ServeDir;
 // core live in `crate::api` (shared with the Tauri mobile commands). This
 // module is only the HTTP glue around them.
 use crate::api::{self, CharProbability, SolveRequest, SolveResponse};
+use crate::available_threads;
 use crate::parallel::{ParallelSolver, Progress};
 use crate::types::SolverStats;
 
@@ -294,7 +295,7 @@ async fn solve_stream_handler(
             }
         };
     let num_threads = if threads == 0 {
-        num_cpus::get()
+        available_threads()
     } else {
         threads
     };
