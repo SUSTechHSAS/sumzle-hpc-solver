@@ -7,6 +7,26 @@
 use crate::types::*;
 use std::borrow::Cow;
 
+const FACTORIAL_TABLE: [u64; (MAX_FACTORIAL as usize) + 1] = [
+    1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880, 3628800, 39916800, 479001600,
+];
+
+const PERMUTATION_TABLE: [[u64; (MAX_PERMUTATION as usize) + 1]; (MAX_PERMUTATION as usize) + 1] = [
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+    [1, 3, 6, 6, 0, 0, 0, 0, 0, 0, 0],
+    [1, 4, 12, 24, 24, 0, 0, 0, 0, 0, 0],
+    [1, 5, 20, 60, 120, 120, 0, 0, 0, 0, 0],
+    [1, 6, 30, 120, 360, 720, 720, 0, 0, 0, 0],
+    [1, 7, 42, 210, 840, 2520, 5040, 5040, 0, 0, 0],
+    [1, 8, 56, 336, 1680, 6720, 20160, 40320, 40320, 0, 0],
+    [1, 9, 72, 504, 3024, 15120, 60480, 181440, 362880, 362880, 0],
+    [
+        1, 10, 90, 720, 5040, 30240, 151200, 604800, 1814400, 3628800, 3628800,
+    ],
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainOperator {
     Equal,
@@ -106,13 +126,141 @@ pub(crate) fn evaluate_expression_solver_bytes(expr: &[u8]) -> Option<f64> {
         return None;
     }
 
+    let mut needs_float = false;
     for &b in expr {
-        if matches!(b, b'[' | b']' | b'!' | b'A') {
-            return evaluate_expression_bytes(expr);
+        match b {
+            b'0'..=b'9' | b'+' | b'-' | b'*' | b'%' | b'(' | b')' => {}
+            b'[' | b']' | b'!' | b'A' => return evaluate_expression_bytes(expr),
+            _ => needs_float = true,
         }
     }
 
-    evaluate_arithmetic_no_ws_bytes(expr)
+    if needs_float {
+        return evaluate_arithmetic_no_ws_bytes(expr);
+    }
+
+    // Most solver-generated expressions use integer-only arithmetic. Avoid
+    // floating-point parsing for that common path, but fall back on overflow
+    // so this optimization cannot reject an expression the reference f64
+    // evaluator accepts at very large puzzle lengths.
+    evaluate_arithmetic_i64(expr)
+        .map(|value| value as f64)
+        .or_else(|| evaluate_arithmetic_no_ws_bytes(expr))
+}
+
+fn evaluate_arithmetic_i64(expr: &[u8]) -> Option<i64> {
+    let mut parser = I64Parser {
+        bytes: expr,
+        pos: 0,
+    };
+    let result = parser.parse_expression()?;
+    (parser.pos == expr.len()).then_some(result)
+}
+
+struct I64Parser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+// Every integer in this inclusive range has an exact f64 representation.
+// Falling back once an intermediate leaves it preserves the numeric values
+// relevant to solver comparisons (not merely overflow safety). Signed zero may
+// normalize to +0 on this private path, which is immaterial because the solver
+// immediately validates and converts the result to i64.
+const MAX_EXACT_F64_INTEGER: u64 = 1u64 << 53;
+
+#[inline]
+fn exact_f64_integer(value: i64) -> Option<i64> {
+    (value.unsigned_abs() <= MAX_EXACT_F64_INTEGER).then_some(value)
+}
+
+impl I64Parser<'_> {
+    #[inline]
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    #[inline]
+    fn advance(&mut self) {
+        self.pos += 1;
+    }
+
+    fn parse_expression(&mut self) -> Option<i64> {
+        let mut result = self.parse_term()?;
+        loop {
+            match self.peek() {
+                Some(b'+') => {
+                    self.advance();
+                    result = exact_f64_integer(result.checked_add(self.parse_term()?)?)?;
+                }
+                Some(b'-') => {
+                    self.advance();
+                    result = exact_f64_integer(result.checked_sub(self.parse_term()?)?)?;
+                }
+                _ => return Some(result),
+            }
+        }
+    }
+
+    fn parse_term(&mut self) -> Option<i64> {
+        let mut result = self.parse_unary()?;
+        loop {
+            match self.peek() {
+                Some(b'*') => {
+                    self.advance();
+                    if self.peek() == Some(b'*') {
+                        return None;
+                    }
+                    result = exact_f64_integer(result.checked_mul(self.parse_unary()?)?)?;
+                }
+                Some(b'%') => {
+                    self.advance();
+                    result = exact_f64_integer(result.checked_rem(self.parse_unary()?)?)?;
+                }
+                _ => return Some(result),
+            }
+        }
+    }
+
+    fn parse_unary(&mut self) -> Option<i64> {
+        if self.peek() == Some(b'-') {
+            self.advance();
+            exact_f64_integer(self.parse_unary()?.checked_neg()?)
+        } else {
+            self.parse_primary()
+        }
+    }
+
+    fn parse_primary(&mut self) -> Option<i64> {
+        match self.peek() {
+            Some(b'(') => {
+                self.advance();
+                let result = self.parse_expression()?;
+                if self.peek() != Some(b')') {
+                    return None;
+                }
+                self.advance();
+                Some(result)
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let start = self.pos;
+                let mut value = 0i64;
+                while let Some(c) = self.peek() {
+                    if !c.is_ascii_digit() {
+                        break;
+                    }
+                    value =
+                        exact_f64_integer(value.checked_mul(10)?.checked_add((c - b'0') as i64)?)?;
+                    self.advance();
+                }
+                if self.pos - start > 1 && self.bytes[start] == b'0' {
+                    return None;
+                }
+                Some(value)
+            }
+            _ => None,
+        }
+    }
 }
 
 fn resolve_floor_brackets_bytes(expr: &[u8]) -> Option<Vec<u8>> {
@@ -215,7 +363,7 @@ fn handle_factorials_bytes(expr: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
 
-            let factorial = compute_factorial(n);
+            let factorial = compute_factorial(n)?;
             result.truncate(j);
             append_u64_decimal(&mut result, factorial);
         } else {
@@ -229,15 +377,8 @@ fn handle_factorials_bytes(expr: &[u8]) -> Option<Vec<u8>> {
 
 /// Compute factorial
 #[inline]
-fn compute_factorial(n: u64) -> u64 {
-    if n == 0 {
-        return 1;
-    }
-    let mut result: u64 = 1;
-    for i in 2..=n {
-        result *= i;
-    }
-    result
+fn compute_factorial(n: u64) -> Option<u64> {
+    FACTORIAL_TABLE.get(n as usize).copied()
 }
 
 /// Handle permutation expressions (nAr = n!/(n-r)!)
@@ -277,7 +418,7 @@ fn handle_permutations_bytes(expr: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
 
-            let perm = compute_permutation(m, n);
+            let perm = compute_permutation(m, n)?;
             result.truncate(j);
             append_u64_decimal(&mut result, perm);
             i = k;
@@ -293,12 +434,11 @@ fn handle_permutations_bytes(expr: &[u8]) -> Option<Vec<u8>> {
 
 /// Compute permutation P(m,n) = m!/(m-n)!
 #[inline]
-fn compute_permutation(m: u64, n: u64) -> u64 {
-    let mut result: u64 = 1;
-    for i in 0..n {
-        result *= m - i;
-    }
-    result
+fn compute_permutation(m: u64, n: u64) -> Option<u64> {
+    PERMUTATION_TABLE
+        .get(m as usize)
+        .and_then(|row| row.get(n as usize))
+        .copied()
 }
 
 #[inline]
@@ -941,5 +1081,24 @@ mod tests {
     fn test_unary_minus() {
         assert_eq!(evaluate_expression("-5"), Some(-5.0));
         assert_eq!(evaluate_expression("3--2"), Some(5.0));
+    }
+
+    #[test]
+    fn solver_integer_fast_path_falls_back_on_i64_overflow() {
+        let expr = b"1000000*1000000*1000000*1000000";
+        assert_eq!(
+            evaluate_expression_solver_bytes(expr),
+            evaluate_expression_bytes(expr)
+        );
+    }
+
+    #[test]
+    fn solver_integer_fast_path_preserves_f64_rounding() {
+        let expr = b"1000000*1000000*10000+1-1000000*1000000*10000";
+        assert_eq!(evaluate_expression_bytes(expr), Some(0.0));
+        assert_eq!(
+            evaluate_expression_solver_bytes(expr),
+            evaluate_expression_bytes(expr)
+        );
     }
 }
