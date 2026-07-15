@@ -763,6 +763,7 @@ fn base_candidates(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn push_filtered(
     slice: &[u8],
     index: usize,
@@ -804,6 +805,7 @@ fn push_filtered(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn push_filtered_end_chars(
     slice: &[u8],
     index: usize,
@@ -847,6 +849,7 @@ fn push_filtered_end_chars(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn candidate_allowed(
     ch: u8,
     index: usize,
@@ -1020,6 +1023,7 @@ fn candidate_allowed(
 
 /// Get optimized character order for a given position and context.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn fill_candidate_chars(
     index: usize,
     prev_char: Option<u8>,
