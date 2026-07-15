@@ -7,6 +7,12 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
+const STREAM_CHUNK_CAPACITY: usize = 256 * 1024;
+// One writer consumes the queue serially, so a deep per-thread queue cannot
+// improve steady-state throughput. Keep a small fixed byte budget instead of
+// allowing `threads * 8 * 256 KiB` (512 MiB at the API's 256-thread limit).
+const STREAM_QUEUE_CHUNKS: usize = 16;
+
 struct ChannelJsonlSink<'a> {
     tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     cancelled: &'a AtomicBool,
@@ -22,13 +28,12 @@ impl<'a> ChannelJsonlSink<'a> {
         cancelled: &'a AtomicBool,
         writer_failed: &'a AtomicBool,
     ) -> Self {
-        const CAPACITY: usize = 256 * 1024;
         Self {
             tx,
             cancelled,
             writer_failed,
-            buf: Vec::with_capacity(CAPACITY),
-            flush_at: CAPACITY - 1024,
+            buf: Vec::with_capacity(STREAM_CHUNK_CAPACITY),
+            flush_at: STREAM_CHUNK_CAPACITY - 1024,
             count: 0,
         }
     }
@@ -332,8 +337,7 @@ impl ParallelSolver {
         let (branches, eager_results, eager_searched) = self.collect_branches_with_target(32, 32);
         let writer_failed = AtomicBool::new(false);
         let writer_error = Mutex::new(None::<std::io::Error>);
-        let channel_capacity = self.num_threads.max(1).saturating_mul(8).max(16);
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(channel_capacity);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(STREAM_QUEUE_CHUNKS);
 
         let (written, searched) = std::thread::scope(|scope| {
             let writer_error_ref = &writer_error;
