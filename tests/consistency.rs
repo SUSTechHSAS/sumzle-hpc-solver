@@ -1063,6 +1063,20 @@ fn test_high_thread_count_does_not_lose_solutions() {
     }
 }
 
+#[test]
+fn test_unconstrained_searched_counts_match_main_reference() {
+    // searched_count is observable API/CLI behavior as well as a benchmark
+    // invariant. Keep the optimized candidate filtering from silently visiting
+    // additional invalid leaves while returning the same solution set.
+    for (length, expected) in [(3, 99), (4, 582), (5, 13_136), (6, 108_487), (7, 1_535_857)] {
+        let (_, searched) = Solver::new(length, empty_gk(length)).solve();
+        assert_eq!(
+            searched, expected,
+            "length {length}: searched count must remain compatible with main"
+        );
+    }
+}
+
 // =========================================================================
 // Streaming output consistency: solutions streamed via solve_to_writer must
 // be exactly the default solution set (order aside).

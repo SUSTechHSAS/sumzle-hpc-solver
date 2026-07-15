@@ -1065,6 +1065,16 @@ fn fill_candidate_chars(
     let ordered = base_candidates(index, prev_char, main_op_so_far, floor_ctx);
 
     if index == length - 1 && !floor_ctx.in_floor {
+        // Preserve the original fallback rule: END_CHARS is consulted only
+        // when `ordered` contains no position/knowledge-allowed end character.
+        // Dynamic grammar rejection must not activate the fallback, otherwise
+        // extra invalid complete expressions are visited and searched_count
+        // diverges even though the solution set remains unchanged.
+        let ordered_has_allowed_end = ordered.iter().copied().any(|ch| {
+            is_end_char_b(ch)
+                && !prepared.is_globally_forbidden(ch)
+                && !prepared.cannot_be_at(index, ch)
+        });
         let filtered_len = push_filtered_end_chars(
             ordered,
             index,
@@ -1081,7 +1091,7 @@ fn fill_candidate_chars(
             current_num_leading_zero,
             out,
         );
-        if filtered_len > 0 {
+        if ordered_has_allowed_end {
             return filtered_len;
         }
         if prev_char.is_some() {
