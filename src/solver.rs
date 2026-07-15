@@ -2,6 +2,7 @@
 
 use crate::evaluator::{evaluate_expression_solver_bytes, is_integer};
 use crate::types::*;
+use rustc_hash::FxHashMap;
 
 const CHARSET_LEN: usize = 24;
 const NO_CHAR: u8 = 0;
@@ -75,14 +76,14 @@ const LENGTH_ONE_DIGITS: &[u8] = b"0123456789";
 /// (monomorphized + inlined), while alternative sinks let the same search
 /// stream solutions to disk or score them for top-N without materializing the
 /// full solution set in memory. `accept` receives the completed expression as
-/// raw bytes (guaranteed valid ASCII/UTF-8 by construction).
+/// raw bytes plus the already-maintained bitmask of distinct characters in it.
 pub trait SolutionSink {
-    fn accept(&mut self, expr: &[u8]);
+    fn accept(&mut self, expr: &[u8], unique_mask: u32);
 }
 
 impl SolutionSink for Vec<String> {
     #[inline]
-    fn accept(&mut self, expr: &[u8]) {
+    fn accept(&mut self, expr: &[u8], _unique_mask: u32) {
         // Safety: the search only ever places bytes from the Sumzle charset,
         // all of which are valid single-byte UTF-8.
         let s = unsafe { std::str::from_utf8_unchecked(expr) };
@@ -93,7 +94,7 @@ impl SolutionSink for Vec<String> {
 /// Bitmask of the distinct charset indices present in `expr`. CHARSET_LEN is
 /// 24, so a `u32` holds one bit per possible character.
 #[inline]
-fn unique_char_mask(expr: &[u8]) -> u32 {
+pub(crate) fn unique_char_mask(expr: &[u8]) -> u32 {
     let mut mask = 0u32;
     for &ch in expr {
         mask |= 1u32 << idx_of(ch);
@@ -124,6 +125,16 @@ impl Default for CountSink {
 impl CountSink {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[inline]
+    pub fn accept_mask(&mut self, mut mask: u32) {
+        self.total += 1;
+        while mask != 0 {
+            let i = mask.trailing_zeros() as usize;
+            self.char_counts[i] += 1;
+            mask &= mask - 1;
+        }
     }
 
     /// Merge another sink's counts into this one (for parallel reduction).
@@ -185,14 +196,8 @@ impl CountSink {
 
 impl SolutionSink for CountSink {
     #[inline]
-    fn accept(&mut self, expr: &[u8]) {
-        self.total += 1;
-        let mut mask = unique_char_mask(expr);
-        while mask != 0 {
-            let i = mask.trailing_zeros() as usize;
-            self.char_counts[i] += 1;
-            mask &= mask - 1;
-        }
+    fn accept(&mut self, _expr: &[u8], unique_mask: u32) {
+        self.accept_mask(unique_mask);
     }
 }
 
@@ -205,6 +210,7 @@ pub struct TopNSink {
     n: usize,
     probs: [f64; CHARSET_LEN],
     top5_mask: u32,
+    score_cache: FxHashMap<u32, f64>,
     /// Min-heap keyed on (score, expr) so the lowest-scoring kept solution is
     /// the cheapest to evict. `Reverse` turns the max-heap into a min-heap.
     heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredSolution>>,
@@ -247,13 +253,13 @@ impl TopNSink {
             n,
             probs,
             top5_mask,
+            score_cache: FxHashMap::default(),
             heap: std::collections::BinaryHeap::new(),
         }
     }
 
     #[inline]
-    fn score(&self, expr: &[u8]) -> f64 {
-        let mut mask = unique_char_mask(expr);
+    fn score_from_mask(&self, mut mask: u32) -> f64 {
         let mut score = 0.0f64;
         while mask != 0 {
             let i = mask.trailing_zeros() as usize;
@@ -262,6 +268,19 @@ impl TopNSink {
                 score += 50.0;
             }
             mask &= mask - 1;
+        }
+        score
+    }
+
+    #[inline]
+    fn score(&mut self, unique_mask: u32) -> f64 {
+        if let Some(score) = self.score_cache.get(&unique_mask) {
+            return *score;
+        }
+
+        let score = self.score_from_mask(unique_mask);
+        if self.score_cache.len() < 8192 {
+            self.score_cache.insert(unique_mask, score);
         }
         score
     }
@@ -333,8 +352,8 @@ impl TopNSink {
 
 impl SolutionSink for TopNSink {
     #[inline]
-    fn accept(&mut self, expr: &[u8]) {
-        let score = self.score(expr);
+    fn accept(&mut self, expr: &[u8], unique_mask: u32) {
+        let score = self.score(unique_mask);
         // Skip the allocation entirely for solutions that cannot make the cut.
         if !self.would_keep(score, expr) {
             return;
@@ -413,7 +432,7 @@ impl<'a, W: std::io::Write> JsonlSink<'a, W> {
 
 impl<W: std::io::Write> SolutionSink for JsonlSink<'_, W> {
     #[inline]
-    fn accept(&mut self, expr: &[u8]) {
+    fn accept(&mut self, expr: &[u8], _unique_mask: u32) {
         // Once a write has failed, stop buffering so memory stays bounded; the
         // error is reported by `finish`.
         if self.error.is_some() {
@@ -743,16 +762,41 @@ fn base_candidates(
     }
 }
 
-#[inline]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn push_filtered(
     slice: &[u8],
     index: usize,
+    prev_char: Option<u8>,
+    length: usize,
+    main_op_so_far: Option<u8>,
+    floor_ctx: FloorContext,
     prepared: &PreparedKnowledge,
+    bracket_stack: &[u8],
+    stack_len: usize,
+    char_counts: &[u8; CHARSET_LEN],
+    current_num_len: u8,
+    current_num_value: i64,
+    current_num_leading_zero: bool,
     out: &mut [u8; CHARSET_LEN],
 ) -> usize {
     let mut len = 0;
     for &ch in slice {
-        if !prepared.is_globally_forbidden(ch) && !prepared.cannot_be_at(index, ch) {
+        if candidate_allowed(
+            ch,
+            index,
+            prev_char,
+            length,
+            main_op_so_far,
+            floor_ctx,
+            prepared,
+            bracket_stack,
+            stack_len,
+            char_counts,
+            current_num_len,
+            current_num_value,
+            current_num_leading_zero,
+        ) {
             out[len] = ch;
             len += 1;
         }
@@ -760,18 +804,42 @@ fn push_filtered(
     len
 }
 
-#[inline]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn push_filtered_end_chars(
     slice: &[u8],
     index: usize,
+    prev_char: Option<u8>,
+    length: usize,
+    main_op_so_far: Option<u8>,
+    floor_ctx: FloorContext,
     prepared: &PreparedKnowledge,
+    bracket_stack: &[u8],
+    stack_len: usize,
+    char_counts: &[u8; CHARSET_LEN],
+    current_num_len: u8,
+    current_num_value: i64,
+    current_num_leading_zero: bool,
     out: &mut [u8; CHARSET_LEN],
 ) -> usize {
     let mut len = 0;
     for &ch in slice {
         if is_end_char_b(ch)
-            && !prepared.is_globally_forbidden(ch)
-            && !prepared.cannot_be_at(index, ch)
+            && candidate_allowed(
+                ch,
+                index,
+                prev_char,
+                length,
+                main_op_so_far,
+                floor_ctx,
+                prepared,
+                bracket_stack,
+                stack_len,
+                char_counts,
+                current_num_len,
+                current_num_value,
+                current_num_leading_zero,
+            )
         {
             out[len] = ch;
             len += 1;
@@ -780,8 +848,182 @@ fn push_filtered_end_chars(
     len
 }
 
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn candidate_allowed(
+    ch: u8,
+    index: usize,
+    prev_char: Option<u8>,
+    length: usize,
+    main_op_so_far: Option<u8>,
+    floor_ctx: FloorContext,
+    prepared: &PreparedKnowledge,
+    bracket_stack: &[u8],
+    stack_len: usize,
+    char_counts: &[u8; CHARSET_LEN],
+    current_num_len: u8,
+    current_num_value: i64,
+    current_num_leading_zero: bool,
+) -> bool {
+    if prepared.is_globally_forbidden(ch) || prepared.cannot_be_at(index, ch) {
+        return false;
+    }
+
+    let ch_idx = idx_of(ch);
+    if prepared.exact_mask & (1u32 << ch_idx) != 0
+        && char_counts[ch_idx] >= prepared.exact_counts[ch_idx]
+    {
+        return false;
+    }
+
+    let prev_is_digit = prev_char.is_some_and(is_digit_b);
+
+    if floor_ctx.in_floor {
+        match ch {
+            b'/' => {
+                if floor_ctx.has_slash_in_current_floor || !prev_is_digit || index == 0 {
+                    return false;
+                }
+            }
+            b']' => {
+                if !prev_is_digit || !floor_ctx.has_slash_in_current_floor || stack_len == 0 {
+                    return false;
+                }
+            }
+            b'0'..=b'9' => {}
+            _ => return false,
+        }
+    }
+
+    if ch == b'[' && index >= length.saturating_sub(3) {
+        return false;
+    }
+
+    if ch == b'A' && !prev_char.is_some_and(|pc| is_digit_b(pc) || is_close_bracket_b(pc)) {
+        return false;
+    }
+
+    if ch == b'!' && !prev_char.is_some_and(|pc| is_digit_b(pc) || pc == b')') {
+        return false;
+    }
+
+    if is_main_operator_b(ch) && (main_op_so_far.is_some() || index == 0 || index >= length - 1) {
+        return false;
+    }
+
+    if matches!(ch, b')' | b']') {
+        if stack_len == 0 {
+            return false;
+        }
+        let expected = match bracket_stack[stack_len - 1] {
+            b'(' => b')',
+            b'[' => b']',
+            _ => return false,
+        };
+        if ch != expected {
+            return false;
+        }
+    }
+
+    let new_stack_len = match ch {
+        b'(' | b'[' => stack_len + 1,
+        b')' | b']' => stack_len - 1,
+        _ => stack_len,
+    };
+    if index == length - 1 && new_stack_len != 0 {
+        return false;
+    }
+
+    if let Some(pc) = prev_char {
+        if is_digit_b(pc) {
+            if is_open_bracket_b(ch) && ch != b'[' {
+                return false;
+            }
+            if ch == b'[' && floor_ctx.in_floor {
+                return false;
+            }
+        } else if is_operator_b(pc) {
+            if is_binary_operator_b(ch)
+                && !(pc == b'A' && (is_open_bracket_b(ch) || is_digit_b(ch)))
+                && !is_unary_post_operator_b(pc)
+            {
+                return false;
+            }
+            if is_close_bracket_b(ch) && !is_unary_post_operator_b(pc) {
+                return false;
+            }
+            if is_main_operator_b(ch) && !is_unary_post_operator_b(pc) {
+                return false;
+            }
+            if is_unary_post_operator_b(pc) && (is_digit_b(ch) || is_open_bracket_b(ch)) {
+                return false;
+            }
+        } else if is_open_bracket_b(pc) {
+            if is_binary_operator_b(ch) {
+                return false;
+            }
+            if is_close_bracket_b(ch) && !matches_bracket(pc, ch) {
+                return false;
+            }
+            if is_main_operator_b(ch) || is_unary_post_operator_b(ch) {
+                return false;
+            }
+        } else if is_close_bracket_b(pc) {
+            if is_digit_b(ch) || is_open_bracket_b(ch) {
+                return false;
+            }
+        } else if is_main_operator_b(pc) {
+            if pc == b'=' {
+                if !is_digit_b(ch) && ch != b'-' {
+                    return false;
+                }
+            } else if is_main_operator_b(ch) || is_close_bracket_b(ch) {
+                return false;
+            }
+        }
+
+        if pc == b'[' && ch == b'(' {
+            return false;
+        }
+    }
+
+    if is_digit_b(ch) {
+        let digit = (ch - b'0') as i64;
+        let new_len = if prev_is_digit {
+            current_num_len as usize + 1
+        } else {
+            1
+        };
+        let new_value = if prev_is_digit {
+            current_num_value * 10 + digit
+        } else {
+            digit
+        };
+        let leading_zero = if prev_is_digit {
+            current_num_leading_zero
+        } else {
+            ch == b'0'
+        };
+
+        if new_len > 1 && leading_zero {
+            return false;
+        }
+        if main_op_so_far != Some(b'=') && new_value > MAX_OPERAND_VALUE {
+            return false;
+        }
+    }
+
+    if main_op_so_far == Some(b'=') && ch == b'-' && prev_char == Some(b'=') && index >= length - 1
+    {
+        return false;
+    }
+
+    true
+}
+
 /// Get optimized character order for a given position and context.
-#[inline]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn fill_candidate_chars(
     index: usize,
     prev_char: Option<u8>,
@@ -789,11 +1031,31 @@ fn fill_candidate_chars(
     main_op_so_far: Option<u8>,
     floor_ctx: FloorContext,
     prepared: &PreparedKnowledge,
+    bracket_stack: &[u8],
+    stack_len: usize,
+    char_counts: &[u8; CHARSET_LEN],
+    current_num_len: u8,
+    current_num_value: i64,
+    current_num_leading_zero: bool,
     out: &mut [u8; CHARSET_LEN],
 ) -> usize {
     let fixed = prepared.fixed_chars[index];
     if fixed != NO_CHAR {
-        if prepared.is_globally_forbidden(fixed) || prepared.cannot_be_at(index, fixed) {
+        if !candidate_allowed(
+            fixed,
+            index,
+            prev_char,
+            length,
+            main_op_so_far,
+            floor_ctx,
+            prepared,
+            bracket_stack,
+            stack_len,
+            char_counts,
+            current_num_len,
+            current_num_value,
+            current_num_leading_zero,
+        ) {
             return 0;
         }
         out[0] = fixed;
@@ -803,24 +1065,95 @@ fn fill_candidate_chars(
     let ordered = base_candidates(index, prev_char, main_op_so_far, floor_ctx);
 
     if index == length - 1 && !floor_ctx.in_floor {
-        let filtered_len = push_filtered_end_chars(ordered, index, prepared, out);
-        if filtered_len > 0 {
+        // Preserve the original fallback rule: END_CHARS is consulted only
+        // when `ordered` contains no position/knowledge-allowed end character.
+        // Dynamic grammar rejection must not activate the fallback, otherwise
+        // extra invalid complete expressions are visited and searched_count
+        // diverges even though the solution set remains unchanged.
+        let ordered_has_allowed_end = ordered.iter().copied().any(|ch| {
+            is_end_char_b(ch)
+                && !prepared.is_globally_forbidden(ch)
+                && !prepared.cannot_be_at(index, ch)
+        });
+        let filtered_len = push_filtered_end_chars(
+            ordered,
+            index,
+            prev_char,
+            length,
+            main_op_so_far,
+            floor_ctx,
+            prepared,
+            bracket_stack,
+            stack_len,
+            char_counts,
+            current_num_len,
+            current_num_value,
+            current_num_leading_zero,
+            out,
+        );
+        if ordered_has_allowed_end {
             return filtered_len;
         }
         if prev_char.is_some() {
-            return push_filtered(END_CHARS, index, prepared, out);
+            return push_filtered(
+                END_CHARS,
+                index,
+                prev_char,
+                length,
+                main_op_so_far,
+                floor_ctx,
+                prepared,
+                bracket_stack,
+                stack_len,
+                char_counts,
+                current_num_len,
+                current_num_value,
+                current_num_leading_zero,
+                out,
+            );
         }
         if index == 0 && length == 1 {
-            return push_filtered(LENGTH_ONE_DIGITS, index, prepared, out);
+            return push_filtered(
+                LENGTH_ONE_DIGITS,
+                index,
+                prev_char,
+                length,
+                main_op_so_far,
+                floor_ctx,
+                prepared,
+                bracket_stack,
+                stack_len,
+                char_counts,
+                current_num_len,
+                current_num_value,
+                current_num_leading_zero,
+                out,
+            );
         }
     }
 
-    push_filtered(ordered, index, prepared, out)
+    push_filtered(
+        ordered,
+        index,
+        prev_char,
+        length,
+        main_op_so_far,
+        floor_ctx,
+        prepared,
+        bracket_stack,
+        stack_len,
+        char_counts,
+        current_num_len,
+        current_num_value,
+        current_num_leading_zero,
+        out,
+    )
 }
 
 /// Check if a character can be placed at a given position
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn can_place_char(
+fn can_place_char_slow(
     ch: u8,
     ch_idx: usize,
     index: usize,
@@ -1053,11 +1386,91 @@ fn can_place_char(
     true
 }
 
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn can_place_char(
+    ch: u8,
+    ch_idx: usize,
+    index: usize,
+    prev_char: Option<u8>,
+    main_op_so_far: Option<u8>,
+    char_counts: &[u8; CHARSET_LEN],
+    floor_ctx: FloorContext,
+    bracket_stack: &[u8],
+    stack_len: usize,
+    prepared: &PreparedKnowledge,
+    length: usize,
+    current_num_len: u8,
+    current_num_value: i64,
+    current_num_leading_zero: bool,
+) -> bool {
+    if prepared.fixed_chars[index] != NO_CHAR {
+        return can_place_char_slow(
+            ch,
+            ch_idx,
+            index,
+            prev_char,
+            main_op_so_far,
+            char_counts,
+            floor_ctx,
+            bracket_stack,
+            stack_len,
+            prepared,
+            length,
+            current_num_len,
+            current_num_value,
+            current_num_leading_zero,
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    if !can_place_char_slow(
+        ch,
+        ch_idx,
+        index,
+        prev_char,
+        main_op_so_far,
+        char_counts,
+        floor_ctx,
+        bracket_stack,
+        stack_len,
+        prepared,
+        length,
+        current_num_len,
+        current_num_value,
+        current_num_leading_zero,
+    ) {
+        let stack_top = if stack_len > 0 {
+            Some(bracket_stack[stack_len - 1] as char)
+        } else {
+            None
+        };
+        panic!(
+            "candidate mismatch ch={} index={} prev={:?} main_op={:?} floor={:?} stack_len={} stack_top={:?} num_len={} num_val={} leading_zero={} fixed={} exact_mask_hit={} count={}",
+            ch as char,
+            index,
+            prev_char.map(char::from),
+            main_op_so_far.map(char::from),
+            floor_ctx,
+            stack_len,
+            stack_top,
+            current_num_len,
+            current_num_value,
+            current_num_leading_zero,
+            prepared.fixed_chars[index] as char,
+            prepared.exact_mask & (1u32 << ch_idx) != 0,
+            char_counts[ch_idx],
+        );
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn complete_eq_rhs<S: SolutionSink>(
     length: usize,
     main_op_index: usize,
     expr: &mut [u8],
+    prefix_unique_mask: u32,
     char_counts: &mut [u8; CHARSET_LEN],
     prepared: &PreparedKnowledge,
     rhs: &[u8],
@@ -1068,6 +1481,7 @@ fn complete_eq_rhs<S: SolutionSink>(
 
     let mut filled = 0usize;
     let mut valid = true;
+    let mut total_unique_mask = prefix_unique_mask;
     for (offset, &ch) in rhs.iter().enumerate() {
         let pos = main_op_index + 1 + offset;
         if prepared.is_globally_forbidden(ch)
@@ -1088,12 +1502,13 @@ fn complete_eq_rhs<S: SolutionSink>(
 
         expr[pos] = ch;
         char_counts[ch_idx] += 1;
+        total_unique_mask |= 1u32 << ch_idx;
         filled += 1;
     }
 
     if valid && prepared.counts_can_still_succeed(char_counts, 0) {
         *searched_count += 1;
-        sink.accept(expr);
+        sink.accept(expr, total_unique_mask);
     }
 
     for &ch in &rhs[..filled] {
@@ -1110,6 +1525,8 @@ fn complete_eq_rhs<S: SolutionSink>(
 #[derive(Clone)]
 pub struct Branch {
     prefix: Vec<u8>,
+    unique_mask: u32,
+    char_counts: [u8; CHARSET_LEN],
     main_op: Option<u8>,
     main_op_index: usize,
     main_lhs_value: Option<i64>,
@@ -1118,6 +1535,28 @@ pub struct Branch {
     num_len: u8,
     num_value: i64,
     num_leading_zero: bool,
+}
+
+impl Branch {
+    pub(crate) fn root() -> Self {
+        Self {
+            prefix: Vec::new(),
+            unique_mask: 0,
+            char_counts: [0; CHARSET_LEN],
+            main_op: None,
+            main_op_index: 0,
+            main_lhs_value: None,
+            floor_ctx: FloorContext::new(),
+            bracket_stack: Vec::new(),
+            num_len: 0,
+            num_value: 0,
+            num_leading_zero: false,
+        }
+    }
+
+    pub(crate) fn depth(&self) -> usize {
+        self.prefix.len()
+    }
 }
 
 /// The main solver struct
@@ -1166,6 +1605,7 @@ impl Solver {
             None,
             0,
             None,
+            0,
             &mut char_counts,
             FloorContext::new(),
             &mut bracket_stack,
@@ -1192,6 +1632,7 @@ impl Solver {
         main_op_so_far: Option<u8>,
         main_op_index: usize,
         main_lhs_value: Option<i64>,
+        current_unique_mask: u32,
         char_counts: &mut [u8; CHARSET_LEN],
         floor_ctx: FloorContext,
         bracket_stack: &mut [u8],
@@ -1211,6 +1652,8 @@ impl Solver {
         if index == branch_depth {
             branches.push(Branch {
                 prefix: expr[..index].to_vec(),
+                unique_mask: current_unique_mask,
+                char_counts: *char_counts,
                 main_op: main_op_so_far,
                 main_op_index,
                 main_lhs_value,
@@ -1283,7 +1726,7 @@ impl Solver {
             };
 
             if valid {
-                sink.accept(expr);
+                sink.accept(expr, current_unique_mask);
             }
             return;
         }
@@ -1296,6 +1739,12 @@ impl Solver {
             main_op_so_far,
             floor_ctx,
             prepared,
+            bracket_stack,
+            stack_len,
+            char_counts,
+            current_num_len,
+            current_num_value,
+            current_num_leading_zero,
             &mut candidates,
         );
 
@@ -1322,6 +1771,7 @@ impl Solver {
 
             expr[index] = ch;
             char_counts[ch_idx] += 1;
+            let next_unique_mask = current_unique_mask | (1u32 << ch_idx);
 
             let next_floor_ctx = update_floor_context(ch, floor_ctx);
             let mut new_main_lhs_value = main_lhs_value;
@@ -1352,6 +1802,7 @@ impl Solver {
                             self.length,
                             index,
                             expr,
+                            next_unique_mask,
                             char_counts,
                             prepared,
                             &rhs_buf[..rhs_len],
@@ -1415,6 +1866,7 @@ impl Solver {
                     main_op_index
                 },
                 new_main_lhs_value,
+                next_unique_mask,
                 char_counts,
                 next_floor_ctx,
                 bracket_stack,
@@ -1441,7 +1893,7 @@ impl Solver {
     /// Get the top-level character branches for parallel execution
     pub fn get_top_level_branches(&self) -> Vec<(char, Option<char>, FloorContext)> {
         let char_counts = [0u8; CHARSET_LEN];
-        let bracket_stack: Vec<u8> = Vec::new();
+        let bracket_stack = [NO_CHAR; CHARSET_LEN];
 
         let mut candidates = [NO_CHAR; CHARSET_LEN];
         let count = fill_candidate_chars(
@@ -1451,6 +1903,12 @@ impl Solver {
             None,
             FloorContext::new(),
             &self.prepared,
+            &bracket_stack,
+            0,
+            &char_counts,
+            0,
+            0,
+            false,
             &mut candidates,
         );
 
@@ -1533,6 +1991,7 @@ impl Solver {
             main_op.map(|c| c as u8),
             0,
             None,
+            1u32 << idx_of(first),
             &mut char_counts,
             floor_ctx,
             &mut bracket_stack,
@@ -1587,6 +2046,7 @@ impl Solver {
             None,
             0,
             None,
+            0,
             &mut char_counts,
             FloorContext::new(),
             &mut bracket_stack,
@@ -1619,10 +2079,8 @@ impl Solver {
         let mut searched_count: u64 = 0;
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         expr[..depth].copy_from_slice(&branch.prefix);
-        let mut char_counts = [0u8; CHARSET_LEN];
-        for &ch in &branch.prefix {
-            char_counts[idx_of(ch)] += 1;
-        }
+        let unique_mask = branch.unique_mask;
+        let mut char_counts = branch.char_counts;
         let stack_len = branch.bracket_stack.len();
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
         bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
@@ -1636,6 +2094,7 @@ impl Solver {
             branch.main_op,
             branch.main_op_index,
             branch.main_lhs_value,
+            unique_mask,
             &mut char_counts,
             branch.floor_ctx,
             &mut bracket_stack,
@@ -1651,5 +2110,54 @@ impl Solver {
         );
 
         searched_count
+    }
+
+    /// Advance one captured branch by exactly one character of search depth,
+    /// returning its child branches plus any eager `=` solutions found during
+    /// that expansion.
+    pub fn collect_children_into<S: SolutionSink>(
+        &self,
+        branch: &Branch,
+        sink: &mut S,
+    ) -> (Vec<Branch>, u64) {
+        let depth = branch.prefix.len();
+        if depth >= self.length {
+            return (Vec::new(), 0);
+        }
+
+        let mut branches: Vec<Branch> = Vec::new();
+        let mut searched_count: u64 = 0;
+        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+        expr[..depth].copy_from_slice(&branch.prefix);
+        let unique_mask = branch.unique_mask;
+        let mut char_counts = branch.char_counts;
+        let stack_len = branch.bracket_stack.len();
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
+        let prev_char = branch.prefix.last().copied();
+
+        self.recursive_search(
+            depth,
+            &mut expr,
+            prev_char,
+            branch.main_op,
+            branch.main_op_index,
+            branch.main_lhs_value,
+            unique_mask,
+            &mut char_counts,
+            branch.floor_ctx,
+            &mut bracket_stack,
+            stack_len,
+            &self.prepared,
+            branch.num_len,
+            branch.num_value,
+            branch.num_leading_zero,
+            sink,
+            &mut searched_count,
+            depth + 1,
+            &mut branches,
+        );
+
+        (branches, searched_count)
     }
 }
