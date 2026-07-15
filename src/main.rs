@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use sumzle_solver::available_threads;
 use sumzle_solver::distributed::{Coordinator, Worker};
 use sumzle_solver::evaluator;
 use sumzle_solver::parallel::ParallelSolver;
@@ -216,7 +217,7 @@ fn main() -> Result<()> {
             let (length, gk) = build_solver_input(&cli_input)?;
             let solver = Solver::new(length, gk);
             let num_threads = if threads == 0 {
-                num_cpus::get()
+                available_threads()
             } else {
                 threads
             };
@@ -306,7 +307,7 @@ fn main() -> Result<()> {
             threads,
         } => {
             let num_threads = if threads == 0 {
-                num_cpus::get()
+                available_threads()
             } else {
                 threads
             };
@@ -325,7 +326,7 @@ fn main() -> Result<()> {
         },
 
         Commands::Bench { lengths, parallel } => {
-            let num_threads = num_cpus::get();
+            let num_threads = available_threads();
             for &len in &lengths {
                 let gk = GlobalKnowledge {
                     fixed_chars: vec![None; len],

@@ -1,10 +1,88 @@
 //! Multi-core parallel solver using Rayon
 
-use crate::solver::{CountSink, JsonlSink, SolutionSink, Solver, TopNSink};
+use crate::available_threads;
+use crate::solver::{unique_char_mask, Branch, CountSink, SolutionSink, Solver, TopNSink};
 use rayon::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
+
+const STREAM_CHUNK_CAPACITY: usize = 256 * 1024;
+// One writer consumes the queue serially, so a deep per-thread queue cannot
+// improve steady-state throughput. Keep a small fixed byte budget instead of
+// allowing `threads * 8 * 256 KiB` (512 MiB at the API's 256-thread limit).
+const STREAM_QUEUE_CHUNKS: usize = 16;
+
+struct ChannelJsonlSink<'a> {
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    cancelled: &'a AtomicBool,
+    writer_failed: &'a AtomicBool,
+    buf: Vec<u8>,
+    flush_at: usize,
+    queued_count: u64,
+    buffered_count: u64,
+}
+
+impl<'a> ChannelJsonlSink<'a> {
+    fn new(
+        tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        cancelled: &'a AtomicBool,
+        writer_failed: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            tx,
+            cancelled,
+            writer_failed,
+            buf: Vec::with_capacity(STREAM_CHUNK_CAPACITY),
+            flush_at: STREAM_CHUNK_CAPACITY - 1024,
+            queued_count: 0,
+            buffered_count: 0,
+        }
+    }
+
+    #[inline]
+    fn is_stopped(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed) || self.writer_failed.load(Ordering::Relaxed)
+    }
+
+    fn flush_buf(&mut self) {
+        if self.buf.is_empty() || self.is_stopped() {
+            self.buf.clear();
+            self.buffered_count = 0;
+            return;
+        }
+
+        let mut chunk = Vec::with_capacity(self.buf.capacity());
+        std::mem::swap(&mut chunk, &mut self.buf);
+        if self.tx.send(chunk).is_ok() {
+            self.queued_count += self.buffered_count;
+        } else {
+            self.writer_failed.store(true, Ordering::Relaxed);
+        }
+        self.buffered_count = 0;
+    }
+
+    fn finish(mut self) -> u64 {
+        self.flush_buf();
+        self.queued_count
+    }
+}
+
+impl SolutionSink for ChannelJsonlSink<'_> {
+    #[inline]
+    fn accept(&mut self, expr: &[u8]) {
+        if self.is_stopped() {
+            return;
+        }
+        self.buf.extend_from_slice(b"{\"solution\":\"");
+        self.buf.extend_from_slice(expr);
+        self.buf.extend_from_slice(b"\"}\n");
+        self.buffered_count += 1;
+        if self.buf.len() >= self.flush_at {
+            self.flush_buf();
+        }
+    }
+}
 
 /// Live progress of a parallel solve, shared between the Rayon worker threads
 /// (which bump `done` as each prefix branch finishes) and an outside observer
@@ -13,8 +91,8 @@ use std::sync::Mutex;
 /// The unit of progress is a *branch* — the fine-grained prefix partitions that
 /// [`ParallelSolver::collect_branches`] produces, which is exactly "the
 /// multi-threaded task completion" the progress bar is meant to show. Updating
-/// it costs one relaxed atomic add per branch (there are ~16×threads branches),
-/// so it does not measurably affect solve throughput.
+/// it costs one relaxed atomic add per branch, so it does not measurably
+/// affect solve throughput.
 #[derive(Debug)]
 pub struct Progress {
     /// Branch-tasks completed so far.
@@ -99,7 +177,7 @@ pub struct ParallelSolver {
 
 impl ParallelSolver {
     pub fn new(solver: Solver, num_threads: Option<usize>) -> Self {
-        let num_threads = num_threads.unwrap_or_else(num_cpus::get);
+        let num_threads = num_threads.unwrap_or_else(available_threads);
         Self {
             solver,
             num_threads,
@@ -132,29 +210,58 @@ impl ParallelSolver {
 
     /// Partition the search into fine-grained prefix branches.
     ///
-    /// The prefix is deepened until there are comfortably more branches than
-    /// threads (or we run out of expression length), so Rayon's work-stealing
-    /// keeps every core busy despite highly uneven branch sizes. Solutions
-    /// whose main operator lands before the chosen depth terminate during
-    /// branch collection and are returned as `eager_results`.
-    ///
-    /// Each `collect_branches_at_depth` call re-runs the search from scratch,
-    /// so the deeper call's `eager_results` is a superset of the shallower
-    /// one's — keeping only the final depth's results is correct (not lossy).
-    fn collect_branches(&self) -> (Vec<crate::solver::Branch>, Vec<String>, u64) {
-        let target = self.num_threads.saturating_mul(16).max(16);
+    /// The frontier is expanded breadth-first until there are comfortably more
+    /// branches than threads (or we run out of depth), without re-running the
+    /// search from the root at each candidate depth. Solutions whose main
+    /// operator lands before the chosen depth terminate during branch
+    /// collection and are returned as `eager_results`.
+    fn collect_branches_with_target(
+        &self,
+        target_multiplier: usize,
+        min_branches: usize,
+    ) -> (Vec<Branch>, Vec<String>, u64) {
+        let target = self
+            .num_threads
+            .saturating_mul(target_multiplier)
+            .max(min_branches);
         let max_depth = self.solver.length.saturating_sub(1).max(1);
-        let mut depth = 1;
-        let (mut branches, mut eager_results, mut searched) =
-            self.solver.collect_branches_at_depth(depth);
-        while branches.len() < target && depth < max_depth {
-            depth += 1;
-            let next = self.solver.collect_branches_at_depth(depth);
-            branches = next.0;
-            eager_results = next.1;
-            searched = next.2;
+        let mut branches = vec![Branch::root()];
+        let mut eager_results = Vec::new();
+        let mut searched = 0u64;
+
+        while branches.len() < target {
+            let mut next = Vec::new();
+            let mut expanded_any = false;
+
+            for branch in branches.drain(..) {
+                if branch.depth() >= max_depth {
+                    next.push(branch);
+                    continue;
+                }
+
+                let (children, branch_searched) = self
+                    .solver
+                    .collect_children_into(&branch, &mut eager_results);
+                searched += branch_searched;
+                if children.is_empty() {
+                    continue;
+                }
+                expanded_any = true;
+                next.extend(children);
+            }
+
+            branches = next;
+            if !expanded_any {
+                break;
+            }
         }
+
         (branches, eager_results, searched)
+    }
+
+    #[inline]
+    fn collect_branches(&self) -> (Vec<Branch>, Vec<String>, u64) {
+        self.collect_branches_with_target(32, 32)
     }
 
     /// Solve using multiple threads via Rayon.
@@ -173,37 +280,40 @@ impl ParallelSolver {
         progress.add_total(branches.len() as u64);
         progress.set_phase(PHASE_SEARCHING);
 
-        // Solve every branch and assemble the sorted result set within a single
-        // pool acquisition (both the per-branch search and the final sort run in
-        // parallel).
-        let mut results = self.run_in_pool(|| {
-            let outcomes: Vec<(Vec<String>, u64)> = branches
+        let (mut branch_results, branch_searched) = self.run_in_pool(|| {
+            branches
                 .par_iter()
-                .map(|branch| {
-                    // Skip remaining work if the consumer disconnected.
-                    if progress.is_cancelled() {
-                        return (Vec::new(), 0);
-                    }
-                    let out = self.solver.solve_from_prefix(branch);
-                    progress.inc_done();
-                    out
-                })
-                .collect();
+                .fold(
+                    || (Vec::<String>::new(), 0u64),
+                    |mut acc, branch| {
+                        if progress.is_cancelled() {
+                            return acc;
+                        }
+                        acc.1 += self.solver.solve_from_prefix_into(branch, &mut acc.0);
+                        progress.inc_done();
+                        acc
+                    },
+                )
+                .reduce(
+                    || (Vec::<String>::new(), 0u64),
+                    |mut a, mut b| {
+                        a.1 += b.1;
+                        if a.0.len() < b.0.len() {
+                            std::mem::swap(&mut a.0, &mut b.0);
+                        }
+                        a.0.append(&mut b.0);
+                        a
+                    },
+                )
+        });
+        searched += branch_searched;
 
-            let total_len =
-                eager_results.len() + outcomes.iter().map(|(r, _)| r.len()).sum::<usize>();
-            let mut results: Vec<String> = Vec::with_capacity(total_len);
-            results.append(&mut eager_results);
-            for (branch_results, branch_searched) in outcomes {
-                searched += branch_searched;
-                results.extend(branch_results);
-            }
+        eager_results.reserve(branch_results.len());
+        eager_results.append(&mut branch_results);
 
-            // Branches partition the search space by prefix, so they never
-            // produce duplicates; sort for a deterministic order (parallelized —
-            // the result set can be millions of strings).
-            results.par_sort_unstable();
-            results
+        let mut results = self.run_in_pool(|| {
+            eager_results.par_sort_unstable();
+            eager_results
         });
 
         // The dedup is a defensive no-op (branches are disjoint by prefix).
@@ -224,54 +334,94 @@ impl ParallelSolver {
     ///
     /// `cancelled` lets a consumer abort early: worker threads check it before
     /// each branch and stop, so a disconnected streaming client doesn't keep all
-    /// cores searching to completion (Rayon's `map`/`reduce` does not itself
-    /// short-circuit when a write returns `BrokenPipe`).
+    /// cores searching to completion.
     pub fn solve_to_writer<W: Write + Send>(
         &self,
         writer: W,
         cancelled: &AtomicBool,
     ) -> std::io::Result<(u64, u64)> {
-        let (branches, eager_results, eager_searched) = self.collect_branches();
-
-        let writer = Mutex::new(writer);
-
-        // Eager `=` solutions found during branch collection.
-        let mut esink = JsonlSink::new(&writer);
-        for sol in &eager_results {
-            esink.accept(sol.as_bytes());
+        if cancelled.load(Ordering::Relaxed) {
+            let mut writer = writer;
+            writer.flush()?;
+            return Ok((0, 0));
         }
-        let eager_written = esink.finish()?;
+        let (branches, eager_results, eager_searched) = self.collect_branches_with_target(32, 32);
+        let writer_failed = AtomicBool::new(false);
+        let writer_error = Mutex::new(None::<std::io::Error>);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(STREAM_QUEUE_CHUNKS);
 
-        let (branch_written, branch_searched): (u64, u64) = self.run_in_pool(|| {
-            branches
-                .par_iter()
-                .map(|branch| {
-                    // Stop early if the client has gone away.
-                    if cancelled.load(Ordering::Relaxed) {
-                        return Ok((0u64, 0u64));
+        let (written, searched) = std::thread::scope(|scope| {
+            let writer_error_ref = &writer_error;
+            let writer_failed_ref = &writer_failed;
+            let writer_handle = scope.spawn(move || {
+                let mut writer = writer;
+                while let Ok(chunk) = rx.recv() {
+                    if let Err(err) = writer.write_all(&chunk) {
+                        writer_failed_ref.store(true, Ordering::Relaxed);
+                        *writer_error_ref
+                            .lock()
+                            .expect("writer error mutex poisoned") = Some(err);
+                        break;
                     }
-                    let mut sink = JsonlSink::new(&writer);
-                    let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
-                    sink.finish().map(|written| (written, searched))
-                })
-                .reduce(
-                    || Ok((0u64, 0u64)),
-                    |a, b| match (a, b) {
-                        (Ok((wa, sa)), Ok((wb, sb))) => Ok((wa + wb, sa + sb)),
-                        (Err(e), _) | (_, Err(e)) => Err(e),
-                    },
-                )
-        })?;
+                }
+                if !writer_failed_ref.load(Ordering::Relaxed) {
+                    if let Err(err) = writer.flush() {
+                        writer_failed_ref.store(true, Ordering::Relaxed);
+                        *writer_error_ref
+                            .lock()
+                            .expect("writer error mutex poisoned") = Some(err);
+                    }
+                }
+            });
 
-        let mut guard = writer
-            .lock()
-            .map_err(|_| std::io::Error::other("solution writer mutex poisoned"))?;
-        guard.flush()?;
+            let mut eager_sink = ChannelJsonlSink::new(tx.clone(), cancelled, &writer_failed);
+            for sol in &eager_results {
+                eager_sink.accept(sol.as_bytes());
+            }
+            let eager_written = eager_sink.finish();
 
-        Ok((
-            eager_written + branch_written,
-            eager_searched + branch_searched,
-        ))
+            let partials: Vec<(u64, u64)> = self.run_in_pool(|| {
+                branches
+                    .par_iter()
+                    .fold(
+                        || {
+                            (
+                                ChannelJsonlSink::new(tx.clone(), cancelled, &writer_failed),
+                                0u64,
+                            )
+                        },
+                        |mut acc, branch| {
+                            if acc.0.is_stopped() {
+                                return acc;
+                            }
+                            acc.1 += self.solver.solve_from_prefix_into(branch, &mut acc.0);
+                            acc
+                        },
+                    )
+                    .map(|(sink, searched)| (sink.finish(), searched))
+                    .collect()
+            });
+
+            drop(tx);
+            let _ = writer_handle.join();
+
+            let (branch_written, branch_searched) = partials
+                .into_iter()
+                .fold((0u64, 0u64), |(wa, sa), (wb, sb)| (wa + wb, sa + sb));
+
+            (
+                eager_written + branch_written,
+                eager_searched + branch_searched,
+            )
+        });
+
+        match writer_error
+            .into_inner()
+            .expect("writer error mutex poisoned")
+        {
+            Some(err) => Err(err),
+            None => Ok((written, searched)),
+        }
     }
 
     /// Return the `n` most probable solutions, scored exactly as
@@ -307,32 +457,29 @@ impl ParallelSolver {
         n: usize,
         progress: &Progress,
     ) -> (Vec<(f64, String)>, CountSink, u64) {
-        let (branches, eager_results, eager_searched) = self.collect_branches();
-        // Two passes over the same branch set.
+        let (branches, eager_results, eager_searched) = self.collect_branches_with_target(16, 16);
         progress.add_total(branches.len() as u64 * 2);
         progress.set_phase(PHASE_SEARCHING);
 
-        // Both passes share a single pool acquisition. The sequential glue
-        // between them (folding eager solutions, deriving probabilities and the
-        // top-5 mask) is cheap and just runs on the calling thread.
         let (base_top, base_counts, searched) = self.run_in_pool(|| {
-            // ---- Pass 1: character-frequency statistics over all solutions. ----
             let mut base_counts = CountSink::new();
             for sol in &eager_results {
-                base_counts.accept(sol.as_bytes());
+                base_counts.accept_with_mask(sol.as_bytes(), unique_char_mask(sol.as_bytes()));
             }
 
             let (counts, branch_searched) = branches
                 .par_iter()
-                .map(|branch| {
-                    if progress.is_cancelled() {
-                        return (CountSink::new(), 0);
-                    }
-                    let mut sink = CountSink::new();
-                    let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
-                    progress.inc_done();
-                    (sink, searched)
-                })
+                .fold(
+                    || (CountSink::new(), 0u64),
+                    |mut acc, branch| {
+                        if progress.is_cancelled() {
+                            return acc;
+                        }
+                        acc.1 += self.solver.solve_from_prefix_into(branch, &mut acc.0);
+                        progress.inc_done();
+                        acc
+                    },
+                )
                 .reduce(
                     || (CountSink::new(), 0u64),
                     |mut a, b| {
@@ -347,24 +494,25 @@ impl ParallelSolver {
             let probs = base_counts.probabilities();
             let top5 = base_counts.top5_mask();
 
-            // ---- Pass 2: score every solution, keep the top n. ----
             progress.set_phase(PHASE_SCORING);
             let mut base_top = TopNSink::new(n, probs, top5);
             for sol in &eager_results {
-                base_top.accept(sol.as_bytes());
+                base_top.accept_with_mask(sol.as_bytes(), unique_char_mask(sol.as_bytes()));
             }
 
             let merged = branches
                 .par_iter()
-                .map(|branch| {
-                    if progress.is_cancelled() {
-                        return TopNSink::new(n, probs, top5);
-                    }
-                    let mut sink = TopNSink::new(n, probs, top5);
-                    self.solver.solve_from_prefix_into(branch, &mut sink);
-                    progress.inc_done();
-                    sink
-                })
+                .fold(
+                    || TopNSink::new(n, probs, top5),
+                    |mut sink, branch| {
+                        if progress.is_cancelled() {
+                            return sink;
+                        }
+                        self.solver.solve_from_prefix_into(branch, &mut sink);
+                        progress.inc_done();
+                        sink
+                    },
+                )
                 .reduce(
                     || TopNSink::new(n, probs, top5),
                     |mut a, b| {

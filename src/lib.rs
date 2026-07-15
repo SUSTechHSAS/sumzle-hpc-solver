@@ -40,3 +40,10 @@ pub mod parallel;
 pub mod server;
 pub mod solver;
 pub mod types;
+
+#[inline]
+pub fn available_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}

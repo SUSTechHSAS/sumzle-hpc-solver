@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::available_threads;
 use crate::evaluator;
 use crate::parallel::{ParallelSolver, Progress};
 use crate::solver::Solver;
@@ -326,7 +327,7 @@ pub fn run_solve(solver: Solver, threads: usize, top: usize, progress: &Progress
         // both the single- and multi-threaded cases through it keeps the
         // ranking from diverging between them.
         let num_threads = if threads == 0 {
-            num_cpus::get()
+            available_threads()
         } else {
             threads
         };
@@ -359,7 +360,7 @@ pub fn run_solve(solver: Solver, threads: usize, top: usize, progress: &Progress
         (r, Vec::new(), None, s, found)
     } else {
         let num_threads = if threads == 0 {
-            num_cpus::get()
+            available_threads()
         } else {
             threads
         };

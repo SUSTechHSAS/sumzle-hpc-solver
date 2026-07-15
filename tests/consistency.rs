@@ -5,7 +5,7 @@ use sumzle_solver::evaluator::{
     is_valid_equation,
 };
 use sumzle_solver::parallel::ParallelSolver;
-use sumzle_solver::solver::Solver;
+use sumzle_solver::solver::{SolutionSink, Solver, TopNSink};
 use sumzle_solver::types::*;
 
 /// Helper to build a GlobalKnowledge with no constraints
@@ -1063,6 +1063,20 @@ fn test_high_thread_count_does_not_lose_solutions() {
     }
 }
 
+#[test]
+fn test_unconstrained_searched_counts_match_main_reference() {
+    // searched_count is observable API/CLI behavior as well as a benchmark
+    // invariant. Keep the optimized candidate filtering from silently visiting
+    // additional invalid leaves while returning the same solution set.
+    for (length, expected) in [(3, 99), (4, 582), (5, 13_136), (6, 108_487), (7, 1_535_857)] {
+        let (_, searched) = Solver::new(length, empty_gk(length)).solve();
+        assert_eq!(
+            searched, expected,
+            "length {length}: searched count must remain compatible with main"
+        );
+    }
+}
+
 // =========================================================================
 // Streaming output consistency: solutions streamed via solve_to_writer must
 // be exactly the default solution set (order aside).
@@ -1102,6 +1116,197 @@ fn test_streaming_output_matches_default_set() {
     );
 }
 
+#[test]
+fn test_streaming_writer_error_is_returned_without_hanging() {
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "intentional test failure",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let length = 6;
+    let solver = Solver::new(length, empty_gk(length));
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let err = ParallelSolver::new(solver, Some(4))
+        .solve_to_writer(FailingWriter, &never)
+        .expect_err("writer failure must be returned");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn test_streaming_honors_pre_cancelled_flag() {
+    use std::io::Write;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct FlushSpy {
+        flushed: Arc<AtomicBool>,
+        wrote: Arc<AtomicBool>,
+    }
+
+    impl Write for FlushSpy {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            self.wrote.store(true, Ordering::Relaxed);
+            Ok(0)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushed.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    let solver = Solver::new(5, empty_gk(5));
+    let cancelled = AtomicBool::new(true);
+    let flushed = Arc::new(AtomicBool::new(false));
+    let wrote = Arc::new(AtomicBool::new(false));
+    let writer = FlushSpy {
+        flushed: Arc::clone(&flushed),
+        wrote: Arc::clone(&wrote),
+    };
+    let (written, searched) = ParallelSolver::new(solver, Some(4))
+        .solve_to_writer(writer, &cancelled)
+        .unwrap();
+
+    assert_eq!(written, 0);
+    assert_eq!(searched, 0);
+    assert!(flushed.load(Ordering::Relaxed));
+    assert!(!wrote.load(Ordering::Relaxed));
+}
+
+#[test]
+fn test_streaming_pre_cancelled_flush_error_is_returned() {
+    struct FailingFlush;
+
+    impl std::io::Write for FailingFlush {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            unreachable!("a pre-cancelled solve must not write")
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "intentional flush failure",
+            ))
+        }
+    }
+
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let err = ParallelSolver::new(Solver::new(5, empty_gk(5)), Some(4))
+        .solve_to_writer(FailingFlush, &cancelled)
+        .expect_err("pre-cancelled writer flush failure must be returned");
+    assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn test_streaming_cancelled_count_matches_queued_output() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    struct CancellingWriter {
+        output: Arc<Mutex<Vec<u8>>>,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Write for CancellingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.lock().unwrap().extend_from_slice(buf);
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = CancellingWriter {
+        output: Arc::clone(&output),
+        cancelled: Arc::clone(&cancelled),
+    };
+    let solver = Solver::new(7, empty_gk(7));
+    let (written, _searched) = ParallelSolver::new(solver, Some(4))
+        .solve_to_writer(writer, &cancelled)
+        .unwrap();
+
+    let output = output.lock().unwrap();
+    let output_lines = output.iter().filter(|&&byte| byte == b'\n').count();
+    assert_eq!(written as usize, output_lines);
+}
+
+#[test]
+fn test_top_n_and_stream_match_constrained_reference() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let length = 6;
+    let mut gk = empty_gk(length);
+    gk.fixed_chars[0] = Some('1');
+
+    let (mut expected, expected_searched) = Solver::new(length, gk.clone()).solve();
+    expected.sort();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedWriter(Arc::clone(&output));
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let (written, stream_searched) = ParallelSolver::new(Solver::new(length, gk.clone()), Some(4))
+        .solve_to_writer(writer, &never)
+        .unwrap();
+    let bytes = output.lock().unwrap();
+    let mut streamed: Vec<String> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["solution"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    streamed.sort();
+
+    assert_eq!(streamed, expected);
+    assert_eq!(written as usize, expected.len());
+    assert_eq!(stream_searched, expected_searched);
+
+    let (scored, top_n_searched) =
+        ParallelSolver::new(Solver::new(length, gk), Some(4)).solve_top_n(expected.len() + 1);
+    let mut top_n: Vec<String> = scored.into_iter().map(|(_, expr)| expr).collect();
+    top_n.sort();
+
+    assert_eq!(top_n, expected);
+    assert_eq!(top_n_searched, expected_searched);
+}
+
 // =========================================================================
 // top-N consistency: scoring matches server::compute_recommended, and a large
 // N returns the entire solution set.
@@ -1122,6 +1327,77 @@ fn test_top_n_large_n_equals_full_set() {
         got, expected,
         "top-N with N >= total must return the full solution set"
     );
+}
+
+#[test]
+fn test_top_n_is_exact_across_branch_depths() {
+    // Thread counts drive different branch-frontier targets (and therefore
+    // different captured prefix depths). Top-N masks and scores must not depend
+    // on where collection stops and parallel search resumes.
+    let length = 6;
+    let n = 100;
+    let solve = |threads| {
+        ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(threads)).solve_top_n(n)
+    };
+
+    let (expected, expected_searched) = solve(1);
+    for threads in [2, 16, 256] {
+        let (actual, searched) = solve(threads);
+        assert_eq!(
+            actual, expected,
+            "top-N differs when branch frontier is sized for {threads} threads"
+        );
+        assert_eq!(
+            searched, expected_searched,
+            "searched count differs when branch frontier is sized for {threads} threads"
+        );
+    }
+}
+
+#[test]
+fn test_top_n_pruning_matches_unpruned_oracle() {
+    let length = 6;
+    let solve =
+        |n| ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(4)).solve_top_n(n);
+    let (oracle, expected_searched) = solve(usize::MAX >> 8);
+
+    for n in [1, 7, 100, 1000] {
+        let (actual, searched) = solve(n);
+        assert_eq!(actual, oracle[..n.min(oracle.len())]);
+        assert_eq!(searched, expected_searched);
+    }
+}
+
+#[test]
+fn test_top_n_pruning_handles_negative_public_weights() {
+    let length = 5;
+    let probs = [-1.0; 24];
+
+    let mut oracle_sink = TopNSink::new(usize::MAX >> 8, probs, 0);
+    Solver::new(length, empty_gk(length)).solve_into(&mut oracle_sink);
+    let oracle = oracle_sink.into_sorted();
+
+    let mut pruned_sink = TopNSink::new(1, probs, 0);
+    Solver::new(length, empty_gk(length)).solve_into(&mut pruned_sink);
+    let actual = pruned_sink.into_sorted();
+
+    assert_eq!(actual, oracle[..1]);
+}
+
+#[test]
+fn solution_sink_remains_dyn_compatible() {
+    struct LegacySink(usize);
+
+    impl SolutionSink for LegacySink {
+        fn accept(&mut self, _expr: &[u8]) {
+            self.0 += 1;
+        }
+    }
+
+    let mut legacy = LegacySink(0);
+    let sink: &mut dyn SolutionSink = &mut legacy;
+    sink.accept(b"1+1=2");
+    assert_eq!(legacy.0, 1);
 }
 
 #[test]
