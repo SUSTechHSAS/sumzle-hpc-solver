@@ -6,6 +6,14 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
+/// Sink that discards every solution.
+struct NoopSink;
+
+impl SolutionSink for NoopSink {
+    #[inline]
+    fn accept(&mut self, _expr: &[u8]) {}
+}
+
 /// Live progress of a parallel solve, shared between the Rayon worker threads
 /// (which bump `done` as each prefix branch finishes) and an outside observer
 /// such as the SSE progress endpoint.
@@ -157,6 +165,33 @@ impl ParallelSolver {
         (branches, eager_results, searched)
     }
 
+    /// Choose a branch depth that yields enough fine-grained work for Rayon.
+    /// Uses a no-op sink so no eager solutions are retained while probing.
+    fn choose_branch_depth(&self) -> usize {
+        let target = self.num_threads.saturating_mul(16).max(16);
+        let max_depth = self.solver.length.saturating_sub(1).max(1);
+        let mut depth = 1;
+        let mut sink = NoopSink;
+        let (mut branches, _) = self.solver.collect_branches_into(depth, &mut sink);
+        while branches.len() < target && depth < max_depth {
+            depth += 1;
+            branches = self.solver.collect_branches_into(depth, &mut sink).0;
+        }
+        depth
+    }
+
+    /// Collect branches at the tuned depth, streaming eager solutions directly
+    /// into `sink` instead of retaining them in memory. Returns
+    /// `(depth, branches, eager_searched)`.
+    fn collect_branches_tuned_into<S: SolutionSink>(
+        &self,
+        sink: &mut S,
+    ) -> (usize, Vec<crate::solver::Branch>, u64) {
+        let depth = self.choose_branch_depth();
+        let (branches, eager_searched) = self.solver.collect_branches_into(depth, sink);
+        (depth, branches, eager_searched)
+    }
+
     /// Solve using multiple threads via Rayon.
     ///
     /// This only changes how the identical search is divided — solutions and
@@ -231,15 +266,12 @@ impl ParallelSolver {
         writer: W,
         cancelled: &AtomicBool,
     ) -> std::io::Result<(u64, u64)> {
-        let (branches, eager_results, eager_searched) = self.collect_branches();
-
         let writer = Mutex::new(writer);
 
-        // Eager `=` solutions found during branch collection.
+        // Eager `=` solutions found during branch collection are streamed
+        // directly here, so no eager result vector is ever built.
         let mut esink = JsonlSink::new(&writer);
-        for sol in &eager_results {
-            esink.accept(sol.as_bytes());
-        }
+        let (_depth, branches, eager_searched) = self.collect_branches_tuned_into(&mut esink);
         let eager_written = esink.finish()?;
 
         let (branch_written, branch_searched): (u64, u64) = self.run_in_pool(|| {
@@ -307,7 +339,9 @@ impl ParallelSolver {
         n: usize,
         progress: &Progress,
     ) -> (Vec<(f64, String)>, CountSink, u64) {
-        let (branches, eager_results, eager_searched) = self.collect_branches();
+        // Pass 1 eager solutions go straight into `base_counts` (no eager vec).
+        let mut base_counts = CountSink::new();
+        let (depth, branches, eager_searched) = self.collect_branches_tuned_into(&mut base_counts);
         // Two passes over the same branch set.
         progress.add_total(branches.len() as u64 * 2);
         progress.set_phase(PHASE_SEARCHING);
@@ -317,11 +351,6 @@ impl ParallelSolver {
         // top-5 mask) is cheap and just runs on the calling thread.
         let (base_top, base_counts, searched) = self.run_in_pool(|| {
             // ---- Pass 1: character-frequency statistics over all solutions. ----
-            let mut base_counts = CountSink::new();
-            for sol in &eager_results {
-                base_counts.accept(sol.as_bytes());
-            }
-
             let (counts, branch_searched) = branches
                 .par_iter()
                 .map(|branch| {
@@ -350,9 +379,7 @@ impl ParallelSolver {
             // ---- Pass 2: score every solution, keep the top n. ----
             progress.set_phase(PHASE_SCORING);
             let mut base_top = TopNSink::new(n, probs, top5);
-            for sol in &eager_results {
-                base_top.accept(sol.as_bytes());
-            }
+            self.solver.collect_eager_into(depth, &mut base_top);
 
             let merged = branches
                 .par_iter()

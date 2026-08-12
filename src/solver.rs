@@ -1177,6 +1177,7 @@ impl Solver {
             sink,
             &mut searched_count,
             usize::MAX,
+            false,
             &mut no_branches,
         );
 
@@ -1202,24 +1203,28 @@ impl Solver {
         current_num_leading_zero: bool,
         sink: &mut S,
         searched_count: &mut u64,
-        // Branch-collection cutoff: when `index == branch_depth`, snapshot the
-        // current node into `branches` and stop. Normal solves pass
-        // `usize::MAX`, so this is a single never-taken comparison per call.
+        // Branch-collection cutoff: when `index == branch_depth`, stop.
+        // `collect_branches` controls whether the node is also snapshotted into
+        // `branches`. Normal solves pass `usize::MAX`, so this is a single
+        // never-taken comparison per call.
         branch_depth: usize,
+        collect_branches: bool,
         branches: &mut Vec<Branch>,
     ) {
         if index == branch_depth {
-            branches.push(Branch {
-                prefix: expr[..index].to_vec(),
-                main_op: main_op_so_far,
-                main_op_index,
-                main_lhs_value,
-                floor_ctx,
-                bracket_stack: bracket_stack[..stack_len].to_vec(),
-                num_len: current_num_len,
-                num_value: current_num_value,
-                num_leading_zero: current_num_leading_zero,
-            });
+            if collect_branches {
+                branches.push(Branch {
+                    prefix: expr[..index].to_vec(),
+                    main_op: main_op_so_far,
+                    main_op_index,
+                    main_lhs_value,
+                    floor_ctx,
+                    bracket_stack: bracket_stack[..stack_len].to_vec(),
+                    num_len: current_num_len,
+                    num_value: current_num_value,
+                    num_leading_zero: current_num_leading_zero,
+                });
+            }
             return;
         }
         let remaining_slots = self.length - index;
@@ -1426,6 +1431,7 @@ impl Solver {
                 sink,
                 searched_count,
                 branch_depth,
+                collect_branches,
                 branches,
             );
 
@@ -1548,6 +1554,7 @@ impl Solver {
             &mut results,
             &mut searched_count,
             usize::MAX,
+            false,
             &mut no_branches,
         );
 
@@ -1598,6 +1605,7 @@ impl Solver {
             sink,
             &mut searched_count,
             depth,
+            true,
             &mut branches,
         );
 
@@ -1647,6 +1655,43 @@ impl Solver {
             sink,
             &mut searched_count,
             usize::MAX,
+            false,
+            &mut no_branches,
+        );
+
+        searched_count
+    }
+
+    /// Enumerate only the eagerly-found `=` solutions that terminate before
+    /// `depth`, delivering them to `sink` without allocating branch snapshots.
+    /// Returns the number of complete expressions evaluated in this truncated
+    /// prefix traversal.
+    pub fn collect_eager_into<S: SolutionSink>(&self, depth: usize, sink: &mut S) -> u64 {
+        let mut searched_count: u64 = 0;
+        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut char_counts = [0u8; CHARSET_LEN];
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut no_branches: Vec<Branch> = Vec::new();
+
+        self.recursive_search(
+            0,
+            &mut expr,
+            None,
+            None,
+            0,
+            None,
+            &mut char_counts,
+            FloorContext::new(),
+            &mut bracket_stack,
+            0,
+            &self.prepared,
+            0,
+            0,
+            false,
+            sink,
+            &mut searched_count,
+            depth,
+            false,
             &mut no_branches,
         );
 
