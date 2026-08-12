@@ -1435,11 +1435,22 @@ fn test_rhs_index_respects_memory_budget() {
 
 /// Peak RSS is what a memory budget actually has to bound — a build that ends
 /// up inside the budget is still a failure if it spikes far past it on the way
-/// there (that spike is what makes a long puzzle die on a small host). Linux
-/// only: reads the kernel's high-water mark from `/proc/self/status`.
+/// there (that spike is what makes a long puzzle die on a small host).
+///
+/// Runs in a **child process** so the measurement is not polluted by the rest
+/// of the suite: `VmHWM` is a process-wide high-water mark that never resets,
+/// so a peak set by a concurrently running test would be indistinguishable
+/// from one set here. The child re-executes this binary with a marker
+/// environment variable and reports its own peak.
 #[cfg(target_os = "linux")]
 #[test]
 fn test_rhs_index_build_peak_stays_near_budget() {
+    const MARKER: &str = "SUMZLE_RHS_INDEX_PEAK_CHILD";
+    // Long enough that an unbounded index would be enormous, so the budget is
+    // certainly the binding constraint.
+    const BUDGET_MB: usize = 32;
+    const LENGTH: usize = 14;
+
     fn peak_rss_bytes() -> usize {
         std::fs::read_to_string("/proc/self/status")
             .expect("read /proc/self/status")
@@ -1451,27 +1462,56 @@ fn test_rhs_index_build_peak_stays_near_budget() {
             * 1024
     }
 
-    // Long enough that an unbounded index would be enormous, so the budget is
-    // certainly the binding constraint.
-    const BUDGET: usize = 32 * 1024 * 1024;
-    let before = peak_rss_bytes();
-    let solver = Solver::with_memory_budget(14, empty_gk(14), BUDGET);
-    let growth = peak_rss_bytes().saturating_sub(before);
+    // Child role: build the index and print the two numbers the parent checks.
+    if std::env::var_os(MARKER).is_some() {
+        let budget = BUDGET_MB * 1024 * 1024;
+        let solver = Solver::with_memory_budget(LENGTH, empty_gk(LENGTH), budget);
+        println!("INDEX_BYTES={}", solver.index_bytes());
+        println!("PEAK_BYTES={}", peak_rss_bytes());
+        return;
+    }
 
+    let exe = std::env::current_exe().expect("current test binary");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "test_rhs_index_build_peak_stays_near_budget",
+            "--nocapture",
+        ])
+        .env(MARKER, "1")
+        .output()
+        .expect("re-run this test binary as a child");
     assert!(
-        solver.index_bytes() <= BUDGET,
-        "finished index of {} bytes exceeds the {BUDGET}-byte budget",
-        solver.index_bytes()
+        out.status.success(),
+        "child process failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    // Generous headroom over the budget: this is a guard against the peak
-    // scaling with the *puzzle*, not a tight allocator accounting check.
-    let limit = BUDGET * 4;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let field = |name: &str| -> usize {
+        stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or_else(|| panic!("child did not report {name}; output:\n{stdout}"))
+    };
+    let index_bytes = field("INDEX_BYTES=");
+    let peak = field("PEAK_BYTES=");
+
+    let budget = BUDGET_MB * 1024 * 1024;
     assert!(
-        growth < limit,
-        "peak RSS grew {} MB while building a {} MB index — the build-time \
-         spike is not bounded by the budget",
-        growth / (1024 * 1024),
-        BUDGET / (1024 * 1024),
+        index_bytes <= budget,
+        "finished index of {index_bytes} bytes exceeds the {budget}-byte budget"
+    );
+    // Generous headroom over the budget: this guards against the peak scaling
+    // with the *puzzle*, it is not a tight allocator accounting check. The
+    // child's peak also includes the test binary's own baseline footprint.
+    let limit = budget * 6;
+    assert!(
+        peak < limit,
+        "peak RSS reached {} MB while building a {BUDGET_MB} MB index at length \
+         {LENGTH} — the build-time spike is not bounded by the budget",
+        peak / (1024 * 1024),
     );
 }
 
@@ -1627,4 +1667,159 @@ fn test_rhs_index_streaming_matches_unindexed() {
         "streamed set must match the recursive search"
     );
     assert_eq!(written as usize, expected.len(), "streamed count");
+}
+
+// =========================================================================
+// Bounded (approximate) top-N.
+//
+// The search space is exponential in the puzzle length, so past a point no
+// exhaustive search finishes. A `SearchLimit` makes top-N return the best
+// ranking it found within a budget, flagged as approximate. The contract:
+// an unlimited search is still exact; a limited one stops, says so, and
+// still returns usable solutions.
+// =========================================================================
+
+#[test]
+fn test_unlimited_search_reports_complete_and_stays_exact() {
+    use sumzle_solver::limit::SearchLimit;
+    use sumzle_solver::parallel::Progress;
+
+    let length = 6;
+    let reference = ParallelSolver::new(
+        Solver::with_memory_budget(length, empty_gk(length), 0),
+        Some(2),
+    )
+    .solve_top_n(10);
+
+    let ps = ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(2));
+    let (scored, _counts, searched, complete) =
+        ps.solve_top_n_limited(10, &Progress::new(), &SearchLimit::unlimited());
+
+    assert!(complete, "an unlimited search must report completion");
+    assert_eq!(searched, reference.1, "searched count must be exact");
+    let got: Vec<&str> = scored.iter().map(|(_, s)| s.as_str()).collect();
+    let want: Vec<&str> = reference.0.iter().map(|(_, s)| s.as_str()).collect();
+    assert_eq!(got, want, "an unlimited search must be exact");
+}
+
+#[test]
+fn test_limited_search_reports_incomplete_but_still_ranks() {
+    use sumzle_solver::limit::SearchLimit;
+    use sumzle_solver::parallel::Progress;
+
+    // A budget far below the ~14M expressions a length-8 solve needs, so the
+    // search certainly stops early.
+    let length = 8;
+    let ps = ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(2));
+    let (scored, _counts, _searched, complete) =
+        ps.solve_top_n_limited(5, &Progress::new(), &SearchLimit::with_max_searched(50_000));
+
+    assert!(!complete, "a truncated search must report incompleteness");
+    // The point of the feature: a partial search still answers. Every returned
+    // solution must be a real one, and the ranking must be ordered.
+    assert!(
+        !scored.is_empty(),
+        "a truncated top-N must still return solutions, not an empty result"
+    );
+    assert!(scored.len() <= 5);
+    for (_, sol) in &scored {
+        assert_eq!(sol.len(), length, "solution has the requested length");
+        assert!(
+            is_valid_equation(sol),
+            "approximate results must still be genuine solutions: {sol}"
+        );
+    }
+    for w in scored.windows(2) {
+        assert!(w[0].0 >= w[1].0, "scores must be sorted descending");
+    }
+}
+
+#[test]
+fn test_limit_split_leaves_room_for_the_scoring_pass() {
+    use sumzle_solver::limit::SearchLimit;
+
+    // Regression: top-N makes two passes over the same space. When they shared
+    // a single budget, pass 1 spent all of it and pass 2 ranked nothing, so a
+    // budgeted solve returned zero solutions — strictly worse than an
+    // approximate answer. Each pass now gets its own share.
+    //
+    // The cap is large enough that halving it stays above the CHECK_INTERVAL
+    // floor, so this exercises real proportional splitting rather than the
+    // floor.
+    let total = sumzle_solver::limit::CHECK_INTERVAL * 100;
+    let limit = SearchLimit::with_max_searched(total);
+
+    let first = limit.split(0.5);
+    assert!(
+        first.charge(total),
+        "a charge of the whole cap exhausts the first pass's half"
+    );
+    assert!(first.is_exceeded());
+
+    // Pass 1 ran out, so the overall result is approximate...
+    limit.absorb(&first);
+    assert!(
+        limit.stopped_early(),
+        "a truncated pass must mark the whole solve approximate"
+    );
+
+    // ...but pass 2 still gets an allowance, so it can produce a ranking.
+    let second = limit.split(1.0);
+    assert!(
+        !second.is_exceeded(),
+        "the second pass must start with budget of its own"
+    );
+    assert!(!second.charge(1), "and must be able to do real work");
+}
+
+#[test]
+fn test_cancelled_limit_is_not_resurrected_by_split() {
+    use sumzle_solver::limit::SearchLimit;
+
+    // Cancellation (client disconnected) must survive the pass split —
+    // otherwise pass 2 would happily start searching for a caller that is
+    // already gone.
+    let limit = SearchLimit::unlimited();
+    limit.cancel();
+    assert!(limit.split(1.0).is_exceeded());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_extreme_length_top_n_stays_bounded() {
+    use std::time::{Duration, Instant};
+    use sumzle_solver::limit::SearchLimit;
+    use sumzle_solver::parallel::Progress;
+
+    // The headline capability: a length far past anything an exhaustive search
+    // could enumerate still answers, in bounded time, without exhausting
+    // memory. 32 MiB index budget keeps this cheap enough for CI.
+    const LENGTH: usize = 18;
+    let solver = Solver::with_memory_budget(LENGTH, empty_gk(LENGTH), 32 * 1024 * 1024);
+    let ps = ParallelSolver::new(solver, Some(2));
+
+    let started = Instant::now();
+    let (scored, _counts, _searched, complete) = ps.solve_top_n_limited(
+        3,
+        &Progress::new(),
+        &SearchLimit::with_timeout(Duration::from_secs(5)),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(!complete, "length {LENGTH} cannot be searched exhaustively");
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "a 5s budget must be respected (took {elapsed:?})"
+    );
+    assert!(
+        !scored.is_empty(),
+        "must return an approximate ranking at length {LENGTH}"
+    );
+    for (_, sol) in &scored {
+        assert_eq!(sol.len(), LENGTH);
+        assert!(
+            is_valid_equation(sol),
+            "approximate result must be a genuine solution: {sol}"
+        );
+    }
 }

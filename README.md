@@ -14,12 +14,14 @@ Sumzle is a Wordle-like game for mathematical equations. Players guess equations
 - **Web API server** using [axum](https://github.com/tokio-rs/axum) with REST endpoints
 - **Modern web frontend** built with React + TypeScript + Vite
 - **Top-N mode** — return only the N highest-scoring solutions with bounded memory (CLI `--top`, API `?top=`)
+- **RHS value index** — the `>` operator's right-hand side is enumerated once into a value-sorted table and reused by every left-hand-side prefix, instead of being re-searched for each one (3–5× faster; memory capped by `--memory-budget-mb`)
+- **Approximate top-N for extreme lengths** — `--timeout-secs` / `--max-searched` return the best ranking found within a budget, so lengths far past what an exhaustive search could enumerate still answer
 - **Streaming output** — stream solutions as NDJSON to a file without ever holding the full set in memory (CLI `--output`, API `POST /api/solve/stream`)
 - **Real-time progress** — a Server-Sent Events endpoint (`POST /api/solve/progress`) reports live multi-thread search progress to drive a real progress bar
 - **Steady server memory** — the [mimalloc](https://github.com/microsoft/mimalloc) global allocator returns freed memory to the OS, so the server's resident set stays flat across many solves
 - **Behavioral consistency** with the reference JavaScript implementation
 - **Cross-platform** builds for Linux, macOS, and Windows
-- **Comprehensive test suite** — 180 automated tests (120 Rust: unit, API, and consistency; 60 frontend)
+- **Comprehensive test suite** — 205 automated tests (145 Rust: unit, API, and consistency; 60 frontend)
 - **Benchmark suite** using Criterion
 - **Docker support** with multi-stage builds
 
@@ -36,6 +38,31 @@ Single-threaded, release build on a modern CPU:
 | 7 | 648,955 | 1,535,857 | ~125ms |
 
 Multi-core parallelism provides near-linear speedup with the number of cores.
+
+### Bounded-memory modes at large lengths
+
+The memory-bounded modes (top-N and streaming) are the ones intended for long
+puzzles. Measured on 2 cores, `--top 5`, default 256 MiB index budget:
+
+| Length | Search space | Top-N time | Peak RSS |
+|--------|--------------|-----------:|---------:|
+| 7 | 1.5M | 0.04s | 37 MB |
+| 8 | 14.3M | 0.33s | 47 MB |
+| 9 | 170M | 3.9s | 136 MB |
+| 10 | 1.7B | 91s | 228 MB |
+
+Peak RSS **plateaus** rather than growing with the length: past the point where
+the index budget binds, a length-30 solve uses the same memory as a length-20
+one (~228 MB at the default budget, ~50 MB at `--memory-budget-mb 16`).
+
+Beyond ~length 10 the search space is too large to enumerate exhaustively in
+any amount of memory, so top-N takes a time budget and returns the best ranking
+it found:
+
+```bash
+# Length 30: answers in 5s, flat ~228 MB, result marked approximate
+./sumzle-solver solve -i puzzle.json --top 3 --timeout-secs 5
+```
 
 ## Building
 
@@ -189,7 +216,27 @@ Run the solver:
 # Stream every solution to a file as JSON Lines (never held in memory);
 # stdout shows only the statistics
 ./sumzle-solver solve -i puzzle.json -o solutions.jsonl
+
+# Cap the RHS value index (default 256 MiB). This is a hard ceiling on the
+# solver's length-dependent memory: whatever does not fit falls back to the
+# plain recursive search, with identical results. 0 disables indexing.
+./sumzle-solver solve -i puzzle.json --top 10 --memory-budget-mb 64
+
+# Extremely long puzzles: stop after a budget and return the best ranking
+# found so far. Prints a warning that the result is APPROXIMATE.
+./sumzle-solver solve -i puzzle.json --top 3 --timeout-secs 30
+./sumzle-solver solve -i puzzle.json --top 3 --max-searched 500000000
 ```
+
+#### Exactness
+
+Without `--timeout-secs` / `--max-searched` the solver is **exhaustive**: the
+solutions, their ranking and `searched_count` are identical whether or not the
+index is used, at any thread count (this is asserted in the test suite against
+the unindexed engine). With a budget the search may stop early, and the CLI
+says so on stderr — the ranking and character statistics are then drawn from
+the part of the space that was explored, and a wall-clock budget is not
+reproducible run to run.
 
 ### Web API
 
@@ -360,6 +407,28 @@ Constraints from Wordle-style feedback are processed into:
 - **Exact counts**: Characters that must appear exactly N times
 - **Globally forbidden**: Characters that cannot appear at all
 
+### RHS Value Index
+
+The `=` operator resolves its right-hand side in O(1) — once the left-hand side
+evaluates to `v`, the only possible RHS is the decimal spelling of `v`. The `>`
+operator had no such shortcut and re-enumerated the whole RHS subtree for every
+LHS prefix, which is where essentially all the time went at large lengths.
+
+Since that subtree does not depend on the prefix, each RHS length is now
+enumerated **once** into a table sorted by value. A prefix then resolves its
+entire RHS subtree with a single binary search: `lhs > rhs` holds for exactly a
+leading run of the table. Consumers take that range in bulk —
+
+- **counting** (top-N pass 1) reads cumulative block prefix sums,
+- **ranking** (top-N pass 2) prunes with an OR-tree, where a node's OR of
+  character masks bounds the best score achievable beneath it,
+- **streaming** expands the range entry by entry, since it must emit each line.
+
+The table is capped by `--memory-budget-mb`, and the cap covers the build-time
+peak, not just the finished table. Count constraints (from `present` tiles)
+couple the two sides of the expression, so they disable the index; positional
+constraints are safe and are compiled into it.
+
 ### Search Pruning
 
 The solver uses extensive pruning to avoid exploring invalid branches:
@@ -428,6 +497,8 @@ sumzle-hpc-solver/
 │   ├── evaluator.rs     # Expression evaluator
 │   ├── constraints.rs   # Constraint preprocessing
 │   ├── parallel.rs      # Multi-core parallel solver
+│   ├── rhs_index.rs     # Value-sorted RHS table for the `>` operator
+│   ├── limit.rs         # Work budget for approximate (bounded) searches
 │   ├── distributed.rs   # Distributed computing
 │   └── types.rs         # Core types
 ├── frontend/

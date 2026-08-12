@@ -1,6 +1,7 @@
 //! Brute-force search solver with pruning for Sumzle
 
 use crate::evaluator::{evaluate_expression_solver_bytes, is_integer};
+use crate::limit::{SearchLimit, CHECK_INTERVAL};
 use crate::rhs_index::{bytes_per_entry, RhsIndex, RhsIndexSet, BLOCK_SHIFT};
 use crate::types::*;
 
@@ -1277,8 +1278,7 @@ fn complete_eq_rhs<S: SolutionSink>(
     char_counts: &mut [u8; CHARSET_LEN],
     prepared: &PreparedKnowledge,
     rhs: &[u8],
-    sink: &mut S,
-    searched_count: &mut u64,
+    ctx: &mut SearchCtx<'_, S>,
 ) {
     debug_assert_eq!(rhs.len(), length - main_op_index - 1);
 
@@ -1308,8 +1308,8 @@ fn complete_eq_rhs<S: SolutionSink>(
     }
 
     if valid && prepared.counts_can_still_succeed(char_counts, 0) {
-        *searched_count += 1;
-        sink.accept(expr);
+        ctx.charge(1);
+        ctx.sink.accept(expr);
     }
 
     for &ch in &rhs[..filled] {
@@ -1343,6 +1343,83 @@ pub struct Branch {
 /// using the recursive search. Callers that know their environment can raise
 /// or lower it with [`Solver::with_memory_budget`].
 pub const DEFAULT_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
+
+/// Per-search mutable state and stopping conditions.
+///
+/// Bundled into one struct rather than added as further parameters to
+/// `recursive_search`, which already carries the per-node state; these fields
+/// are per-*search* and identical at every node, so passing them as a single
+/// reference keeps the recursion's argument list from growing and makes the
+/// distinction between the two kinds of state explicit.
+struct SearchCtx<'a, S: SolutionSink> {
+    sink: &'a mut S,
+    searched_count: u64,
+    /// Expressions counted since the limit was last consulted. Batched so the
+    /// shared atomic and the clock are touched once per `CHECK_INTERVAL`
+    /// expressions rather than per leaf.
+    since_check: u64,
+    /// Budget for this search. Unlimited searches skip the bookkeeping.
+    limit: &'a SearchLimit,
+    /// Set when `limit` stopped the search, so the caller can report the
+    /// result as partial.
+    stopped: bool,
+    /// Branch-collection cutoff: when `index == branch_depth`, snapshot the
+    /// node into `branches` and stop descending. Normal solves pass
+    /// `usize::MAX`, so this is a single never-taken comparison per call.
+    branch_depth: usize,
+    branches: Vec<Branch>,
+}
+
+impl<'a, S: SolutionSink> SearchCtx<'a, S> {
+    fn new(sink: &'a mut S, limit: &'a SearchLimit, branch_depth: usize) -> Self {
+        Self {
+            sink,
+            searched_count: 0,
+            since_check: 0,
+            limit,
+            stopped: false,
+            branch_depth,
+            branches: Vec::new(),
+        }
+    }
+
+    /// Count `n` examined expressions and, every `CHECK_INTERVAL`, consult the
+    /// budget. Returns `true` if the search should stop.
+    #[inline]
+    fn charge(&mut self, n: u64) -> bool {
+        self.searched_count += n;
+        if !self.limit.is_bounded() {
+            return false;
+        }
+        self.since_check += n;
+        if self.since_check >= CHECK_INTERVAL {
+            let delta = std::mem::take(&mut self.since_check);
+            if self.limit.charge(delta) {
+                self.stopped = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Flush any unreported expressions into the shared budget. Called once a
+    /// search finishes so a short search still contributes its work.
+    #[inline]
+    fn flush(&mut self) {
+        if self.limit.is_bounded() && self.since_check > 0 {
+            let delta = std::mem::take(&mut self.since_check);
+            if self.limit.charge(delta) {
+                self.stopped = true;
+            }
+        }
+    }
+
+    /// Whether the search has been stopped by its budget.
+    #[inline]
+    fn stopped(&self) -> bool {
+        self.stopped || (self.limit.is_bounded() && self.limit.is_exceeded())
+    }
+}
 
 /// The main solver struct
 pub struct Solver {
@@ -1677,11 +1754,23 @@ impl Solver {
     /// the generic engine behind `solve`; alternative sinks stream to disk or
     /// score for top-N without building a `Vec<String>`.
     pub fn solve_into<S: SolutionSink>(&self, sink: &mut S) -> u64 {
-        let mut searched_count: u64 = 0;
+        let limit = SearchLimit::unlimited();
+        self.solve_into_limited(sink, &limit).0
+    }
+
+    /// Like [`solve_into`](Self::solve_into), but stops early once `limit` is
+    /// spent. Returns `(searched_count, complete)`, where `complete` is false
+    /// if the budget cut the search short — in which case the solutions
+    /// delivered to `sink` are a subset of the true set.
+    pub fn solve_into_limited<S: SolutionSink>(
+        &self,
+        sink: &mut S,
+        limit: &SearchLimit,
+    ) -> (u64, bool) {
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
-        let mut no_branches: Vec<Branch> = Vec::new();
+        let mut ctx = SearchCtx::new(sink, limit, usize::MAX);
 
         self.recursive_search(
             0,
@@ -1698,13 +1787,11 @@ impl Solver {
             0,
             0,
             false,
-            sink,
-            &mut searched_count,
-            usize::MAX,
-            &mut no_branches,
+            &mut ctx,
         );
+        ctx.flush();
 
-        searched_count
+        (ctx.searched_count, !ctx.stopped())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1724,16 +1811,15 @@ impl Solver {
         current_num_len: u8,
         current_num_value: i64,
         current_num_leading_zero: bool,
-        sink: &mut S,
-        searched_count: &mut u64,
-        // Branch-collection cutoff: when `index == branch_depth`, snapshot the
-        // current node into `branches` and stop. Normal solves pass
-        // `usize::MAX`, so this is a single never-taken comparison per call.
-        branch_depth: usize,
-        branches: &mut Vec<Branch>,
+        ctx: &mut SearchCtx<'_, S>,
     ) {
-        if index == branch_depth {
-            branches.push(Branch {
+        // Budget spent: unwind immediately. Checked per node so every thread
+        // stops promptly once any of them trips the limit.
+        if ctx.stopped() {
+            return;
+        }
+        if index == ctx.branch_depth {
+            ctx.branches.push(Branch {
                 prefix: expr[..index].to_vec(),
                 main_op: main_op_so_far,
                 main_op_index,
@@ -1790,7 +1876,9 @@ impl Solver {
         }
 
         if index == self.length {
-            *searched_count += 1;
+            if ctx.charge(1) {
+                return;
+            }
 
             if main_op_so_far.is_none() {
                 return;
@@ -1807,7 +1895,7 @@ impl Solver {
             };
 
             if valid {
-                sink.accept(expr);
+                ctx.sink.accept(expr);
             }
             return;
         }
@@ -1891,8 +1979,7 @@ impl Solver {
                             char_counts,
                             prepared,
                             &rhs_buf[..rhs_len],
-                            sink,
-                            searched_count,
+                            ctx,
                         );
                     }
                     char_counts[ch_idx] -= 1;
@@ -1907,14 +1994,20 @@ impl Solver {
                 // still be snapshotted for a worker, so the shortcut is only
                 // taken in a real search (the common `usize::MAX` case).
                 if let Some(rhs) = self.rhs_indices.get(index) {
-                    if branch_depth == usize::MAX {
+                    if ctx.branch_depth == usize::MAX {
                         let m = rhs.upper_bound(lhs_value);
                         // Every complete RHS was already visited when the index
                         // was built, so account for all of them — this keeps
                         // `searched_count` identical to the recursive search.
-                        *searched_count += rhs.total_leaves();
+                        let stop = ctx.charge(rhs.total_leaves());
                         expr[index] = ch;
-                        sink.accept_index_range(&expr[..index + 1], rhs, m);
+                        ctx.sink.accept_index_range(&expr[..index + 1], rhs, m);
+                        char_counts[ch_idx] -= 1;
+                        expr[index] = NO_CHAR;
+                        if stop {
+                            return;
+                        }
+                        continue;
                     } else {
                         // Branch collection: stop here rather than descending
                         // into the right-hand side. Snapshotting *at* the main
@@ -1925,7 +2018,7 @@ impl Solver {
                         // onto the recursive search. The range is consumed on
                         // the worker thread, so this does not serialize.
                         expr[index] = ch;
-                        branches.push(Branch {
+                        ctx.branches.push(Branch {
                             prefix: expr[..index + 1].to_vec(),
                             main_op: Some(ch),
                             main_op_index: index,
@@ -2001,10 +2094,7 @@ impl Solver {
                 next_num_len,
                 next_num_value,
                 next_num_leading_zero,
-                sink,
-                searched_count,
-                branch_depth,
-                branches,
+                ctx,
             );
 
             if pushed_bracket {
@@ -2088,11 +2178,10 @@ impl Solver {
         }
 
         let mut results: Vec<String> = Vec::new();
-        let mut searched_count: u64 = 0;
+        let limit = SearchLimit::unlimited();
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
-        let mut no_branches: Vec<Branch> = Vec::new();
 
         expr[0] = first;
         char_counts[idx_of(first)] += 1;
@@ -2104,6 +2193,7 @@ impl Solver {
             _ => 0,
         };
 
+        let mut ctx = SearchCtx::new(&mut results, &limit, usize::MAX);
         self.recursive_search(
             1,
             &mut expr,
@@ -2123,11 +2213,9 @@ impl Solver {
                 0
             },
             first == b'0',
-            &mut results,
-            &mut searched_count,
-            usize::MAX,
-            &mut no_branches,
+            &mut ctx,
         );
+        let searched_count = ctx.searched_count;
 
         (results, searched_count)
     }
@@ -2152,11 +2240,11 @@ impl Solver {
         depth: usize,
         sink: &mut S,
     ) -> (Vec<Branch>, u64) {
-        let mut branches: Vec<Branch> = Vec::new();
-        let mut searched_count: u64 = 0;
+        let limit = SearchLimit::unlimited();
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         let mut char_counts = [0u8; CHARSET_LEN];
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut ctx = SearchCtx::new(sink, &limit, depth);
 
         self.recursive_search(
             0,
@@ -2173,13 +2261,10 @@ impl Solver {
             0,
             0,
             false,
-            sink,
-            &mut searched_count,
-            depth,
-            &mut branches,
+            &mut ctx,
         );
 
-        (branches, searched_count)
+        (ctx.branches, ctx.searched_count)
     }
 
     /// Resume the search from a `Branch` captured by `collect_branches_at_depth`,
@@ -2193,8 +2278,19 @@ impl Solver {
     /// Like `solve_from_prefix`, but delivers solutions to `sink`. Returns the
     /// number of complete expressions evaluated within this branch.
     pub fn solve_from_prefix_into<S: SolutionSink>(&self, branch: &Branch, sink: &mut S) -> u64 {
+        let limit = SearchLimit::unlimited();
+        self.solve_from_prefix_into_limited(branch, sink, &limit).0
+    }
+
+    /// Like [`solve_from_prefix_into`](Self::solve_from_prefix_into), but stops
+    /// early once `limit` is spent. Returns `(searched_count, complete)`.
+    pub fn solve_from_prefix_into_limited<S: SolutionSink>(
+        &self,
+        branch: &Branch,
+        sink: &mut S,
+        limit: &SearchLimit,
+    ) -> (u64, bool) {
         let depth = branch.prefix.len();
-        let mut searched_count: u64 = 0;
 
         // A branch parked exactly on a `>` whose right-hand side is indexed:
         // resolve the whole branch with one binary search. Branch collection
@@ -2207,7 +2303,9 @@ impl Solver {
                     .expect("`>` branch always carries its LHS value");
                 let m = rhs.upper_bound(lhs_value);
                 sink.accept_index_range(&branch.prefix, rhs, m);
-                return rhs.total_leaves();
+                let leaves = rhs.total_leaves();
+                let stopped = limit.is_bounded() && limit.charge(leaves);
+                return (leaves, !stopped);
             }
         }
 
@@ -2221,7 +2319,7 @@ impl Solver {
         let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
         bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
         let prev_char = branch.prefix.last().copied();
-        let mut no_branches: Vec<Branch> = Vec::new();
+        let mut ctx = SearchCtx::new(sink, limit, usize::MAX);
 
         self.recursive_search(
             depth,
@@ -2238,12 +2336,10 @@ impl Solver {
             branch.num_len,
             branch.num_value,
             branch.num_leading_zero,
-            sink,
-            &mut searched_count,
-            usize::MAX,
-            &mut no_branches,
+            &mut ctx,
         );
+        ctx.flush();
 
-        searched_count
+        (ctx.searched_count, !ctx.stopped())
     }
 }

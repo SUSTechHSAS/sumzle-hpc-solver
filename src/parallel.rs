@@ -1,5 +1,6 @@
 //! Multi-core parallel solver using Rayon
 
+use crate::limit::SearchLimit;
 use crate::solver::{CountSink, JsonlSink, SolutionSink, Solver, TopNSink};
 use rayon::prelude::*;
 use std::io::Write;
@@ -307,6 +308,41 @@ impl ParallelSolver {
         n: usize,
         progress: &Progress,
     ) -> (Vec<(f64, String)>, CountSink, u64) {
+        let limit = SearchLimit::unlimited();
+        let (scored, counts, searched, _complete) = self.solve_top_n_limited(n, progress, &limit);
+        (scored, counts, searched)
+    }
+
+    /// Like [`solve_top_n_with_counts_progress`], but stops once `limit` is
+    /// spent and reports whether the search finished.
+    ///
+    /// # Approximate results
+    ///
+    /// The search space grows exponentially with the puzzle length, so beyond
+    /// a certain size no exhaustive search finishes in usable time — and the
+    /// index, which removes redundant work but not the exponent, does not
+    /// change that. A budget makes the solver return the best ranking it found
+    /// within the time it was given instead of nothing at all.
+    ///
+    /// The returned flag is `false` when the budget cut the search short. In
+    /// that case both the ranking and the character statistics are drawn from
+    /// the portion of the space that was explored, so they are estimates:
+    /// good ones (the search is breadth-first over prefixes, so the sample is
+    /// spread across the space rather than concentrated in one corner), but
+    /// not guaranteed optimal, and not reproducible under a wall-clock budget
+    /// since which branches finish depends on thread timing. Callers must
+    /// surface the flag rather than presenting a truncated result as complete.
+    pub fn solve_top_n_limited(
+        &self,
+        n: usize,
+        progress: &Progress,
+        limit: &SearchLimit,
+    ) -> (Vec<(f64, String)>, CountSink, u64, bool) {
+        // Give each pass its own half of the budget. Sharing one budget would
+        // let pass 1 consume all of it and leave pass 2 unable to rank
+        // anything, returning zero solutions instead of an approximate answer.
+        let pass1_limit = limit.split(0.5);
+
         let (branches, eager_results, eager_searched) = self.collect_branches();
         // Two passes over the same branch set.
         progress.add_total(branches.len() as u64 * 2);
@@ -325,11 +361,13 @@ impl ParallelSolver {
             let (counts, branch_searched) = branches
                 .par_iter()
                 .map(|branch| {
-                    if progress.is_cancelled() {
+                    if progress.is_cancelled() || pass1_limit.is_exceeded() {
                         return (CountSink::new(), 0);
                     }
                     let mut sink = CountSink::new();
-                    let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
+                    let (searched, _) =
+                        self.solver
+                            .solve_from_prefix_into_limited(branch, &mut sink, &pass1_limit);
                     progress.inc_done();
                     (sink, searched)
                 })
@@ -348,6 +386,13 @@ impl ParallelSolver {
             let top5 = base_counts.top5_mask();
 
             // ---- Pass 2: score every solution, keep the top n. ----
+            // Pass 1's spending is folded back before splitting again, so
+            // pass 2 gets everything that is actually still available (all of
+            // it, since this is the last pass).
+            limit.absorb(&pass1_limit);
+            let pass2_limit = limit.split(1.0);
+            let p2 = &pass2_limit;
+
             progress.set_phase(PHASE_SCORING);
             let mut base_top = TopNSink::new(n, probs, top5);
             for sol in &eager_results {
@@ -357,11 +402,12 @@ impl ParallelSolver {
             let merged = branches
                 .par_iter()
                 .map(|branch| {
-                    if progress.is_cancelled() {
+                    if progress.is_cancelled() || p2.is_exceeded() {
                         return TopNSink::new(n, probs, top5);
                     }
                     let mut sink = TopNSink::new(n, probs, top5);
-                    self.solver.solve_from_prefix_into(branch, &mut sink);
+                    self.solver
+                        .solve_from_prefix_into_limited(branch, &mut sink, p2);
                     progress.inc_done();
                     sink
                 })
@@ -373,11 +419,17 @@ impl ParallelSolver {
                     },
                 );
             base_top.merge(merged);
+            limit.absorb(p2);
 
             (base_top, base_counts, searched)
         });
 
         progress.set_phase(PHASE_DONE);
-        (base_top.into_sorted(), base_counts, searched)
+        // Either pass running out makes the result approximate. The per-pass
+        // budgets fold that into the parent via `absorb`, so `stopped_early`
+        // is the honest answer here — `is_exceeded` alone would miss it, since
+        // the parent's own counter is never charged directly.
+        let complete = !limit.stopped_early();
+        (base_top.into_sorted(), base_counts, searched, complete)
     }
 }
