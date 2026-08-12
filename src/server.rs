@@ -968,19 +968,38 @@ mod tests {
         // more solves. mimalloc reuses/returns memory, so growth stays near zero;
         // if every request's result set were retained instead, 60 length-6 solves
         // would add well over 100 MB.
-        for _ in 0..5 {
-            one_solve();
+        //
+        // `/proc/self/statm` is per *process*, not per thread, so the reading
+        // also moves with whatever the other `cargo test` threads are doing.
+        // A single sample therefore produces false failures (this test was
+        // observed failing on an unmodified tree in roughly a quarter of
+        // parallel runs, reporting ~68 MB against the 64 MB threshold, while
+        // passing every time under `--test-threads=1`). Retry a few times and
+        // require only that *some* attempt shows bounded growth: a genuine
+        // retention bug grows on every attempt and can never pass, whereas
+        // interference from a neighbouring test is transient.
+        const ATTEMPTS: usize = 3;
+        const LIMIT: usize = 64 * 1024 * 1024;
+
+        let mut growth = usize::MAX;
+        for _ in 0..ATTEMPTS {
+            for _ in 0..5 {
+                one_solve();
+            }
+            let baseline = rss_bytes();
+            for _ in 0..60 {
+                one_solve();
+            }
+            growth = rss_bytes().saturating_sub(baseline);
+            if growth < LIMIT {
+                break;
+            }
         }
-        let baseline = rss_bytes();
-        for _ in 0..60 {
-            one_solve();
-        }
-        let growth = rss_bytes().saturating_sub(baseline);
 
         assert!(
-            growth < 64 * 1024 * 1024,
-            "RSS grew {} MB across 60 solves after warmup — solutions are not being \
-             freed across requests (issue #20 regression)",
+            growth < LIMIT,
+            "RSS grew {} MB across 60 solves after warmup, in each of {ATTEMPTS} attempts — \
+             solutions are not being freed across requests (issue #20 regression)",
             growth / (1024 * 1024),
         );
     }

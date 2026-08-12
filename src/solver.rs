@@ -1,9 +1,10 @@
 //! Brute-force search solver with pruning for Sumzle
 
 use crate::evaluator::{evaluate_expression_solver_bytes, is_integer};
+use crate::rhs_index::{bytes_per_entry, RhsIndex, RhsIndexSet, BLOCK_SHIFT};
 use crate::types::*;
 
-const CHARSET_LEN: usize = 24;
+pub(crate) const CHARSET_LEN: usize = 24;
 const NO_CHAR: u8 = 0;
 const INVALID_INDEX: u8 = u8::MAX;
 
@@ -78,6 +79,30 @@ const LENGTH_ONE_DIGITS: &[u8] = b"0123456789";
 /// raw bytes (guaranteed valid ASCII/UTF-8 by construction).
 pub trait SolutionSink {
     fn accept(&mut self, expr: &[u8]);
+
+    /// Accept the first `m` entries of `index`, each appended to `prefix`, as
+    /// solutions.
+    ///
+    /// When a `>` prefix is resolved through an [`RhsIndex`] the search knows
+    /// in one binary search that entries `[0, m)` are *all* solutions for this
+    /// prefix (see [`RhsIndex::upper_bound`]). The default implementation
+    /// materializes each one and calls [`accept`](Self::accept), which is what
+    /// a sink that must see every solution (streaming, plain `Vec`) needs.
+    ///
+    /// Sinks that only summarize the range override this to consume it in
+    /// bulk: `CountSink` reads block prefix sums, `TopNSink` prunes whole
+    /// subtrees with the OR-tree — both without touching every entry, which is
+    /// what makes the index a win rather than just a different way to spell
+    /// the same loop.
+    fn accept_index_range(&mut self, prefix: &[u8], index: &RhsIndex, m: usize) {
+        let mut buf = Vec::with_capacity(prefix.len() + index.k());
+        buf.extend_from_slice(prefix);
+        for i in 0..m {
+            buf.truncate(prefix.len());
+            buf.extend_from_slice(index.expr(i));
+            self.accept(&buf);
+        }
+    }
 }
 
 impl SolutionSink for Vec<String> {
@@ -93,7 +118,7 @@ impl SolutionSink for Vec<String> {
 /// Bitmask of the distinct charset indices present in `expr`. CHARSET_LEN is
 /// 24, so a `u32` holds one bit per possible character.
 #[inline]
-fn unique_char_mask(expr: &[u8]) -> u32 {
+pub(crate) fn unique_char_mask(expr: &[u8]) -> u32 {
     let mut mask = 0u32;
     for &ch in expr {
         mask |= 1u32 << idx_of(ch);
@@ -194,6 +219,43 @@ impl SolutionSink for CountSink {
             mask &= mask - 1;
         }
     }
+
+    /// Fold an entire index range in `O(CHARSET_LEN + BLOCK)` instead of
+    /// `O(m)`: the prefix's own characters contribute `m` times each (every
+    /// entry in the range shares the same prefix), and the entries' own
+    /// contribution comes from the index's cumulative block counts.
+    ///
+    /// This is the whole point of the index for pass 1 of top-N — a prefix
+    /// with a million matching right-hand sides is summarized without ever
+    /// building those million strings.
+    fn accept_index_range(&mut self, prefix: &[u8], index: &RhsIndex, m: usize) {
+        if m == 0 {
+            return;
+        }
+        self.total += m as u64;
+
+        // The prefix is identical for every entry in the range, so each of its
+        // distinct characters appears in exactly `m` solutions.
+        let mut pmask = unique_char_mask(prefix);
+        while pmask != 0 {
+            let i = pmask.trailing_zeros() as usize;
+            self.char_counts[i] += m as u64;
+            pmask &= pmask - 1;
+        }
+
+        // Characters contributed by the right-hand sides. A character present
+        // in both the prefix and an entry has already been counted above, so
+        // it must not be counted again: `compute_char_probabilities` counts a
+        // character at most once per solution.
+        let prefix_mask = unique_char_mask(prefix);
+        let mut entry_counts = [0u64; CHARSET_LEN];
+        index.add_char_counts_prefix(m, &mut entry_counts);
+        for (i, &c) in entry_counts.iter().enumerate() {
+            if prefix_mask & (1u32 << i) == 0 {
+                self.char_counts[i] += c;
+            }
+        }
+    }
 }
 
 /// Scores each solution with the probability-based score from
@@ -253,7 +315,15 @@ impl TopNSink {
 
     #[inline]
     fn score(&self, expr: &[u8]) -> f64 {
-        let mut mask = unique_char_mask(expr);
+        self.score_of_mask(unique_char_mask(expr))
+    }
+
+    /// Score contributed by a set of distinct characters. Identical to
+    /// [`score`](Self::score) but takes the mask directly, so a score can be
+    /// split into independent parts (a shared prefix plus a varying suffix) or
+    /// evaluated for an OR-tree node that stands for many entries at once.
+    #[inline]
+    fn score_of_mask(&self, mut mask: u32) -> f64 {
         let mut score = 0.0f64;
         while mask != 0 {
             let i = mask.trailing_zeros() as usize;
@@ -264,6 +334,74 @@ impl TopNSink {
             mask &= mask - 1;
         }
         score
+    }
+
+    /// Whether a subtree whose best possible score is `bound` could contain
+    /// anything worth keeping.
+    ///
+    /// Used for branch-and-bound over the OR-tree, so it must never reject a
+    /// subtree that might hold a keeper. On an exact tie with the current heap
+    /// minimum the subtree is explored: the score tie-break is by expression
+    /// text, which a bound cannot decide.
+    #[inline]
+    fn bound_can_keep(&self, bound: f64) -> bool {
+        if self.n == 0 {
+            return false;
+        }
+        if self.heap.len() < self.n {
+            return true;
+        }
+        match self.heap.peek() {
+            Some(std::cmp::Reverse(min)) => bound >= min.score,
+            None => true,
+        }
+    }
+
+    /// Score index entry `i` appended to the prefix already in `buf`, and keep
+    /// it if it makes the cut. `buf` is reused across entries to avoid a fresh
+    /// allocation per candidate.
+    #[inline]
+    fn consider_entry(
+        &mut self,
+        buf: &mut Vec<u8>,
+        prefix_len: usize,
+        prefix_mask: u32,
+        index: &RhsIndex,
+        i: usize,
+    ) {
+        // Score the *combined* mask in one pass rather than adding a
+        // precomputed prefix score to the suffix's.
+        //
+        // Both are mathematically the sum of the same weights, but they add
+        // them in different orders, and floating-point addition is not
+        // associative: two solutions with identical character sets could end
+        // up with scores differing in the last ulp purely because their
+        // prefix/suffix split differed. Scores are compared exactly (ties are
+        // broken by expression text), so that tiny difference would silently
+        // reorder tied solutions relative to the reference scorer. Summing the
+        // union in canonical bit order makes the result bit-for-bit identical
+        // to `score(expr)`.
+        let score = self.score_of_mask(prefix_mask | index.mask(i));
+
+        // Cheap reject before touching the expression bytes at all.
+        if self.n != 0 && self.heap.len() >= self.n {
+            if let Some(std::cmp::Reverse(min)) = self.heap.peek() {
+                if score < min.score {
+                    return;
+                }
+            }
+        }
+
+        buf.truncate(prefix_len);
+        buf.extend_from_slice(index.expr(i));
+        if !self.would_keep(score, buf) {
+            return;
+        }
+        let s = unsafe { std::str::from_utf8_unchecked(buf.as_slice()) };
+        self.push_scored(ScoredSolution {
+            score,
+            expr: s.to_owned(),
+        });
     }
 
     fn push_scored(&mut self, item: ScoredSolution) {
@@ -344,6 +482,84 @@ impl SolutionSink for TopNSink {
             score,
             expr: s.to_owned(),
         });
+    }
+
+    /// Score an index range with branch-and-bound over the OR-tree.
+    ///
+    /// The score of a solution is the sum of its distinct characters' weights,
+    /// so for any set of entries the OR of their masks gives an *upper bound*
+    /// on the best score any of them can reach (a superset of characters can
+    /// only add weight). When that bound cannot beat the current heap minimum,
+    /// the whole subtree — up to `BLOCK^(level+1)` entries — is skipped with a
+    /// single comparison.
+    ///
+    /// Once the heap is full this prunes the overwhelming majority of a large
+    /// range, which is what makes top-N cheap even when a prefix matches
+    /// millions of right-hand sides.
+    fn accept_index_range(&mut self, prefix: &[u8], index: &RhsIndex, m: usize) {
+        if m == 0 || self.n == 0 {
+            return;
+        }
+
+        // Characters from the prefix are shared by every entry in the range,
+        // so their contribution to the score is a constant.
+        let prefix_mask = unique_char_mask(prefix);
+
+        let mut buf = Vec::with_capacity(prefix.len() + index.k());
+        buf.extend_from_slice(prefix);
+
+        // Walk the OR-tree top-down, descending only into nodes whose bound
+        // can still beat the heap minimum. `stack` holds `(level, node)` with
+        // level `usize::MAX` marking a leaf entry.
+        let levels = index.or_levels();
+        let mut stack: Vec<(usize, usize)> = Vec::with_capacity(levels * BLOCK_SHIFT as usize + 8);
+
+        if levels == 0 {
+            for i in 0..m {
+                self.consider_entry(&mut buf, prefix.len(), prefix_mask, index, i);
+            }
+            return;
+        }
+
+        // Push the root level's nodes that overlap `[0, m)`, in reverse so the
+        // stack pops them in ascending order (deterministic tie-breaking).
+        let root = levels - 1;
+        let root_span = RhsIndex::span_of_level(root);
+        let root_nodes = m.div_ceil(root_span);
+        for node in (0..root_nodes).rev() {
+            stack.push((root, node));
+        }
+
+        while let Some((level, node)) = stack.pop() {
+            let span = RhsIndex::span_of_level(level);
+            let start = node * span;
+            if start >= m {
+                continue;
+            }
+            let end = (start + span).min(m);
+
+            // Bound: best achievable score anywhere under this node.
+            // Upper bound for the whole subtree: the OR of every mask beneath
+            // this node, unioned with the prefix. Scored the same way as a
+            // real entry, so the bound is never below an actual score.
+            let bound = self.score_of_mask(prefix_mask | index.or_at(level, node));
+            if !self.bound_can_keep(bound) {
+                continue;
+            }
+
+            if level == 0 {
+                for i in start..end {
+                    self.consider_entry(&mut buf, prefix.len(), prefix_mask, index, i);
+                }
+            } else {
+                let child_span = RhsIndex::span_of_level(level - 1);
+                let first = start / child_span;
+                let last = (end - 1) / child_span;
+                for child in (first..=last).rev() {
+                    stack.push((level - 1, child));
+                }
+            }
+        }
     }
 }
 
@@ -1120,21 +1336,329 @@ pub struct Branch {
     num_leading_zero: bool,
 }
 
+/// Default cap on the memory the RHS value index may use, in bytes.
+///
+/// Deliberately modest: the index is an *accelerator*, not a requirement, and
+/// exceeding the budget simply means the affected right-hand-side lengths keep
+/// using the recursive search. Callers that know their environment can raise
+/// or lower it with [`Solver::with_memory_budget`].
+pub const DEFAULT_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
+
 /// The main solver struct
 pub struct Solver {
     pub length: usize,
     pub gk: GlobalKnowledge,
     prepared: PreparedKnowledge,
+    /// Value-sorted right-hand-side tables for the `>` operator, keyed by
+    /// main-operator position. Empty when indexing is disabled, inapplicable
+    /// (positional constraints, see [`Self::build_rhs_indices`]) or over
+    /// budget; the search then falls back to plain recursion.
+    rhs_indices: RhsIndexSet,
 }
 
 impl Solver {
     pub fn new(length: usize, gk: GlobalKnowledge) -> Self {
+        Self::with_memory_budget(length, gk, DEFAULT_MEMORY_BUDGET)
+    }
+
+    /// Build a solver with an explicit cap on the RHS index memory.
+    ///
+    /// A budget of `0` disables indexing entirely, which forces the pure
+    /// recursive search — used by the tests that pin index-accelerated results
+    /// against the original engine.
+    pub fn with_memory_budget(length: usize, gk: GlobalKnowledge, memory_budget: usize) -> Self {
         let prepared = PreparedKnowledge::new(length, &gk);
+        let rhs_indices = Self::build_rhs_indices(length, &prepared, memory_budget);
         Self {
             length,
             gk,
             prepared,
+            rhs_indices,
         }
+    }
+
+    /// Total memory held by the RHS indices. Always within the budget passed
+    /// to [`with_memory_budget`](Self::with_memory_budget).
+    pub fn index_bytes(&self) -> usize {
+        self.rhs_indices.total_bytes()
+    }
+
+    /// Enumerate the `>` right-hand side of each possible main-operator
+    /// position into a value-sorted index, within `memory_budget`.
+    ///
+    /// # When an index is applicable
+    ///
+    /// The index is shared by *every* LHS prefix that puts `>` at the same
+    /// position, so it may only encode constraints that are the same for all
+    /// of them. Position-specific constraints (fixed characters, per-position
+    /// exclusions) are fine — an RHS character's absolute position is fixed
+    /// once the operator position is — but *count* constraints are not: they
+    /// couple the two sides, since how many times a character may still be
+    /// used in the RHS depends on how often the prefix already used it.
+    /// Puzzles with count constraints therefore keep the recursive search,
+    /// which applies those constraints exactly.
+    ///
+    /// Shorter right-hand sides are built first: they are shared by the most
+    /// prefixes, so they repay their memory the most, and building them first
+    /// means a tight budget is spent where it does the most good.
+    fn build_rhs_indices(
+        length: usize,
+        prepared: &PreparedKnowledge,
+        memory_budget: usize,
+    ) -> RhsIndexSet {
+        let mut set = RhsIndexSet::new(length.max(1));
+        if memory_budget == 0 || length < 3 {
+            return set;
+        }
+        // Count constraints couple the LHS and RHS: a shared table cannot know
+        // how many of each character the prefix already consumed.
+        if !prepared.constrained_indices.is_empty() {
+            return set;
+        }
+
+        let mut used = 0usize;
+        // `>` can sit anywhere from index 1 to length-2, leaving an RHS of
+        // length 1..=length-2. Build the short ones first.
+        for k in 1..=length.saturating_sub(2) {
+            let pos = length - k - 1;
+            if pos == 0 {
+                continue;
+            }
+
+            let (values, exprs, leaves, over_budget) =
+                Self::enumerate_rhs(length, pos, k, prepared, memory_budget.saturating_sub(used));
+            if over_budget {
+                // A longer RHS can only be larger, so nothing further fits.
+                break;
+            }
+            let index = RhsIndex::build(k, leaves, values, exprs);
+            used += index.heap_bytes();
+            set.insert(pos, index);
+        }
+
+        set
+    }
+
+    /// Enumerate every syntactically valid right-hand side of length `k` for a
+    /// `>` at `main_op_pos`, exactly as the recursive search would.
+    ///
+    /// Returns `(values, exprs, leaves, over_budget)` where `leaves` counts all
+    /// complete expressions reached — including those whose value is unusable
+    /// and thus not stored — so `searched_count` stays identical to the
+    /// recursive search. `over_budget` reports that enumeration was abandoned
+    /// because the result would exceed `budget`; the partial output must then
+    /// be discarded (the caller falls back to recursion).
+    fn enumerate_rhs(
+        length: usize,
+        main_op_pos: usize,
+        k: usize,
+        prepared: &PreparedKnowledge,
+        budget: usize,
+    ) -> (Vec<i64>, Vec<u8>, u64, bool) {
+        let max_entries = budget / bytes_per_entry(k);
+        // Reserve the cap up front rather than letting the vectors grow by
+        // doubling. Doubling would overshoot the budget by up to 2x, and a
+        // reallocation transiently holds both the old and new buffers — so the
+        // *peak* could reach several times the budget even though the finished
+        // index respects it. Allocating the ceiling once makes the peak equal
+        // the bound. `max_entries` is derived from the budget, so this cannot
+        // itself over-allocate.
+        let mut values: Vec<i64> = Vec::with_capacity(max_entries);
+        let mut exprs: Vec<u8> = Vec::with_capacity(max_entries.saturating_mul(k));
+        let mut leaves: u64 = 0;
+        let mut buf = vec![NO_CHAR; k];
+        let mut stack: Vec<u8> = vec![NO_CHAR; k];
+
+        let over = Self::enumerate_rhs_rec(
+            length,
+            main_op_pos,
+            k,
+            prepared,
+            0,
+            &mut buf,
+            // The character preceding the RHS is the main operator itself.
+            // Passing `None` here would let the candidate generator fall back
+            // to the unrestricted default order and admit right-hand sides the
+            // real search never produces (e.g. a leading `-`, which is only
+            // legal after `=`).
+            Some(b'>'),
+            FloorContext::new(),
+            &mut stack,
+            0,
+            0,
+            0,
+            false,
+            &mut values,
+            &mut exprs,
+            &mut leaves,
+            max_entries,
+        );
+
+        (values, exprs, leaves, over)
+    }
+
+    /// Recursive worker for [`enumerate_rhs`](Self::enumerate_rhs). Returns
+    /// `true` if the entry budget was exhausted.
+    ///
+    /// Mirrors `recursive_search` for the sub-expression after the main
+    /// operator, but with `main_op_so_far = Some(b'>')` fixed and no count
+    /// constraints (excluded by `build_rhs_indices`), so the state it must
+    /// carry is much smaller.
+    #[allow(clippy::too_many_arguments)]
+    fn enumerate_rhs_rec(
+        length: usize,
+        main_op_pos: usize,
+        k: usize,
+        prepared: &PreparedKnowledge,
+        offset: usize,
+        buf: &mut [u8],
+        prev_char: Option<u8>,
+        floor_ctx: FloorContext,
+        bracket_stack: &mut [u8],
+        stack_len: usize,
+        num_len: u8,
+        num_value: i64,
+        num_leading_zero: bool,
+        values: &mut Vec<i64>,
+        exprs: &mut Vec<u8>,
+        leaves: &mut u64,
+        max_entries: usize,
+    ) -> bool {
+        if offset == k {
+            // A complete RHS: the recursive search would evaluate it here.
+            *leaves += 1;
+            if let Some(v) = evaluate_expression_solver_bytes(&buf[..k]) {
+                if is_integer(v) {
+                    if values.len() >= max_entries {
+                        return true;
+                    }
+                    // `as i64` saturates, matching the recursive search's own
+                    // `rv as i64` conversion in the `>` comparison.
+                    values.push(v as i64);
+                    exprs.extend_from_slice(&buf[..k]);
+                }
+            }
+            return false;
+        }
+
+        // Same lower-bound floor pruning as `recursive_search`: an unclosed
+        // floor needs at least `]` when a slash is already present, otherwise
+        // at least `/d]`. Purely a speed optimization — it only discards paths
+        // that could never complete — so the leaf count, and therefore
+        // `searched_count`, is unaffected.
+        if floor_ctx.in_floor {
+            let min_needed = if floor_ctx.has_slash_in_current_floor {
+                1
+            } else {
+                3
+            };
+            if k - offset < min_needed {
+                return false;
+            }
+        }
+
+        // Absolute position in the full expression, which is what the
+        // positional constraints are indexed by.
+        let index = main_op_pos + 1 + offset;
+
+        let mut candidates = [NO_CHAR; CHARSET_LEN];
+        let count = fill_candidate_chars(
+            index,
+            prev_char,
+            length,
+            Some(b'>'),
+            floor_ctx,
+            prepared,
+            &mut candidates,
+        );
+
+        // No count constraints here, so a zero-filled counts array is exact.
+        let char_counts = [0u8; CHARSET_LEN];
+
+        for &ch in &candidates[..count] {
+            let ch_idx = idx_of(ch);
+            if !can_place_char(
+                ch,
+                ch_idx,
+                index,
+                prev_char,
+                Some(b'>'),
+                &char_counts,
+                floor_ctx,
+                bracket_stack,
+                stack_len,
+                prepared,
+                length,
+                num_len,
+                num_value,
+                num_leading_zero,
+            ) {
+                continue;
+            }
+
+            buf[offset] = ch;
+
+            let next_floor_ctx = update_floor_context(ch, floor_ctx);
+            let (next_num_len, next_num_value, next_num_leading_zero) = if is_digit_b(ch) {
+                if prev_char.is_some_and(is_digit_b) {
+                    (
+                        num_len + 1,
+                        num_value * 10 + (ch - b'0') as i64,
+                        num_leading_zero,
+                    )
+                } else {
+                    (1, (ch - b'0') as i64, ch == b'0')
+                }
+            } else {
+                (0, 0, false)
+            };
+
+            let pushed = matches!(ch, b'(' | b'[');
+            let saved = if pushed {
+                bracket_stack[stack_len]
+            } else {
+                NO_CHAR
+            };
+            let next_stack_len = match ch {
+                b'(' | b'[' => {
+                    bracket_stack[stack_len] = ch;
+                    stack_len + 1
+                }
+                b')' | b']' => stack_len - 1,
+                _ => stack_len,
+            };
+
+            let over = Self::enumerate_rhs_rec(
+                length,
+                main_op_pos,
+                k,
+                prepared,
+                offset + 1,
+                buf,
+                Some(ch),
+                next_floor_ctx,
+                bracket_stack,
+                next_stack_len,
+                next_num_len,
+                next_num_value,
+                next_num_leading_zero,
+                values,
+                exprs,
+                leaves,
+                max_entries,
+            );
+
+            if pushed {
+                bracket_stack[stack_len] = saved;
+            }
+            buf[offset] = NO_CHAR;
+
+            if over {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Solve with single-threaded brute force
@@ -1299,6 +1823,16 @@ impl Solver {
             &mut candidates,
         );
 
+        // Value of `expr[..index]`, evaluated at most once per node.
+        //
+        // Both main operators can be placed at this position, and each needs
+        // the value of the *same* left-hand side — the characters before
+        // `index`, which do not depend on which operator goes there. Without
+        // this the identical prefix is parsed twice per node, and at length 9
+        // that is 11.2M recursive-descent parses where 5.6M suffice.
+        // `None` means "not yet computed"; the inner `Option` is the result.
+        let mut lhs_cache: Option<Option<f64>> = None;
+
         for &ch in &candidates[..candidate_count] {
             let ch_idx = idx_of(ch);
             if !can_place_char(
@@ -1326,7 +1860,9 @@ impl Solver {
             let next_floor_ctx = update_floor_context(ch, floor_ctx);
             let mut new_main_lhs_value = main_lhs_value;
             let new_main_op = if is_main_operator_b(ch) {
-                let Some(lhs_value) = evaluate_expression_solver_bytes(&expr[..index]) else {
+                let evaluated = *lhs_cache
+                    .get_or_insert_with(|| evaluate_expression_solver_bytes(&expr[..index]));
+                let Some(lhs_value) = evaluated else {
                     char_counts[ch_idx] -= 1;
                     expr[index] = NO_CHAR;
                     continue;
@@ -1358,6 +1894,48 @@ impl Solver {
                             sink,
                             searched_count,
                         );
+                    }
+                    char_counts[ch_idx] -= 1;
+                    expr[index] = NO_CHAR;
+                    continue;
+                }
+                // `>` with a prebuilt RHS table: resolve the entire remaining
+                // subtree with one binary search instead of re-enumerating it.
+                // The table is sorted by value, so `lhs_value > rhs_value`
+                // holds for exactly its first `m` entries. `branch_depth` is
+                // the branch-collection cutoff — during that pass the node must
+                // still be snapshotted for a worker, so the shortcut is only
+                // taken in a real search (the common `usize::MAX` case).
+                if let Some(rhs) = self.rhs_indices.get(index) {
+                    if branch_depth == usize::MAX {
+                        let m = rhs.upper_bound(lhs_value);
+                        // Every complete RHS was already visited when the index
+                        // was built, so account for all of them — this keeps
+                        // `searched_count` identical to the recursive search.
+                        *searched_count += rhs.total_leaves();
+                        expr[index] = ch;
+                        sink.accept_index_range(&expr[..index + 1], rhs, m);
+                    } else {
+                        // Branch collection: stop here rather than descending
+                        // into the right-hand side. Snapshotting *at* the main
+                        // operator keeps the branch resolvable through the
+                        // index by the worker that picks it up (see
+                        // `solve_from_prefix_into`); descending past it would
+                        // partially fill the RHS and force that worker back
+                        // onto the recursive search. The range is consumed on
+                        // the worker thread, so this does not serialize.
+                        expr[index] = ch;
+                        branches.push(Branch {
+                            prefix: expr[..index + 1].to_vec(),
+                            main_op: Some(ch),
+                            main_op_index: index,
+                            main_lhs_value: Some(lhs_value),
+                            floor_ctx: next_floor_ctx,
+                            bracket_stack: bracket_stack[..stack_len].to_vec(),
+                            num_len: 0,
+                            num_value: 0,
+                            num_leading_zero: false,
+                        });
                     }
                     char_counts[ch_idx] -= 1;
                     expr[index] = NO_CHAR;
@@ -1617,6 +2195,22 @@ impl Solver {
     pub fn solve_from_prefix_into<S: SolutionSink>(&self, branch: &Branch, sink: &mut S) -> u64 {
         let depth = branch.prefix.len();
         let mut searched_count: u64 = 0;
+
+        // A branch parked exactly on a `>` whose right-hand side is indexed:
+        // resolve the whole branch with one binary search. Branch collection
+        // stops at the main operator precisely so this path is available here,
+        // on the worker thread.
+        if depth == branch.main_op_index + 1 && branch.main_op == Some(b'>') {
+            if let Some(rhs) = self.rhs_indices.get(branch.main_op_index) {
+                let lhs_value = branch
+                    .main_lhs_value
+                    .expect("`>` branch always carries its LHS value");
+                let m = rhs.upper_bound(lhs_value);
+                sink.accept_index_range(&branch.prefix, rhs, m);
+                return rhs.total_leaves();
+            }
+        }
+
         let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
         expr[..depth].copy_from_slice(&branch.prefix);
         let mut char_counts = [0u8; CHARSET_LEN];

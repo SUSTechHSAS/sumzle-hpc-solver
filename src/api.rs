@@ -279,6 +279,30 @@ pub fn prepare_solve(
     threads: usize,
     top: usize,
 ) -> Result<(Solver, usize, usize), String> {
+    prepare_solve_with_budget(
+        length,
+        rows,
+        threads,
+        top,
+        crate::solver::DEFAULT_MEMORY_BUDGET,
+    )
+}
+
+/// Like [`prepare_solve`], but with an explicit cap on the memory the RHS
+/// value index may use (see [`Solver::with_memory_budget`]).
+///
+/// The index only accelerates the search — anything that does not fit falls
+/// back to the recursive search with identical results — so this is a ceiling
+/// on the solver's length-dependent memory rather than a requirement. Callers
+/// running many concurrent solves on a small host can lower it; `0` disables
+/// indexing entirely.
+pub fn prepare_solve_with_budget(
+    length: usize,
+    rows: &[SolveRow],
+    threads: usize,
+    top: usize,
+    memory_budget: usize,
+) -> Result<(Solver, usize, usize), String> {
     if length < MIN_SOLVE_LENGTH {
         return Err(format!(
             "Length must be at least {}, got {}",
@@ -294,7 +318,11 @@ pub fn prepare_solve(
     let gk = GlobalKnowledge::from_guess_rows(length, &guess_rows)
         .map_err(|e| format!("Invalid constraints: {}", e))?;
 
-    Ok((Solver::new(length, gk), threads, top))
+    Ok((
+        Solver::with_memory_budget(length, gk, memory_budget),
+        threads,
+        top,
+    ))
 }
 
 /// Run a solve and assemble the full [`SolveResponse`].

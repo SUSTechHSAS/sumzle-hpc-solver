@@ -32,6 +32,7 @@ pub mod constraints;
 pub mod distributed;
 pub mod evaluator;
 pub mod parallel;
+pub mod rhs_index;
 // HTTP web server (axum). Behind the `server` feature so the Tauri mobile crate
 // can depend on this crate with `default-features = false` and never compile
 // axum/tokio/tower into the Android binary. The framework-agnostic solve core

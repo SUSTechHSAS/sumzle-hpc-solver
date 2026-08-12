@@ -1286,3 +1286,345 @@ fn solve_branch_invalid_first_char_does_not_panic() {
     assert!(results.is_empty());
     assert_eq!(searched, 0);
 }
+
+// =========================================================================
+// RHS value index (issue: extremely large lengths).
+//
+// The index resolves the `>` operator's right-hand side with a binary search
+// over a precomputed, value-sorted table instead of re-enumerating that
+// subtree for every left-hand-side prefix. It is a pure accelerator: results
+// must be bit-for-bit identical to the recursive search, including
+// `searched_count`, and its memory must stay inside the caller's budget at any
+// length. `memory_budget = 0` disables it and is used here as the reference
+// engine.
+// =========================================================================
+
+/// Sorted solutions plus searched count from the pure recursive search.
+fn solve_unindexed(length: usize) -> (Vec<String>, u64) {
+    let (mut r, s) = Solver::with_memory_budget(length, empty_gk(length), 0).solve();
+    r.sort();
+    (r, s)
+}
+
+#[test]
+fn test_rhs_index_matches_unindexed_search() {
+    for length in 3..=8 {
+        let (expected, expected_searched) = solve_unindexed(length);
+
+        let (mut got, got_searched) = Solver::new(length, empty_gk(length)).solve();
+        got.sort();
+
+        assert_eq!(
+            got, expected,
+            "length {length}: indexed solution set must equal the recursive search"
+        );
+        assert_eq!(
+            got_searched, expected_searched,
+            "length {length}: indexed searched_count must equal the recursive search"
+        );
+    }
+}
+
+#[test]
+fn test_rhs_index_matches_unindexed_in_parallel() {
+    // The index is consulted both mid-search and when a worker resumes a
+    // branch parked on the main operator; several thread counts exercise both.
+    for length in 5..=7 {
+        let (expected, expected_searched) = solve_unindexed(length);
+
+        for threads in [1usize, 2, 4, 256] {
+            let ps = ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(threads));
+            let (mut got, got_searched) = ps.solve();
+            got.sort();
+
+            assert_eq!(
+                got, expected,
+                "length {length}, {threads} threads: indexed set must match the recursive search"
+            );
+            assert_eq!(
+                got_searched, expected_searched,
+                "length {length}, {threads} threads: searched_count must match"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_rhs_index_char_counts_match_unindexed() {
+    // `CountSink` folds a whole index range from block prefix sums rather than
+    // visiting each solution, so its per-character totals need their own check:
+    // top-N's character probabilities are computed from exactly these numbers.
+    use sumzle_solver::solver::CountSink;
+
+    for length in 3..=7 {
+        let mut expected = CountSink::new();
+        let expected_searched =
+            Solver::with_memory_budget(length, empty_gk(length), 0).solve_into(&mut expected);
+
+        let mut got = CountSink::new();
+        let got_searched = Solver::new(length, empty_gk(length)).solve_into(&mut got);
+
+        assert_eq!(
+            got.total, expected.total,
+            "length {length}: total solutions"
+        );
+        assert_eq!(
+            got.char_counts, expected.char_counts,
+            "length {length}: per-character solution counts"
+        );
+        assert_eq!(got_searched, expected_searched, "length {length}: searched");
+    }
+}
+
+#[test]
+fn test_rhs_index_top_n_matches_unindexed() {
+    // Top-N over an index range uses OR-tree branch-and-bound to skip whole
+    // subtrees. Pruning must never drop a solution that belongs in the result,
+    // so the ranking has to match the unaccelerated engine exactly.
+    for length in 5..=7 {
+        for n in [1usize, 5, 50] {
+            let expected = ParallelSolver::new(
+                Solver::with_memory_budget(length, empty_gk(length), 0),
+                Some(2),
+            )
+            .solve_top_n(n);
+
+            let got =
+                ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(2)).solve_top_n(n);
+
+            assert_eq!(
+                got.0.len(),
+                expected.0.len(),
+                "length {length}, top {n}: result size"
+            );
+            for (g, e) in got.0.iter().zip(expected.0.iter()) {
+                assert_eq!(g.1, e.1, "length {length}, top {n}: ranked solution");
+                assert!(
+                    (g.0 - e.0).abs() < 1e-9,
+                    "length {length}, top {n}: score for {} ({} vs {})",
+                    g.1,
+                    g.0,
+                    e.0
+                );
+            }
+            assert_eq!(
+                got.1, expected.1,
+                "length {length}, top {n}: searched count"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_rhs_index_respects_memory_budget() {
+    // The budget is a hard ceiling at every length: whatever does not fit is
+    // simply not built, and the search falls back to recursion. This is what
+    // keeps memory bounded for arbitrarily long puzzles.
+    for length in [6usize, 8, 10, 12, 14] {
+        for budget_mb in [0usize, 1, 16, 64] {
+            let budget = budget_mb * 1024 * 1024;
+            let solver = Solver::with_memory_budget(length, empty_gk(length), budget);
+            assert!(
+                solver.index_bytes() <= budget,
+                "length {length}: index used {} bytes, over the {budget}-byte budget",
+                solver.index_bytes()
+            );
+        }
+    }
+}
+
+/// Peak RSS is what a memory budget actually has to bound — a build that ends
+/// up inside the budget is still a failure if it spikes far past it on the way
+/// there (that spike is what makes a long puzzle die on a small host). Linux
+/// only: reads the kernel's high-water mark from `/proc/self/status`.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_rhs_index_build_peak_stays_near_budget() {
+    fn peak_rss_bytes() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .expect("read /proc/self/status")
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse::<usize>().ok())
+            .expect("VmHWM field")
+            * 1024
+    }
+
+    // Long enough that an unbounded index would be enormous, so the budget is
+    // certainly the binding constraint.
+    const BUDGET: usize = 32 * 1024 * 1024;
+    let before = peak_rss_bytes();
+    let solver = Solver::with_memory_budget(14, empty_gk(14), BUDGET);
+    let growth = peak_rss_bytes().saturating_sub(before);
+
+    assert!(
+        solver.index_bytes() <= BUDGET,
+        "finished index of {} bytes exceeds the {BUDGET}-byte budget",
+        solver.index_bytes()
+    );
+    // Generous headroom over the budget: this is a guard against the peak
+    // scaling with the *puzzle*, not a tight allocator accounting check.
+    let limit = BUDGET * 4;
+    assert!(
+        growth < limit,
+        "peak RSS grew {} MB while building a {} MB index — the build-time \
+         spike is not bounded by the budget",
+        growth / (1024 * 1024),
+        BUDGET / (1024 * 1024),
+    );
+}
+
+#[test]
+fn test_rhs_index_memory_does_not_grow_with_length() {
+    // The property the bounded modes exist for: past the point where the
+    // budget binds, making the puzzle longer must not make the index bigger.
+    const BUDGET: usize = 16 * 1024 * 1024;
+    let at = |len: usize| Solver::with_memory_budget(len, empty_gk(len), BUDGET).index_bytes();
+
+    let baseline = at(12);
+    for length in [13usize, 16, 20] {
+        assert_eq!(
+            at(length),
+            baseline,
+            "index size must plateau once the budget binds (length {length})"
+        );
+    }
+}
+
+#[test]
+fn test_rhs_index_tiny_budget_still_correct() {
+    // A budget that fits only the shortest right-hand sides leaves the rest on
+    // the recursive path, so both engines run within one solve. The mixture
+    // must still produce exactly the reference result.
+    for length in 5..=7 {
+        let (expected, expected_searched) = solve_unindexed(length);
+
+        // 4 KiB: enough for k=1, far too small for the longer tables.
+        let (mut got, got_searched) =
+            Solver::with_memory_budget(length, empty_gk(length), 4096).solve();
+        got.sort();
+
+        assert_eq!(got, expected, "length {length}: partial-index solution set");
+        assert_eq!(
+            got_searched, expected_searched,
+            "length {length}: partial-index searched_count"
+        );
+    }
+}
+
+#[test]
+fn test_rhs_index_with_constraints_matches_unindexed() {
+    // Positional constraints are safe to bake into the index (an RHS
+    // character's absolute position is fixed once the operator position is),
+    // while count constraints are not and must disable it. Both kinds are
+    // checked against the reference engine.
+    let length = 6;
+
+    let cases: Vec<(&str, Vec<Tile>)> = vec![
+        (
+            "fixed and absent",
+            vec![
+                Tile {
+                    char: '1',
+                    state: TileState::Correct,
+                },
+                Tile {
+                    char: '+',
+                    state: TileState::Present,
+                },
+                Tile {
+                    char: '2',
+                    state: TileState::Empty,
+                },
+                Tile {
+                    char: '=',
+                    state: TileState::Correct,
+                },
+                Tile {
+                    char: '3',
+                    state: TileState::Empty,
+                },
+                Tile {
+                    char: '0',
+                    state: TileState::Empty,
+                },
+            ],
+        ),
+        (
+            "present forces count constraints",
+            vec![
+                Tile {
+                    char: '5',
+                    state: TileState::Present,
+                },
+                Tile {
+                    char: '>',
+                    state: TileState::Present,
+                },
+                Tile {
+                    char: '7',
+                    state: TileState::Empty,
+                },
+                Tile {
+                    char: '1',
+                    state: TileState::Present,
+                },
+                Tile {
+                    char: '4',
+                    state: TileState::Empty,
+                },
+                Tile {
+                    char: '9',
+                    state: TileState::Empty,
+                },
+            ],
+        ),
+    ];
+
+    for (name, row) in cases {
+        let gk = GlobalKnowledge::from_guess_rows(length, std::slice::from_ref(&row)).unwrap();
+
+        let (mut expected, expected_searched) =
+            Solver::with_memory_budget(length, gk.clone(), 0).solve();
+        expected.sort();
+
+        let (mut got, got_searched) = Solver::new(length, gk).solve();
+        got.sort();
+
+        assert_eq!(got, expected, "{name}: solution set must match");
+        assert_eq!(got_searched, expected_searched, "{name}: searched_count");
+    }
+}
+
+#[test]
+fn test_rhs_index_streaming_matches_unindexed() {
+    // The streaming sink takes the default `accept_index_range`, which expands
+    // a range entry by entry; this pins that expansion against the reference.
+    let length = 6;
+    let (expected, _) = solve_unindexed(length);
+
+    let tmp = std::env::temp_dir().join("sumzle_rhs_index_stream_test.jsonl");
+    let file = std::io::BufWriter::new(std::fs::File::create(&tmp).unwrap());
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let ps = ParallelSolver::new(Solver::new(length, empty_gk(length)), Some(4));
+    let (written, _searched) = ps.solve_to_writer(file, &never).unwrap();
+
+    let content = std::fs::read_to_string(&tmp).unwrap();
+    let mut got: Vec<String> = content
+        .lines()
+        .map(|l| {
+            let start = l.find(":\"").unwrap() + 2;
+            let end = l.rfind("\"}").unwrap();
+            l[start..end].to_string()
+        })
+        .collect();
+    got.sort();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert_eq!(
+        got, expected,
+        "streamed set must match the recursive search"
+    );
+    assert_eq!(written as usize, expected.len(), "streamed count");
+}

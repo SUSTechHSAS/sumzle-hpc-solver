@@ -44,6 +44,13 @@ enum Commands {
         /// score). Keeps memory bounded regardless of total solution count.
         #[arg(long)]
         top: Option<usize>,
+        /// Cap, in MiB, on the right-hand-side value index that accelerates
+        /// the `>` operator. The index is an optional accelerator: whatever
+        /// does not fit falls back to the plain recursive search, so this is a
+        /// hard ceiling on the solver's length-dependent memory, not a
+        /// requirement. `0` disables indexing entirely.
+        #[arg(long, default_value_t = sumzle_solver::solver::DEFAULT_MEMORY_BUDGET / (1024 * 1024))]
+        memory_budget_mb: usize,
     },
     /// Run as distributed coordinator
     Coordinate {
@@ -201,6 +208,7 @@ fn main() -> Result<()> {
             format,
             output,
             top,
+            memory_budget_mb,
         } => {
             let input_str = match input {
                 Some(path) => std::fs::read_to_string(path)?,
@@ -214,7 +222,11 @@ fn main() -> Result<()> {
 
             let cli_input: CliInput = serde_json::from_str(&input_str)?;
             let (length, gk) = build_solver_input(&cli_input)?;
-            let solver = Solver::new(length, gk);
+            let solver = Solver::with_memory_budget(
+                length,
+                gk,
+                memory_budget_mb.saturating_mul(1024 * 1024),
+            );
             let num_threads = if threads == 0 {
                 num_cpus::get()
             } else {
