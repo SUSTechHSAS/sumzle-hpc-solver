@@ -37,6 +37,29 @@ Single-threaded, release build on a modern CPU:
 
 Multi-core parallelism provides near-linear speedup with the number of cores.
 
+### Large lengths
+
+Two paths, selected by how much memory you are willing to spend:
+
+| Path | Select with | L=10 | L=11 | Peak RSS |
+|---|---|---:|---:|---:|
+| Cached RHS tables | default | 10.1s | 110.4s | 4.23 GB |
+| Memory-bounded (grammar DFA + value index) | `SUMZLE_RHS_CACHE_MB=0` | 21.0s (count) | 263.4s (count) | **78 MB** |
+
+The memory-bounded path is the one that scales: its footprint is set by the
+*grammar*, not by the solution count (the entire L=12 right-hand-side grammar is
+a 2,643-node automaton, ~0.9 MB, encoding 4.7 billion leaves). Use it with
+`--count-only`, `--top N` or `--output` streaming when the solution set is too
+large to hold.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SUMZLE_RHS_CACHE_MB` | 2/3 of headroom | RHS expression cache; `0` selects the memory-bounded path |
+| `SUMZLE_RHS_DFA_NODES` | 30,000,000 | Grammar-DFA node budget; `0` disables |
+| `SUMZLE_RHS_VALUE_INDEX_MB` | 64 | Aggregate value index for counting; `0` disables |
+
+See [OPTIMIZATION.md](OPTIMIZATION.md) for the full breakdown.
+
 ## Building
 
 ### Prerequisites

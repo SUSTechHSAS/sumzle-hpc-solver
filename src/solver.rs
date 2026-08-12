@@ -2,8 +2,15 @@
 
 use crate::evaluator::{evaluate_expression_solver_bytes, is_integer};
 use crate::types::*;
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
-const CHARSET_LEN: usize = 24;
+/// Number of distinct characters a Sumzle expression can contain.
+///
+/// Public because it appears in [`SolutionSink::accept_aggregate`]'s signature,
+/// which sinks outside this module implement.
+pub const CHARSET_LEN: usize = 24;
 const NO_CHAR: u8 = 0;
 const INVALID_INDEX: u8 = u8::MAX;
 
@@ -78,6 +85,84 @@ const LENGTH_ONE_DIGITS: &[u8] = b"0123456789";
 /// raw bytes (guaranteed valid ASCII/UTF-8 by construction).
 pub trait SolutionSink {
     fn accept(&mut self, expr: &[u8]);
+
+    /// Accept a solution whose right-hand-side value the search already
+    /// computed. Sinks that care about the value (only [`RhsCapture`]) override
+    /// this to avoid re-evaluating the expression; everyone else ignores it.
+    #[inline]
+    fn accept_valued(&mut self, expr: &[u8], _rhs_value: i64) {
+        self.accept(expr);
+    }
+
+    /// Whether this sink can absorb whole subtrees through
+    /// [`accept_aggregate`](Self::accept_aggregate).
+    ///
+    /// Building the aggregate index costs one traversal of the right-hand-side
+    /// set, which is wasted on a sink that needs the solutions themselves. This
+    /// is a constant per sink type, so the check folds away at compile time and
+    /// the index is only ever built for a solve that will use it.
+    #[inline]
+    fn wants_aggregate(&self) -> bool {
+        false
+    }
+
+    /// Bulk-accept an entire right-hand-side subtree without enumerating it.
+    ///
+    /// Reports that `count` solutions share `prefix`, and that
+    /// `suffix_char_counts[c]` of them contain character `c` somewhere in the
+    /// suffix. Sinks that only need *aggregates* — how many solutions there
+    /// are and which characters they use — can absorb a whole subtree in
+    /// `O(CHARSET_LEN)` instead of `O(count)`.
+    ///
+    /// Returns `true` if the sink consumed the aggregate. The default is
+    /// `false`: a sink that must see each solution individually (it emits,
+    /// ranks, or stores them) declines and the search enumerates as usual.
+    #[inline]
+    fn accept_aggregate(
+        &mut self,
+        _prefix: &[u8],
+        _count: u64,
+        _suffix_char_counts: &[u64; CHARSET_LEN],
+    ) -> bool {
+        false
+    }
+
+    /// Pruning hook: may any completion of `prefix` using `remaining` further
+    /// characters still be accepted?
+    ///
+    /// Returning `false` lets the search skip a whole subtree. Only
+    /// [`TopNSink`] declines — it keeps a bounded set, so once the kept set is
+    /// full a subtree whose *best possible* score cannot reach the weakest
+    /// kept solution is dead weight. Every other sink accepts everything, so
+    /// the default is `true` and the check inlines away for them.
+    ///
+    /// The search still reports the skipped expressions in its "searched"
+    /// statistic, so pruning changes the run time and nothing else.
+    #[inline]
+    fn may_accept(&mut self, _prefix: &[u8], _remaining: usize) -> bool {
+        true
+    }
+
+    /// Whether this sink ever declines a subtree. A constant so the pruning
+    /// checks inside the hot RHS walk compile away entirely for the sinks that
+    /// accept everything — they must not pay for a hook they never use.
+    const PRUNES: bool = false;
+
+    /// Prune hook for the RHS automaton, keyed on *character sets* instead of
+    /// bytes.
+    ///
+    /// `present` is the set of characters already placed, `reachable` the set
+    /// the remaining automaton can still produce, and `remaining` the number of
+    /// characters left. Since the score depends only on which distinct
+    /// characters appear, this is everything a bound needs — and knowing what
+    /// the grammar can *actually* still emit makes the bound far tighter than
+    /// one drawn from the whole charset.
+    ///
+    /// Only consulted when [`PRUNES`](Self::PRUNES) is set.
+    #[inline]
+    fn may_accept_masked(&mut self, _present: u32, _reachable: u32, _remaining: usize) -> bool {
+        true
+    }
 }
 
 impl SolutionSink for Vec<String> {
@@ -194,6 +279,39 @@ impl SolutionSink for CountSink {
             mask &= mask - 1;
         }
     }
+
+    #[inline]
+    fn wants_aggregate(&self) -> bool {
+        true
+    }
+
+    /// Absorb a whole subtree from its aggregate — this sink never looks at an
+    /// individual solution, only at totals.
+    ///
+    /// A character counts once per solution, so for each character the tally
+    /// is: every one of the `count` solutions if the prefix already contains
+    /// it, otherwise only those whose suffix does.
+    #[inline]
+    fn accept_aggregate(
+        &mut self,
+        prefix: &[u8],
+        count: u64,
+        suffix_char_counts: &[u64; CHARSET_LEN],
+    ) -> bool {
+        if count == 0 {
+            return true;
+        }
+        self.total += count;
+        let prefix_mask = unique_char_mask(prefix);
+        for (i, slot) in self.char_counts.iter_mut().enumerate() {
+            *slot += if prefix_mask & (1u32 << i) != 0 {
+                count
+            } else {
+                suffix_char_counts[i]
+            };
+        }
+        true
+    }
 }
 
 /// Scores each solution with the probability-based score from
@@ -208,6 +326,23 @@ pub struct TopNSink {
     /// Min-heap keyed on (score, expr) so the lowest-scoring kept solution is
     /// the cheapest to evict. `Reverse` turns the max-heap into a min-heap.
     heap: std::collections::BinaryHeap<std::cmp::Reverse<ScoredSolution>>,
+    /// Per-character score contributions (`prob + 50` for a top-5 character),
+    /// sorted descending. Used by [`may_accept`](SolutionSink::may_accept) to
+    /// bound the best score any completion of a prefix could reach.
+    ranked_gain: [(f64, u8); CHARSET_LEN],
+    /// Best "weakest kept score" published by *any* worker, as `f64` bits.
+    ///
+    /// A worker whose heap is full holds `n` solutions scoring at least its own
+    /// minimum, so the final merged top-`n` cannot contain anything below that
+    /// minimum either — which makes one worker's threshold a valid pruning
+    /// floor for all of them. Sharing it lets a thread that has not yet found
+    /// good solutions prune with its neighbours' progress, instead of each
+    /// thread having to rediscover a strong cutoff on its own.
+    ///
+    /// Read relaxed: a stale value only costs a missed prune, never a lost
+    /// solution, and the kept set is still decided by the exact per-heap
+    /// comparisons in [`push_scored`](Self::push_scored).
+    floor: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// A solution paired with its score. The `Ord` impl encodes *keep priority*
@@ -243,12 +378,161 @@ impl PartialOrd for ScoredSolution {
 
 impl TopNSink {
     pub fn new(n: usize, probs: [f64; CHARSET_LEN], top5_mask: u32) -> Self {
+        // Precompute what each character is worth the first time it appears,
+        // ranked best-first, so the prefix bound is a running prefix sum.
+        let mut ranked_gain = [(0.0f64, 0u8); CHARSET_LEN];
+        for i in 0..CHARSET_LEN {
+            let bonus = if top5_mask & (1u32 << i) != 0 {
+                50.0
+            } else {
+                0.0
+            };
+            ranked_gain[i] = (probs[i] + bonus, i as u8);
+        }
+        ranked_gain.sort_by(|a, b| b.0.total_cmp(&a.0));
+
         Self {
             n,
             probs,
             top5_mask,
             heap: std::collections::BinaryHeap::new(),
+            ranked_gain,
+            floor: None,
         }
+    }
+
+    /// Share a pruning floor with the other workers of a parallel solve. See
+    /// [`floor`](Self::floor); purely an optimization, the kept set is
+    /// unchanged.
+    pub fn with_shared_floor(
+        mut self,
+        floor: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.floor = Some(floor);
+        self
+    }
+
+    /// Publish this sink's threshold to its peers (see
+    /// [`floor`](Self::floor)). Used to seed the shared floor from solutions
+    /// gathered before the parallel phase starts.
+    pub fn publish_floor_now(&self) {
+        self.publish_floor();
+    }
+
+    /// Publish this sink's weakest kept score if it beats what is already
+    /// there. Only meaningful once the heap is full — before that the sink
+    /// would still accept anything, so it has no floor to contribute.
+    #[inline]
+    fn publish_floor(&self) {
+        if self.heap.len() < self.n {
+            return;
+        }
+        let Some(floor) = self.floor.as_ref() else {
+            return;
+        };
+        let Some(std::cmp::Reverse(min)) = self.heap.peek() else {
+            return;
+        };
+        let mine = min.score;
+        let mut cur = floor.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if f64::from_bits(cur) >= mine {
+                return;
+            }
+            match floor.compare_exchange_weak(
+                cur,
+                mine.to_bits(),
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+
+    /// The strongest pruning threshold available: this sink's own weakest kept
+    /// score, or a better one published by another worker. `None` while the
+    /// heap is not yet full and no peer has published — nothing can be pruned.
+    #[inline]
+    fn prune_threshold(&self) -> Option<f64> {
+        let own = if self.heap.len() < self.n {
+            None
+        } else {
+            self.heap.peek().map(|std::cmp::Reverse(m)| m.score)
+        };
+        let shared = self.floor.as_ref().and_then(|f| {
+            let v = f64::from_bits(f.load(std::sync::atomic::Ordering::Relaxed));
+            if v == f64::NEG_INFINITY {
+                None
+            } else {
+                Some(v)
+            }
+        });
+        match (own, shared) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    /// Upper bound on the score of any completion of `prefix` that adds at most
+    /// `remaining` further characters.
+    ///
+    /// The score is a sum over the *distinct* characters present, so the bound
+    /// is what the prefix already scores plus the `remaining` richest
+    /// characters it does not yet contain. No completion can beat that: each
+    /// added slot introduces at most one new distinct character, and the
+    /// ranked list is sorted by contribution descending.
+    #[inline]
+    fn score_upper_bound(&self, prefix: &[u8], remaining: usize) -> f64 {
+        // No knowledge of what the grammar can still emit: any character is
+        // assumed reachable.
+        self.score_upper_bound_masked(unique_char_mask(prefix), u32::MAX, remaining)
+    }
+
+    /// Upper bound given the characters already `present`, the set the
+    /// remaining grammar can still `reachable`ly produce, and how many
+    /// characters are left.
+    ///
+    /// Restricting the candidate gains to `reachable` is what makes this
+    /// tighter than [`score_upper_bound`](Self::score_upper_bound): the generic
+    /// bound credits a prefix with the richest characters in the whole charset,
+    /// most of which the right-hand-side grammar cannot produce at that point
+    /// (an operator position cannot yield a digit, a closed bracket cannot
+    /// reopen, and so on). It remains an over-estimate — each remaining slot
+    /// still contributes at most one new distinct character — so pruning
+    /// against it cannot discard a solution that would have been kept.
+    #[inline]
+    fn score_upper_bound_masked(&self, present: u32, reachable: u32, remaining: usize) -> f64 {
+        let mut bound = 0.0f64;
+        let mut m = present;
+        while m != 0 {
+            let i = m.trailing_zeros() as usize;
+            bound += self.probs[i];
+            if self.top5_mask & (1u32 << i) != 0 {
+                bound += 50.0;
+            }
+            m &= m - 1;
+        }
+        // Characters that could still be added: reachable, not already present.
+        let candidates = reachable & !present;
+        if candidates == 0 || remaining == 0 {
+            return bound;
+        }
+        let mut added = 0usize;
+        for &(gain, idx) in self.ranked_gain.iter() {
+            if added == remaining || gain <= 0.0 {
+                break;
+            }
+            if candidates & (1u32 << idx as u32) == 0 {
+                continue;
+            }
+            bound += gain;
+            added += 1;
+        }
+        bound
     }
 
     #[inline]
@@ -345,6 +629,37 @@ impl SolutionSink for TopNSink {
             expr: s.to_owned(),
         });
     }
+
+    /// Skip a subtree whose best conceivable score cannot displace the weakest
+    /// solution currently kept. Until the heap is full nothing can be pruned —
+    /// every solution is still a candidate.
+    #[inline]
+    fn may_accept(&mut self, prefix: &[u8], remaining: usize) -> bool {
+        self.publish_floor();
+        match self.prune_threshold() {
+            // Strictly-less is the only safe cut: on a tie the lexicographic
+            // rule can still prefer a completion over the current minimum.
+            Some(threshold) => self.score_upper_bound(prefix, remaining) >= threshold,
+            None => true,
+        }
+    }
+
+    const PRUNES: bool = true;
+
+    /// Prune inside the right-hand side, not just at its boundary. Deliberately
+    /// does *not* republish the shared floor: this runs once per automaton node
+    /// rather than once per left-hand side, and an atomic store at that rate
+    /// costs more than the sharpened bound saves. The floor is still refreshed
+    /// at every boundary by [`may_accept`](Self::may_accept).
+    #[inline]
+    fn may_accept_masked(&mut self, present: u32, reachable: u32, remaining: usize) -> bool {
+        match self.prune_threshold() {
+            Some(threshold) => {
+                self.score_upper_bound_masked(present, reachable, remaining) >= threshold
+            }
+            None => true,
+        }
+    }
 }
 
 /// Streams solutions to a writer as JSON Lines (one `{"solution":"..."}` per
@@ -429,6 +744,753 @@ impl<W: std::io::Write> SolutionSink for JsonlSink<'_, W> {
             self.flush_buf();
         }
     }
+}
+
+/// Fallback budget for the cached right-hand-side tables when the machine's
+/// available memory cannot be determined.
+const RHS_CACHE_FALLBACK_BYTES: usize = 512 * 1024 * 1024;
+
+/// Bytes of RAM this process may actually use.
+///
+/// `/proc/meminfo` describes the *host*, which inside a container is not a
+/// limit the process is allowed to reach: this sandbox reports 96 GB available
+/// while `memory.max` caps the cgroup at 8 GB, and crossing that gets the
+/// process OOM-killed rather than throttled. So take the smaller of what the
+/// host offers and what the cgroup still allows.
+fn available_memory_bytes() -> Option<usize> {
+    let host = meminfo_available_bytes();
+    match cgroup_memory_headroom() {
+        Some(headroom) => Some(host.map_or(headroom, |h| h.min(headroom))),
+        None => host,
+    }
+}
+
+fn meminfo_available_bytes() -> Option<usize> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: usize = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb.saturating_mul(1024))
+}
+
+/// Bytes still allowed by the memory cgroup (limit minus current usage), or
+/// `None` when unlimited/unreadable.
+fn cgroup_memory_headroom() -> Option<usize> {
+    let read = |path: &str| -> Option<usize> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let raw = raw.trim();
+        if raw == "max" {
+            return None;
+        }
+        raw.parse::<usize>().ok()
+    };
+
+    // cgroup v2, then v1. A v1 limit is "unlimited" as a huge sentinel value,
+    // which the host figure will dominate anyway.
+    let limit = read("/sys/fs/cgroup/memory.max")
+        .or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))?;
+    let used = read("/sys/fs/cgroup/memory.current")
+        .or_else(|| read("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+        .unwrap_or(0);
+    Some(limit.saturating_sub(used))
+}
+
+/// Total memory the cached right-hand-side tables may occupy.
+///
+/// The tables are the solver's only large allocation and are shared immutably
+/// by every thread, so half of available RAM is a reasonable default; set
+/// `SUMZLE_RHS_CACHE_MB` to pin it (0 disables the cache entirely). Positions
+/// whose table does not fit fall back to plain recursion, so an over-long
+/// expression degrades to baseline behavior instead of exhausting RAM.
+fn rhs_cache_budget_bytes() -> usize {
+    if let Ok(raw) = std::env::var("SUMZLE_RHS_CACHE_MB") {
+        if let Ok(mb) = raw.trim().parse::<usize>() {
+            return mb.saturating_mul(1024 * 1024);
+        }
+    }
+    // Two thirds of the headroom. Reserving capacity as it is charged (see
+    // `RhsCapture::reserve`) keeps real usage within a few percent of the
+    // budget — a 4.5 GB budget measured 4.66 GB peak RSS — so the remaining
+    // third is ample for the branch set, per-thread buffers and whatever
+    // consumes the solutions.
+    available_memory_bytes().map_or(RHS_CACHE_FALLBACK_BYTES, |avail| avail / 3 * 2)
+}
+
+/// Bytes one cached entry costs: its characters plus its value.
+#[inline]
+fn rhs_entry_cost(rhs_len: usize) -> usize {
+    rhs_len + std::mem::size_of::<i64>()
+}
+
+/// Number of integer-valued expressions of each length, measured by
+/// enumeration (index = length). This is the entry count of a cached RHS table,
+/// and depends only on the RHS length — the grammar for a `>` right-hand side
+/// reads nothing else.
+const RHS_ENTRY_COUNTS: [u64; 11] = [
+    0,
+    10,
+    31,
+    590,
+    3_211,
+    39_335,
+    278_203,
+    2_884_541,
+    22_978_704,
+    221_404_570,
+    1_800_000_000,
+];
+
+/// Growth factor per extra character, used beyond the measured table. The
+/// measured ratios run 8-10x; 12 keeps the estimate conservative (over-
+/// estimating only forgoes a table that would not have fit anyway).
+const RHS_GROWTH_PER_CHAR: u64 = 12;
+
+/// Whether a table for an RHS of `rhs_len` characters could fit in `budget`.
+///
+/// Deliberately optimistic at the boundary: the real capture still enforces the
+/// budget exactly, so a wrong "yes" costs one wasted enumeration, while a wrong
+/// "no" would silently forfeit the optimization.
+fn rhs_table_can_fit(rhs_len: usize, budget: usize) -> bool {
+    let entries = match RHS_ENTRY_COUNTS.get(rhs_len) {
+        Some(&n) => n,
+        None => {
+            let extra = (rhs_len - (RHS_ENTRY_COUNTS.len() - 1)) as u32;
+            RHS_ENTRY_COUNTS[RHS_ENTRY_COUNTS.len() - 1]
+                .saturating_mul(RHS_GROWTH_PER_CHAR.saturating_pow(extra))
+        }
+    };
+    entries.saturating_mul(rhs_entry_cost(rhs_len) as u64) <= budget as u64
+}
+
+/// Sink used to capture a right-hand-side subtree once, so it can be replayed
+/// for every left-hand side instead of being re-enumerated. Records only the
+/// RHS slice of each completed expression, in DFS order.
+///
+/// Captures for the branches of one table share a single `budget` counter,
+/// drawn down in coarse reservations so the atomic stays cold in the hot path.
+struct RhsCapture<'a> {
+    start: usize,
+    rhs_len: usize,
+    bytes: Vec<u8>,
+    values: Vec<i64>,
+    min_value: i64,
+    max_value: i64,
+    /// Remaining shared allowance, in bytes, for the whole table.
+    budget: &'a AtomicIsize,
+    /// Allowance already claimed from `budget` but not yet spent.
+    reserved: usize,
+    /// Set once the table blew its budget (or an entry failed to re-evaluate);
+    /// the table is then discarded and those positions fall back to recursion.
+    overflow: bool,
+}
+
+/// Bytes claimed from the shared budget per reservation.
+///
+/// Every branch may hold up to this much claimed-but-unspent, so the whole
+/// table over-reserves by at most `chunk x branches` while it is being built —
+/// with a few hundred branches, 1 MiB chunks would over-reserve by hundreds of
+/// megabytes and reject tables that comfortably fit. 64 KiB keeps that slack
+/// negligible while still amortizing the atomic over thousands of entries.
+const RHS_RESERVE_CHUNK: usize = 64 * 1024;
+
+impl RhsCapture<'_> {
+    #[inline]
+    fn record(&mut self, expr: &[u8], value: i64) {
+        if self.overflow {
+            return;
+        }
+        let cost = rhs_entry_cost(self.rhs_len);
+        if self.reserved < cost && !self.reserve(cost) {
+            return;
+        }
+        self.reserved -= cost;
+
+        self.bytes
+            .extend_from_slice(&expr[self.start..self.start + self.rhs_len]);
+        self.values.push(value);
+        self.min_value = self.min_value.min(value);
+        self.max_value = self.max_value.max(value);
+    }
+
+    /// Claim another chunk of the shared allowance and *materialize* it as
+    /// `Vec` capacity. Returns false (and marks overflow) if nothing is left.
+    ///
+    /// Growing the vectors here rather than letting `push` do it is what keeps
+    /// the budget honest: `Vec` doubles, so a table charged N bytes would
+    /// otherwise reach 2N of real capacity mid-growth — and with every branch
+    /// doubling at once, the peak overshoots the budget by far enough to be
+    /// OOM-killed. Reserving exactly what was charged makes the accounted
+    /// figure the true high-water mark.
+    #[cold]
+    fn reserve(&mut self, cost: usize) -> bool {
+        let take = RHS_RESERVE_CHUNK.max(cost);
+        // `fetch_sub` returns the value *before* the subtraction.
+        if self.budget.fetch_sub(take as isize, Ordering::Relaxed) < take as isize {
+            self.budget.fetch_add(take as isize, Ordering::Relaxed);
+            self.overflow = true;
+            self.bytes = Vec::new();
+            self.values = Vec::new();
+            return false;
+        }
+        self.reserved += take;
+
+        // Split the newly claimed bytes between the two vectors in the same
+        // proportion `rhs_entry_cost` charges them.
+        let entries = take / cost.max(1);
+        let need_bytes =
+            (self.bytes.len() + entries * self.rhs_len).saturating_sub(self.bytes.capacity());
+        if need_bytes > 0 {
+            self.bytes.reserve_exact(need_bytes);
+        }
+        let need_values = (self.values.len() + entries).saturating_sub(self.values.capacity());
+        if need_values > 0 {
+            self.values.reserve_exact(need_values);
+        }
+        true
+    }
+
+    /// Freeze into a table part, releasing the slack `Vec` growth leaves behind
+    /// so the accounted budget matches the real resident size.
+    fn finish(mut self) -> Option<RhsPart> {
+        // Hand back whatever was claimed but never spent, so the remaining
+        // allowance reflects real usage rather than reservation slack.
+        if self.reserved > 0 {
+            self.budget
+                .fetch_add(self.reserved as isize, Ordering::Relaxed);
+            self.reserved = 0;
+        }
+        if self.overflow {
+            return None;
+        }
+        self.bytes.shrink_to_fit();
+        self.values.shrink_to_fit();
+        Some(RhsPart {
+            bytes: self.bytes,
+            values: self.values,
+            min_value: self.min_value,
+            max_value: self.max_value,
+        })
+    }
+}
+
+impl SolutionSink for RhsCapture<'_> {
+    #[inline]
+    fn accept(&mut self, expr: &[u8]) {
+        // The search routes every `>` terminal through `accept_valued`; this
+        // path only exists to satisfy the trait, so it re-derives the value.
+        match evaluate_expression_solver_bytes(&expr[self.start..self.start + self.rhs_len])
+            .filter(|v| is_integer(*v))
+        {
+            Some(v) => self.record(expr, v as i64),
+            None => self.overflow = true,
+        }
+    }
+
+    #[inline]
+    fn accept_valued(&mut self, expr: &[u8], rhs_value: i64) {
+        self.record(expr, rhs_value);
+    }
+}
+
+/// A sink that throws everything away — used where a search is run purely to
+/// partition the tree and is asserted to reach no complete expression.
+struct NullSink;
+
+impl SolutionSink for NullSink {
+    #[inline]
+    fn accept(&mut self, _expr: &[u8]) {}
+}
+
+/// One branch's worth of a cached right-hand side, kept as its own allocation.
+///
+/// Parts are stored in branch order, which is DFS order, and each holds a whole
+/// number of entries — so iterating parts in order, then entries within a part,
+/// reproduces the serial DFS sequence exactly. Keeping them separate avoids the
+/// doubled peak a final concatenation would cost on a multi-gigabyte table.
+struct RhsPart {
+    bytes: Vec<u8>,
+    values: Vec<i64>,
+    min_value: i64,
+    max_value: i64,
+}
+
+/// A fully enumerated right-hand side of a `>` equation, for one main-operator
+/// position.
+///
+/// # Why this is sound
+///
+/// When `>` is placed at index `k`, the state entering the RHS is always the
+/// same regardless of what the left-hand side was:
+///
+/// * the bracket stack is empty — an LHS with an unclosed bracket fails to
+///   evaluate, so `>` is never placed after one;
+/// * the floor context is clean — `can_place_char` forbids a main operator
+///   inside `[...]`;
+/// * a second main operator is forbidden inside the RHS;
+/// * `char_counts` only feeds count-based constraints, so the table is built
+///   only when there are none (positional constraints are fine: they are
+///   indexed by position, which is fixed for a given `k`).
+///
+/// Everything else the grammar consults is a function of `(index, length)`,
+/// which is fixed once `k` is. So the RHS subtree is identical for every LHS
+/// and can be enumerated once and replayed.
+///
+/// Entries are stored in **DFS order** — the exact order the recursive search
+/// would have produced them — so replaying preserves solution ordering,
+/// `found_count` and `searched_count` bit-for-bit.
+struct RhsTable {
+    rhs_len: usize,
+    /// Number of complete expressions the subtree reaches, including those
+    /// that fail to evaluate. This is what the search adds to `searched_count`.
+    total_leaves: u64,
+    /// DFS-ordered entries, split into one part per build branch.
+    parts: Vec<RhsPart>,
+    min_value: i64,
+    max_value: i64,
+}
+
+impl RhsTable {
+    /// Number of cached entries.
+    fn len(&self) -> usize {
+        self.parts.iter().map(|p| p.values.len()).sum()
+    }
+
+    /// Resident bytes this table occupies — what it was charged to the budget.
+    fn mem_bytes(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|p| p.bytes.len() + p.values.len() * std::mem::size_of::<i64>())
+            .sum()
+    }
+
+    /// Emit every solution formed by this LHS value and the cached RHS set,
+    /// in the same order the recursive search would have produced them.
+    #[inline]
+    fn replay<S: SolutionSink>(
+        &self,
+        lhs_value: i64,
+        expr: &mut [u8],
+        start: usize,
+        sink: &mut S,
+        searched_count: &mut u64,
+    ) {
+        *searched_count += self.total_leaves;
+
+        // Nothing in the table can satisfy `lhs > rhs`: skip the scan entirely.
+        if lhs_value <= self.min_value {
+            return;
+        }
+
+        let rhs_len = self.rhs_len;
+        let end = start + rhs_len;
+
+        // Every entry in the table qualifies: emit them all without consulting
+        // a single bound. This is the common case for a long left-hand side.
+        if lhs_value > self.max_value {
+            for part in &self.parts {
+                for chunk in part.bytes.chunks_exact(rhs_len) {
+                    expr[start..end].copy_from_slice(chunk);
+                    sink.accept(expr);
+                }
+            }
+            return;
+        }
+
+        for part in &self.parts {
+            // Per-part bounds prune whole branches of the table for free.
+            if lhs_value <= part.min_value {
+                continue;
+            }
+            if lhs_value > part.max_value {
+                // Every entry in this part qualifies — skip the comparisons.
+                for chunk in part.bytes.chunks_exact(rhs_len) {
+                    expr[start..end].copy_from_slice(chunk);
+                    sink.accept(expr);
+                }
+            } else {
+                for (chunk, &value) in part.bytes.chunks_exact(rhs_len).zip(part.values.iter()) {
+                    if lhs_value > value {
+                        expr[start..end].copy_from_slice(chunk);
+                        sink.accept(expr);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Memory budget (deduplicated DFA nodes) for the grammar cache described
+/// below. A few hundred MB at L=12; the state space grows only linearly with
+/// the RHS length, so this stays well under the cgroup even at very large
+/// lengths.
+const DFA_NODE_BUDGET: u64 = 30_000_000;
+/// Rough upper bound on distinct grammar states per unit of RHS length — used
+/// only to skip a DFA that would exceed [`DFA_NODE_BUDGET`] before building it.
+const DFA_STATE_FACTOR: u64 = 350_000;
+
+/// Node budget for the grammar DFA, overridable with `SUMZLE_RHS_DFA_NODES`
+/// (0 disables the DFA entirely, falling back to plain recursion).
+fn dfa_node_budget() -> u64 {
+    if let Ok(raw) = std::env::var("SUMZLE_RHS_DFA_NODES") {
+        if let Ok(n) = raw.trim().parse::<u64>() {
+            return n;
+        }
+    }
+    DFA_NODE_BUDGET
+}
+/// RHS lengths beyond this are not worth caching with the grammar DFA; the
+/// uncached search is used instead (still memory-bounded).
+const DFA_MAX_RHS_LEN: usize = 80;
+
+/// How much more the index build costs than the index it produces.
+///
+/// The accumulator is a `HashMap` keyed by value, so each entry pays for a
+/// hash, control byte and the table's load-factor slack, and the map itself
+/// doubles as it grows. Charging the build a multiple of the packed size keeps
+/// the transient peak — which is what the process actually has to survive —
+/// inside the budget rather than only the finished structure.
+const VALUE_INDEX_BUILD_OVERHEAD: usize = 4;
+
+/// Largest right-hand-side subtree worth indexing, in leaves.
+///
+/// The index is built by one traversal of the subtree and then amortized over
+/// every left-hand side that reaches it. Past this size the build itself
+/// becomes the dominant cost, so those positions keep the ordinary replay path
+/// — which the branch-and-bound prune already handles well.
+const VALUE_INDEX_MAX_LEAVES: u64 = 200_000_000;
+
+/// Memory allowed for the aggregate `lhs > rhs` indexes (see
+/// [`RhsValueIndex`]), overridable with `SUMZLE_RHS_VALUE_INDEX_MB` (0
+/// disables them). The default is deliberately small — the index is bounded by
+/// the number of *distinct RHS values*, which is orders of magnitude below the
+/// solution count, so a few hundred MB is generous even at very large lengths
+/// and keeps the footprint compatible with the memory-bounded modes.
+fn value_index_budget_bytes() -> usize {
+    if let Ok(raw) = std::env::var("SUMZLE_RHS_VALUE_INDEX_MB") {
+        if let Ok(mb) = raw.trim().parse::<usize>() {
+            return mb.saturating_mul(1024 * 1024);
+        }
+    }
+    // 64 MB. The point of the bounded modes is that they stay small, so the
+    // index must not become the thing that breaks that promise; the collapse
+    // onto distinct values is steep enough that this covers the positions that
+    // matter (5 MB serves 64 million solutions at L=9).
+    64 * 1024 * 1024
+}
+
+/// A memory-cheap stand-in for [`RhsTable`] used when the full byte cache cannot
+/// fit the memory budget — exactly the situation at "extremely large" lengths,
+/// where the top-N / streaming modes must still run.
+///
+/// [`RhsTable`] stores every right-hand side as a byte string (`O(solutions)`
+/// memory, which blows the cgroup at scale). The RHS *grammar*, however, is
+/// independent of the left-hand side and depends only on a tiny, finite state:
+/// the position, the previous character, the floor context, the bracket stack,
+/// and the running operand value (itself capped at `MAX_OPERAND_VALUE = 30`).
+/// So the set of valid RHS expressions forms a small DFA. We enumerate that DFA
+/// **once** per main-operator position and replay it for every LHS, skipping
+/// the per-node grammar re-checks the uncached search would otherwise repeat
+/// for each LHS.
+///
+/// Nodes are deduplicated by grammar state via a memo, so the automaton is the
+/// minimal state graph: its size grows only *linearly* with the RHS length — a
+/// few hundred MB at L=12, comfortably under the 8 GB cap at very large lengths.
+/// Replay emits the same bytes, in the same DFS order, as the uncached search,
+/// so it is bit-for-bit equivalent.
+struct RhsDfa {
+    rhs_len: usize,
+    nodes: Vec<DfaNode>,
+    /// Index of the start state. Nodes are appended in post-order (children
+    /// before parents), so the root is *not* node 0 — it is whatever index the
+    /// top-level `build_dfa_node` call returned.
+    root_idx: u32,
+    total_leaves: u64,
+}
+
+/// One DFA node: the valid next characters (in the same order
+/// `fill_candidate_chars` emits them) and, for each, either the child node
+/// index or [`TERMINAL`] (this character completes a full RHS expression).
+struct DfaNode {
+    chars: Vec<u8>,
+    children: Vec<u32>,
+    /// Every character this node's subtree can still emit, as a charset
+    /// bitmask (this node's own outgoing characters plus, transitively, its
+    /// children's). Lets a score-bounded sink rule out a subtree from what the
+    /// *grammar* can produce rather than from the charset at large.
+    reachable: u32,
+}
+
+/// Aggregate answer to "how many right-hand sides satisfy `lhs > rhs`, and
+/// which characters do they contain?" — without touching a single right-hand
+/// side.
+///
+/// Character statistics never need the RHS strings themselves, only counts.
+/// Right-hand sides collapse hard onto their integer values (at L=9, 1.9M
+/// expressions share 26k distinct values), so storing one cumulative character
+/// histogram per *distinct value*, ordered by value, answers any `lhs > rhs`
+/// query with a binary search plus a `CHARSET_LEN` read. That replaces a walk
+/// over every (LHS, RHS) pair — `O(LHS x RHS)` — with `O(LHS log RHS)`, and the
+/// collapse factor *grows* with length (32x at L=6, 188x at L=9), so the win
+/// widens exactly where it is needed.
+///
+/// Memory is bounded by the number of distinct values, not the solution count:
+/// ~5 MB at L=9 against a solution set of 64 million.
+struct RhsValueIndex {
+    /// Distinct RHS values, ascending.
+    values: Vec<i64>,
+    /// `cum_counts[i]` = number of right-hand sides with value < `values[i]`.
+    cum_counts: Vec<u64>,
+    /// Flattened `CHARSET_LEN`-lane prefix sums: `cum_chars[i * CHARSET_LEN + c]`
+    /// = how many right-hand sides with value < `values[i]` contain character
+    /// `c`. One extra row past the end holds the totals.
+    cum_chars: Vec<u64>,
+}
+
+impl RhsValueIndex {
+    /// Resident bytes, for budgeting.
+    fn mem_bytes(&self) -> usize {
+        self.values.len() * std::mem::size_of::<i64>()
+            + self.cum_counts.len() * std::mem::size_of::<u64>()
+            + self.cum_chars.len() * std::mem::size_of::<u64>()
+    }
+
+    /// Aggregate over every right-hand side with `value < lhs_value`: the count
+    /// and the per-character totals.
+    #[inline]
+    fn query(&self, lhs_value: i64) -> (u64, [u64; CHARSET_LEN]) {
+        // Number of distinct values strictly below `lhs_value`.
+        let row = self.values.partition_point(|&v| v < lhs_value);
+        let count = self.cum_counts[row];
+        let mut chars = [0u64; CHARSET_LEN];
+        let base = row * CHARSET_LEN;
+        chars.copy_from_slice(&self.cum_chars[base..base + CHARSET_LEN]);
+        (count, chars)
+    }
+}
+
+/// Marker child index meaning "this edge completes a valid RHS expression".
+const TERMINAL: u32 = u32::MAX;
+
+impl RhsDfa {
+    /// Emit every solution formed by this LHS value and the enumerated RHS
+    /// grammar, in the same order the recursive search would have produced
+    /// them. Mirrors [`RhsTable::replay`] but regenerates the RHS bytes on the
+    /// fly from the DFA instead of copying a stored list.
+    #[inline]
+    fn replay<S: SolutionSink>(
+        &self,
+        lhs_value: i64,
+        expr: &mut [u8],
+        start: usize,
+        sink: &mut S,
+        searched_count: &mut u64,
+    ) {
+        *searched_count += self.total_leaves;
+        if self.total_leaves == 0 {
+            return;
+        }
+        // The whole subtree is charged to `searched_count` up front, so any
+        // pruning inside `walk` changes only the work done, never the reported
+        // statistics.
+        let present = unique_char_mask(&expr[..start]);
+        self.walk(self.root_idx, 0, expr, start, lhs_value, sink, present);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk<S: SolutionSink>(
+        &self,
+        node_idx: u32,
+        depth: usize,
+        expr: &mut [u8],
+        start: usize,
+        lhs_value: i64,
+        sink: &mut S,
+        present: u32,
+    ) {
+        let node = &self.nodes[node_idx as usize];
+        let rhs_len = self.rhs_len;
+        // Ask once per node whether anything this subtree can still produce is
+        // worth having. `S::PRUNES` is a compile-time constant, so for sinks
+        // that keep everything the whole block — and the `present` bookkeeping
+        // below — is eliminated by the optimizer.
+        if S::PRUNES && !sink.may_accept_masked(present, node.reachable, rhs_len - depth) {
+            return;
+        }
+        for i in 0..node.chars.len() {
+            let ch = node.chars[i];
+            let child = node.children[i];
+            expr[start + depth] = ch;
+            if child == TERMINAL {
+                let right_side = &expr[start..start + rhs_len];
+                if let Some(rv) = evaluate_expression_solver_bytes(right_side) {
+                    if is_integer(rv) {
+                        let rhs_value = rv as i64;
+                        if lhs_value > rhs_value {
+                            sink.accept_valued(expr, rhs_value);
+                        }
+                    }
+                }
+            } else {
+                let next_present = if S::PRUNES {
+                    present | (1u32 << idx_of(ch))
+                } else {
+                    present
+                };
+                self.walk(child, depth + 1, expr, start, lhs_value, sink, next_present);
+            }
+        }
+    }
+
+    /// Build the aggregate [`RhsValueIndex`] by walking this automaton once.
+    ///
+    /// One traversal of the whole right-hand-side set — the same work a
+    /// *single* left-hand side would cost — buys `O(log)` aggregate queries for
+    /// every left-hand side thereafter. Returns `None` if the index would
+    /// exceed `budget_bytes`.
+    fn build_value_index(&self, budget_bytes: usize) -> Option<RhsValueIndex> {
+        // Per distinct value: how many right-hand sides have it, and how many
+        // of those contain each character. One map, so the transient build
+        // footprint is the same order as the finished index.
+        let mut acc: HashMap<i64, (u64, [u64; CHARSET_LEN])> = HashMap::new();
+        let mut buf = vec![NO_CHAR; self.rhs_len];
+
+        // Cap the distinct-value count so the *build* stays inside the budget,
+        // not just the finished index. The accumulator is a hash map, which
+        // carries hashes, control bytes and load-factor slack on top of each
+        // entry, so it is charged several times the packed cost — otherwise a
+        // position with a huge value set balloons right up to the moment it is
+        // rejected, and the peak lands well above the budget it was meant to
+        // respect.
+        let packed_per_value = std::mem::size_of::<i64>()
+            + std::mem::size_of::<u64>()
+            + CHARSET_LEN * std::mem::size_of::<u64>();
+        let max_values = budget_bytes / (packed_per_value * VALUE_INDEX_BUILD_OVERHEAD).max(1);
+
+        self.collect_values(
+            self.root_idx,
+            0,
+            &mut buf,
+            &mut |value, mask, acc: &mut HashMap<i64, (u64, [u64; CHARSET_LEN])>| {
+                let entry = acc.entry(value).or_insert((0, [0u64; CHARSET_LEN]));
+                entry.0 += 1;
+                let mut m = mask;
+                while m != 0 {
+                    let i = m.trailing_zeros() as usize;
+                    entry.1[i] += 1;
+                    m &= m - 1;
+                }
+            },
+            &mut acc,
+            max_values,
+        )?;
+
+        let mut values: Vec<i64> = acc.keys().copied().collect();
+        values.sort_unstable();
+
+        // Prefix sums, so a query is "everything strictly below this value".
+        let rows = values.len() + 1;
+        let mut cum_counts = vec![0u64; rows];
+        let mut cum_chars = vec![0u64; rows * CHARSET_LEN];
+        let mut running = 0u64;
+        let mut running_chars = [0u64; CHARSET_LEN];
+        for (row, &v) in values.iter().enumerate() {
+            cum_counts[row] = running;
+            cum_chars[row * CHARSET_LEN..(row + 1) * CHARSET_LEN].copy_from_slice(&running_chars);
+            let (count, lanes) = &acc[&v];
+            running += count;
+            for i in 0..CHARSET_LEN {
+                running_chars[i] += lanes[i];
+            }
+        }
+        cum_counts[rows - 1] = running;
+        cum_chars[(rows - 1) * CHARSET_LEN..rows * CHARSET_LEN].copy_from_slice(&running_chars);
+
+        let index = RhsValueIndex {
+            values,
+            cum_counts,
+            cum_chars,
+        };
+        (index.mem_bytes() <= budget_bytes).then_some(index)
+    }
+
+    /// Enumerate every right-hand side once, folding `(value, char mask)` into
+    /// `acc`. Returns `None` as soon as `acc` exceeds `max_values` distinct
+    /// values — the index would not fit its budget, and bailing there keeps the
+    /// *build* bounded too, not just the finished index.
+    fn collect_values(
+        &self,
+        node_idx: u32,
+        depth: usize,
+        buf: &mut [u8],
+        emit: &mut impl FnMut(i64, u32, &mut HashMap<i64, (u64, [u64; CHARSET_LEN])>),
+        acc: &mut HashMap<i64, (u64, [u64; CHARSET_LEN])>,
+        max_values: usize,
+    ) -> Option<()> {
+        let node = &self.nodes[node_idx as usize];
+        for i in 0..node.chars.len() {
+            let ch = node.chars[i];
+            let child = node.children[i];
+            buf[depth] = ch;
+            if child == TERMINAL {
+                if let Some(rv) = evaluate_expression_solver_bytes(&buf[..self.rhs_len]) {
+                    if is_integer(rv) {
+                        emit(rv as i64, unique_char_mask(&buf[..self.rhs_len]), acc);
+                        if acc.len() > max_values {
+                            return None;
+                        }
+                    }
+                }
+            } else {
+                self.collect_values(child, depth + 1, buf, emit, acc, max_values)?;
+            }
+        }
+        Some(())
+    }
+}
+
+/// Pack the RHS grammar state into a single `u64` key. The grammar depends only
+/// on these components (all finite and small, since the operand value is capped
+/// at `MAX_OPERAND_VALUE`); for unconstrained puzzles it does not depend on
+/// `char_counts`, so this key fully determines the candidate set.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn pack_dfa_state(
+    abs_index: usize,
+    prev_char: Option<u8>,
+    floor: FloorContext,
+    bracket_stack: &[u8],
+    stack_len: usize,
+    num_len: u8,
+    num_value: i64,
+    num_leading_zero: bool,
+) -> u64 {
+    let prev_code: u8 = match prev_char {
+        None => 31,
+        Some(b'>') => 30,
+        Some(c) => idx_of(c) as u8,
+    };
+    let mut key = 0u64;
+    key |= abs_index as u64 & 0xFF;
+    key |= (prev_code as u64 & 0x1F) << 8;
+    key |= ((floor.in_floor as u64) & 1) << 13;
+    key |= ((floor.has_slash_in_current_floor as u64) & 1) << 14;
+    // Bracket stack: 5 levels x 2 bits (0 = empty, 1 = '(', 2 = '[').
+    // `take(stack_len.min(5))` keeps the semantics of the original
+    // `if i < stack_len { bracket_stack[i] } else { 0 }` — positions past the
+    // live stack are encoded as 0, not as whatever `NO_CHAR` byte lingers in
+    // the backing buffer.
+    for (i, slot) in bracket_stack.iter().take(stack_len.min(5)).enumerate() {
+        let code = match *slot {
+            b'(' => 1u64,
+            b'[' => 2u64,
+            _ => 0u64,
+        };
+        key |= code << (15 + 2 * i);
+    }
+    key |= ((stack_len as u64) & 0x7) << 25;
+    key |= ((num_len as u64) & 0x3) << 28;
+    key |= ((num_value as u64) & 0x1F) << 30;
+    key |= ((num_leading_zero as u64) & 1) << 35;
+    key
 }
 
 #[derive(Debug, Clone)]
@@ -1125,16 +2187,748 @@ pub struct Solver {
     pub length: usize,
     pub gk: GlobalKnowledge,
     prepared: PreparedKnowledge,
+    /// Cached right-hand-side enumerations for `>` equations, indexed by the
+    /// main operator's position. `None` where caching does not apply (position
+    /// can't hold `>`, or the table exceeded its memory budget).
+    ///
+    /// Empty when the puzzle carries count-based constraints, which make the
+    /// RHS subtree depend on the LHS's character usage — the one case where the
+    /// "same subtree for every LHS" invariant does not hold.
+    rhs_tables: Vec<Option<RhsTable>>,
+    /// Memory-cheap RHS grammar DFA (see [`RhsDfa`]), used where the byte cache
+    /// was skipped because it would not fit — i.e. at extremely large lengths.
+    /// Mirrors `rhs_tables` in indexing; the two are mutually exclusive per
+    /// position (a position uses the byte cache when it fits, else the DFA).
+    rhs_dfas: Vec<Option<RhsDfa>>,
+    /// Aggregate `lhs > rhs` index (see [`RhsValueIndex`]), indexed like
+    /// `rhs_dfas`. Lets sinks that need only counts absorb a whole right-hand
+    /// side subtree with one lookup instead of enumerating it.
+    ///
+    /// Built lazily on first use: it costs a full traversal of the
+    /// right-hand-side set, which would be pure waste for a solve that emits
+    /// or ranks solutions (they cannot use aggregates). `OnceLock` makes the
+    /// first counting solve pay for it and every later one free, while keeping
+    /// `Solver` shareable across threads.
+    rhs_value_indexes: std::sync::OnceLock<Vec<Option<RhsValueIndex>>>,
 }
 
 impl Solver {
     pub fn new(length: usize, gk: GlobalKnowledge) -> Self {
         let prepared = PreparedKnowledge::new(length, &gk);
-        Self {
+        let mut solver = Self {
             length,
             gk,
             prepared,
+            rhs_tables: Vec::new(),
+            rhs_dfas: Vec::new(),
+            rhs_value_indexes: std::sync::OnceLock::new(),
+        };
+        solver.rhs_tables = solver.build_rhs_tables();
+        solver.rhs_dfas = solver.build_rhs_dfas();
+        solver
+    }
+
+    /// The aggregate indexes, built on first use (see
+    /// [`rhs_value_indexes`](Self::rhs_value_indexes)).
+    #[inline]
+    fn value_indexes(&self) -> &[Option<RhsValueIndex>] {
+        self.rhs_value_indexes
+            .get_or_init(|| self.build_rhs_value_indexes())
+    }
+
+    /// Per-position `(rhs_len, entries, bytes_used)` for the cached RHS tables.
+    /// Diagnostic aid for sizing the memory budget; empty entries are omitted.
+    pub fn rhs_table_stats(&self) -> Vec<(usize, usize, usize, usize)> {
+        self.rhs_tables
+            .iter()
+            .enumerate()
+            .filter_map(|(k, t)| t.as_ref().map(|t| (k, t.rhs_len, t.len(), t.mem_bytes())))
+            .collect()
+    }
+
+    /// Exact number of complete expressions the right-hand-side subtree of a
+    /// `>` at index `k` reaches — i.e. what the search would add to its
+    /// "searched" statistic by walking it.
+    ///
+    /// Only available where the subtree was enumerated up front (byte cache or
+    /// grammar DFA). `None` elsewhere, which forces the caller to walk the
+    /// subtree normally rather than guess at the count.
+    #[inline]
+    fn rhs_subtree_leaves(&self, k: usize) -> Option<u64> {
+        if let Some(Some(t)) = self.rhs_tables.get(k) {
+            return Some(t.total_leaves);
         }
+        if let Some(Some(d)) = self.rhs_dfas.get(k) {
+            return Some(d.total_leaves);
+        }
+        None
+    }
+
+    /// Build the aggregate `lhs > rhs` index (see [`RhsValueIndex`]) for every
+    /// position that has a grammar DFA to enumerate it from.
+    ///
+    /// Each index costs one traversal of its right-hand-side set — the same
+    /// work a single left-hand side would have cost — and then serves every
+    /// left-hand side with a binary search.
+    ///
+    /// Positions are indexed largest-first so the budget goes where the most
+    /// work is saved, and one at a time: the build accumulator is transient but
+    /// large, and running several at once would multiply the peak by the thread
+    /// count — the opposite of what a memory-bounded mode promises. The
+    /// traversal itself is the expensive part and is already parallel inside
+    /// [`RhsDfa::build_value_index`].
+    fn build_rhs_value_indexes(&self) -> Vec<Option<RhsValueIndex>> {
+        if self.rhs_dfas.is_empty() {
+            return Vec::new();
+        }
+        let mut remaining = value_index_budget_bytes();
+        if remaining == 0 {
+            return Vec::new();
+        }
+
+        let mut order: Vec<usize> = (0..self.rhs_dfas.len())
+            .filter(|&k| {
+                self.rhs_dfas[k]
+                    .as_ref()
+                    // Building the index walks the right-hand-side set once,
+                    // which only pays off when many left-hand sides query it.
+                    // Past this size the traversal costs more than it saves and
+                    // the position keeps the ordinary replay path.
+                    .is_some_and(|d| d.total_leaves <= VALUE_INDEX_MAX_LEAVES)
+            })
+            .collect();
+        order.sort_by_key(|&k| std::cmp::Reverse(self.rhs_dfas[k].as_ref().unwrap().total_leaves));
+
+        let mut indexes: Vec<Option<RhsValueIndex>> =
+            (0..self.rhs_dfas.len()).map(|_| None).collect();
+        for k in order {
+            if remaining == 0 {
+                break;
+            }
+            let dfa = self.rhs_dfas[k].as_ref().unwrap();
+            if let Some(index) = dfa.build_value_index(remaining) {
+                remaining -= index.mem_bytes().min(remaining);
+                indexes[k] = Some(index);
+            }
+        }
+        indexes
+    }
+
+    /// Per-position `(k, distinct_values, bytes)` for the aggregate value
+    /// indexes. Diagnostic aid for sizing their budget.
+    pub fn rhs_value_index_stats(&self) -> Vec<(usize, usize, usize)> {
+        self.value_indexes()
+            .iter()
+            .enumerate()
+            .filter_map(|(k, v)| v.as_ref().map(|v| (k, v.values.len(), v.mem_bytes())))
+            .collect()
+    }
+
+    /// Per-position `(rhs_len, nodes, root_idx, total_leaves)` for the grammar
+    /// DFAs. Diagnostic aid for sizing [`DFA_NODE_BUDGET`].
+    pub fn rhs_dfa_stats(&self) -> Vec<(usize, usize, usize, u64)> {
+        self.rhs_dfas
+            .iter()
+            .enumerate()
+            .filter_map(|(k, d)| {
+                d.as_ref()
+                    .map(|d| (k, d.rhs_len, d.nodes.len(), d.total_leaves))
+            })
+            .collect()
+    }
+
+    /// Whether the cached-RHS optimization may be used for this puzzle.
+    ///
+    /// The cache replays one enumeration of the RHS subtree for every LHS, so
+    /// it is only valid when that subtree does not depend on the LHS.
+    ///
+    /// *Count* constraints (`must_appear_min_count` / `must_appear_exact_count`)
+    /// break this: whether an RHS character is placeable depends on how many
+    /// times the LHS already used it. Those puzzles keep the original path.
+    ///
+    /// *Positional* constraints (fixed chars, cannot-be-at, globally forbidden)
+    /// are safe — they are indexed by absolute position, which is fixed once the
+    /// operator position is, and the capture run applies them exactly as the
+    /// normal search would.
+    #[inline]
+    fn rhs_cache_applicable(&self) -> bool {
+        self.prepared.constrained_indices.is_empty()
+    }
+
+    /// Enumerate, once per main-operator position, the complete set of
+    /// right-hand sides a `>` equation can take, along with each one's value.
+    ///
+    /// Built eagerly in `new` so every thread of a parallel solve shares one
+    /// immutable copy through the `&Solver` it already holds.
+    fn build_rhs_tables(&self) -> Vec<Option<RhsTable>> {
+        if !self.rhs_cache_applicable() {
+            return Vec::new();
+        }
+
+        let mut remaining = rhs_cache_budget_bytes();
+        if remaining == 0 {
+            return Vec::new();
+        }
+
+        // `>` must have at least one character on each side.
+        let mut tables: Vec<Option<RhsTable>> = (0..self.length).map(|_| None).collect();
+
+        // Build the *longest* right-hand side first, then work down.
+        //
+        // The saving from caching position `k` is proportional to the work its
+        // subtree represents — (number of left-hand sides) × (size of the RHS
+        // subtree) — and that product is overwhelmingly dominated by the
+        // smallest `k`, where the RHS spans nearly the whole expression. It is
+        // not close: at L=10, caching every position *except* k=1 runs in
+        // 46.7s, versus 48.2s with no cache at all and 7.5s with k=1 included.
+        // The one giant table is the optimization; the rest are rounding error.
+        //
+        // So the budget must go to the biggest table first. Spending it on the
+        // cheap ones would leave nothing for the only one that matters.
+        #[allow(clippy::needless_range_loop)]
+        for k in 1..self.length.saturating_sub(1) {
+            // Enumerating a table that cannot possibly fit is pure waste — at
+            // L=12 the k=1 attempt burned 160 s of a 184 s build before hitting
+            // the budget and throwing everything away. The entry count depends
+            // only on the RHS length, so predict it and skip.
+            if !rhs_table_can_fit(self.length - k - 1, remaining) {
+                continue;
+            }
+            // Skip positions where `>` itself cannot be placed; there is no RHS
+            // subtree to cache.
+            if self.prepared.is_globally_forbidden(b'>')
+                || self.prepared.cannot_be_at(k, b'>')
+                || (self.prepared.fixed_chars[k] != NO_CHAR && self.prepared.fixed_chars[k] != b'>')
+            {
+                continue;
+            }
+            if let Some(table) = self.build_rhs_table(k, remaining) {
+                remaining -= table.mem_bytes().min(remaining);
+                tables[k] = Some(table);
+            }
+        }
+
+        tables
+    }
+
+    /// Build the memory-cheap RHS grammar DFA (see [`RhsDfa`]) for every
+    /// main-operator position where the full byte cache was skipped — i.e. the
+    /// positions too large to fit in the byte-cache budget, which is precisely
+    /// where the uncached search would otherwise re-walk the RHS subtree for
+    /// every left-hand side. Built largest-RHS-first within [`DFA_NODE_BUDGET`].
+    fn build_rhs_dfas(&self) -> Vec<Option<RhsDfa>> {
+        if !self.rhs_cache_applicable() {
+            return Vec::new();
+        }
+        let mut remaining = dfa_node_budget();
+        if remaining == 0 {
+            return Vec::new();
+        }
+        let mut dfas: Vec<Option<RhsDfa>> = (0..self.length).map(|_| None).collect();
+
+        #[allow(clippy::needless_range_loop)]
+        for k in 1..self.length.saturating_sub(1) {
+            // Skip positions already covered by the byte cache. `rhs_tables`
+            // may be empty when the byte-cache budget is zero (every position
+            // falls back to the DFA), so index it bounds-safely.
+            if self.rhs_tables.get(k).is_some_and(|t| t.is_some()) {
+                continue;
+            }
+            let rhs_len = self.length - k - 1;
+            if rhs_len == 0 || rhs_len > DFA_MAX_RHS_LEN {
+                continue;
+            }
+            // Skip positions where `>` itself cannot be placed.
+            if self.prepared.is_globally_forbidden(b'>')
+                || self.prepared.cannot_be_at(k, b'>')
+                || (self.prepared.fixed_chars[k] != NO_CHAR && self.prepared.fixed_chars[k] != b'>')
+            {
+                continue;
+            }
+            // Cheap upper bound on the deduplicated node count; skip rather than
+            // build a DFA that would blow the budget.
+            if (rhs_len as u64 + 1) * DFA_STATE_FACTOR > remaining {
+                continue;
+            }
+            if let Some(dfa) = self.build_rhs_dfa(k) {
+                let n = dfa.nodes.len() as u64;
+                if n <= remaining {
+                    remaining -= n;
+                    dfas[k] = Some(dfa);
+                }
+            }
+        }
+
+        dfas
+    }
+
+    /// Enumerate the RHS grammar DFA for `>` at index `k`.
+    ///
+    /// Calls the *same* `fill_candidate_chars` + `can_place_char` + floor
+    /// `min_needed` prune the uncached search uses, so the replayed set and its
+    /// order are identical. Nodes are deduplicated by packed grammar state,
+    /// bounding memory to the finite state space.
+    fn build_rhs_dfa(&self, k: usize) -> Option<RhsDfa> {
+        let length = self.length;
+        let start = k + 1;
+        let rhs_len = length - start;
+        if rhs_len == 0 {
+            return None;
+        }
+        let mut nodes: Vec<DfaNode> = Vec::new();
+        let mut memo: HashMap<u64, u32> = HashMap::new();
+        let mut bracket_buf = vec![NO_CHAR; length];
+        let root_key = pack_dfa_state(
+            start,
+            Some(b'>'),
+            FloorContext::new(),
+            &bracket_buf,
+            0,
+            0,
+            0,
+            false,
+        );
+        let root_idx = self.build_dfa_node(
+            root_key,
+            start,
+            Some(b'>'),
+            FloorContext::new(),
+            &mut bracket_buf,
+            0,
+            0u8,
+            0i64,
+            false,
+            &mut nodes,
+            &mut memo,
+            length,
+        );
+        if nodes.is_empty() {
+            return None;
+        }
+
+        // Count the *complete RHS strings* (root-to-terminal paths). Because
+        // nodes are deduplicated, the number of terminal edges in the graph is
+        // not the number of expressions — the same sub-automaton is shared by
+        // many prefixes — so the path count must be accumulated explicitly.
+        // Every child was pushed before its parent, so a single forward pass
+        // over `nodes` visits children first.
+        let mut leaf_counts: Vec<u64> = vec![0; nodes.len()];
+        for i in 0..nodes.len() {
+            let mut sum = 0u64;
+            for &child in &nodes[i].children {
+                sum += if child == TERMINAL {
+                    1
+                } else {
+                    leaf_counts[child as usize]
+                };
+            }
+            leaf_counts[i] = sum;
+        }
+        let total_leaves = leaf_counts[root_idx as usize];
+        if total_leaves == 0 {
+            return None;
+        }
+
+        // Drop edges into sub-automata that can never complete an expression.
+        // They emit nothing, so replay stays bit-identical while skipping the
+        // dead branches the uncached search would have walked into.
+        for node in &mut nodes {
+            if node
+                .children
+                .iter()
+                .any(|&c| c != TERMINAL && leaf_counts[c as usize] == 0)
+            {
+                let mut chars = Vec::with_capacity(node.chars.len());
+                let mut children = Vec::with_capacity(node.children.len());
+                for (&ch, &child) in node.chars.iter().zip(node.children.iter()) {
+                    if child != TERMINAL && leaf_counts[child as usize] == 0 {
+                        continue;
+                    }
+                    chars.push(ch);
+                    children.push(child);
+                }
+                node.chars = chars;
+                node.children = children;
+            }
+        }
+
+        // Propagate the reachable-character sets. Children are pushed before
+        // their parents, so one forward pass suffices — and it must come after
+        // dead-branch pruning, or characters that only occur on branches that
+        // can never complete would loosen every bound above them.
+        for i in 0..nodes.len() {
+            let mut mask = 0u32;
+            for (&ch, &child) in nodes[i].chars.iter().zip(nodes[i].children.iter()) {
+                mask |= 1u32 << idx_of(ch);
+                if child != TERMINAL {
+                    mask |= nodes[child as usize].reachable;
+                }
+            }
+            nodes[i].reachable = mask;
+        }
+
+        Some(RhsDfa {
+            rhs_len,
+            nodes,
+            root_idx,
+            total_leaves,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_dfa_node(
+        &self,
+        key: u64,
+        abs_index: usize,
+        prev_char: Option<u8>,
+        floor: FloorContext,
+        bracket_stack: &mut [u8],
+        stack_len: usize,
+        num_len: u8,
+        num_value: i64,
+        num_leading_zero: bool,
+        nodes: &mut Vec<DfaNode>,
+        memo: &mut HashMap<u64, u32>,
+        length: usize,
+    ) -> u32 {
+        if let Some(&idx) = memo.get(&key) {
+            return idx;
+        }
+        // Floor-context `min_needed` prune — the only prune the uncached RHS
+        // walk applies here (count constraints are absent for the unconstrained
+        // puzzles this DFA is built for).
+        let remaining = length - abs_index;
+        if floor.in_floor {
+            let min_needed = if floor.has_slash_in_current_floor {
+                1
+            } else {
+                3
+            };
+            if remaining < min_needed {
+                let idx = nodes.len() as u32;
+                nodes.push(DfaNode {
+                    chars: Vec::new(),
+                    children: Vec::new(),
+                    reachable: 0,
+                });
+                memo.insert(key, idx);
+                return idx;
+            }
+        }
+
+        let mut out = [NO_CHAR; CHARSET_LEN];
+        let count = fill_candidate_chars(
+            abs_index,
+            prev_char,
+            length,
+            Some(b'>'),
+            floor,
+            &self.prepared,
+            &mut out,
+        );
+        let mut chars: Vec<u8> = Vec::with_capacity(count.min(CHARSET_LEN));
+        let mut children: Vec<u32> = Vec::with_capacity(count.min(CHARSET_LEN));
+        let empty_counts = [0u8; CHARSET_LEN];
+        for &ch in &out[..count] {
+            if !can_place_char(
+                ch,
+                idx_of(ch),
+                abs_index,
+                prev_char,
+                Some(b'>'),
+                &empty_counts,
+                floor,
+                bracket_stack,
+                stack_len,
+                &self.prepared,
+                length,
+                num_len,
+                num_value,
+                num_leading_zero,
+            ) {
+                continue;
+            }
+            chars.push(ch);
+            let next_floor = update_floor_context(ch, floor);
+            let (next_num_len, next_num_value, next_leading) = if is_digit_b(ch) {
+                if prev_char.is_some_and(is_digit_b) {
+                    (
+                        num_len + 1,
+                        num_value * 10 + (ch - b'0') as i64,
+                        num_leading_zero,
+                    )
+                } else {
+                    (1u8, (ch - b'0') as i64, ch == b'0')
+                }
+            } else {
+                (0u8, 0i64, false)
+            };
+            let saved_slot = if matches!(ch, b'(' | b'[') {
+                let s = bracket_stack[stack_len];
+                bracket_stack[stack_len] = ch;
+                s
+            } else {
+                NO_CHAR
+            };
+            let next_stack_len = match ch {
+                b'(' | b'[' => stack_len + 1,
+                b')' | b']' => stack_len - 1,
+                _ => stack_len,
+            };
+            if abs_index + 1 == length {
+                children.push(TERMINAL);
+            } else {
+                let child_key = pack_dfa_state(
+                    abs_index + 1,
+                    Some(ch),
+                    next_floor,
+                    &bracket_stack[..next_stack_len],
+                    next_stack_len,
+                    next_num_len,
+                    next_num_value,
+                    next_leading,
+                );
+                let child_idx = self.build_dfa_node(
+                    child_key,
+                    abs_index + 1,
+                    Some(ch),
+                    next_floor,
+                    bracket_stack,
+                    next_stack_len,
+                    next_num_len,
+                    next_num_value,
+                    next_leading,
+                    nodes,
+                    memo,
+                    length,
+                );
+                children.push(child_idx);
+            }
+            if matches!(ch, b'(' | b'[') {
+                bracket_stack[stack_len] = saved_slot;
+            }
+        }
+        let idx = nodes.len() as u32;
+        nodes.push(DfaNode {
+            chars,
+            children,
+            // Filled in by a forward pass once the graph is complete; children
+            // are already present here, but dead-branch pruning still has to
+            // run first, so computing it now would be wrong.
+            reachable: 0,
+        });
+        memo.insert(key, idx);
+        idx
+    }
+
+    /// Enumerate the RHS subtree for `>` at index `k`.
+    ///
+    /// This runs the *same* `recursive_search` the solver would have run, with
+    /// the same state it would have had — so the captured set, and its order,
+    /// are exactly what the uncached search produces. Only the LHS bytes differ,
+    /// and the RHS grammar never reads them (see [`RhsTable`]).
+    /// Building a table is itself a full enumeration of the RHS subtree — at
+    /// large lengths the single most expensive phase of the whole solve — so it
+    /// runs on every core. The subtree is split into prefix branches exactly
+    /// like a parallel solve, and because the cut is placed *strictly before*
+    /// the final index no expression can complete during partitioning: the
+    /// branches therefore tile the DFS sequence in order, and concatenating
+    /// their captures reproduces the serial order entry for entry.
+    fn build_rhs_table(&self, k: usize, budget_bytes: usize) -> Option<RhsTable> {
+        let rhs_len = self.length - k - 1;
+        debug_assert!(rhs_len >= 1);
+
+        let budget = AtomicIsize::new(budget_bytes as isize);
+        let (branches, collect_searched) = self.collect_rhs_branches(k);
+        // Nothing may terminate before the cut, or the branches would no longer
+        // cover the whole subtree.
+        debug_assert_eq!(collect_searched, 0);
+
+        let outcomes: Vec<Option<(RhsPart, u64)>> = if branches.is_empty() {
+            // RHS too short to partition: capture it in one go.
+            vec![self.capture_rhs_subtree(k, None, &budget)]
+        } else {
+            branches
+                .par_iter()
+                .map(|branch| {
+                    // One branch blowing the budget dooms the whole table, so
+                    // don't start branches that would only be thrown away.
+                    if budget.load(Ordering::Relaxed) <= 0 {
+                        return None;
+                    }
+                    self.capture_rhs_subtree(k, Some(branch), &budget)
+                })
+                .collect()
+        };
+
+        let mut parts: Vec<RhsPart> = Vec::with_capacity(outcomes.len());
+        let mut total_leaves = collect_searched;
+        let mut min_value = i64::MAX;
+        let mut max_value = i64::MIN;
+        for outcome in outcomes {
+            // Any branch that blew the budget invalidates the whole table.
+            let (part, searched) = outcome?;
+            total_leaves += searched;
+            if !part.values.is_empty() {
+                min_value = min_value.min(part.min_value);
+                max_value = max_value.max(part.max_value);
+                parts.push(part);
+            }
+        }
+
+        Some(RhsTable {
+            rhs_len,
+            total_leaves,
+            parts,
+            min_value,
+            max_value,
+        })
+    }
+
+    /// Partition the RHS subtree of a `>` at index `k` into prefix branches,
+    /// deepening the cut until there is plenty of work per core. Returns an
+    /// empty branch list when the RHS is too short to split.
+    fn collect_rhs_branches(&self, k: usize) -> (Vec<Branch>, u64) {
+        // The cut must stay strictly inside the RHS: `k + 1` would just hand
+        // back the root, and `self.length` would let expressions complete.
+        let max_cut = self.length - 1;
+        if k + 2 > max_cut {
+            return (Vec::new(), 0);
+        }
+
+        let target = rayon::current_num_threads().saturating_mul(16).max(16);
+        let mut cut = k + 2;
+        let (mut branches, mut searched) = self.collect_rhs_branches_at(k, cut);
+        while branches.len() < target && cut < max_cut {
+            cut += 1;
+            let next = self.collect_rhs_branches_at(k, cut);
+            branches = next.0;
+            searched = next.1;
+        }
+        (branches, searched)
+    }
+
+    fn collect_rhs_branches_at(&self, k: usize, cut: usize) -> (Vec<Branch>, u64) {
+        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+        expr[k] = b'>';
+        let mut char_counts = [0u8; CHARSET_LEN];
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut branches: Vec<Branch> = Vec::new();
+        let mut searched: u64 = 0;
+
+        self.recursive_search(
+            k + 1,
+            &mut expr,
+            Some(b'>'),
+            Some(b'>'),
+            k,
+            Some(i64::MAX),
+            &mut char_counts,
+            FloorContext::new(),
+            &mut bracket_stack,
+            0,
+            &self.prepared,
+            0,
+            0,
+            false,
+            &mut NullSink,
+            &mut searched,
+            cut,
+            &mut branches,
+        );
+
+        (branches, searched)
+    }
+
+    /// Capture one RHS branch (or the whole subtree when `branch` is `None`).
+    ///
+    /// Returns `None` if the shared budget ran out. `main_lhs_value` is
+    /// `i64::MAX` so the terminal `lhs > rhs` test accepts every syntactically
+    /// valid, integer-valued RHS; the real comparison happens at replay against
+    /// the actual LHS value.
+    fn capture_rhs_subtree(
+        &self,
+        k: usize,
+        branch: Option<&Branch>,
+        budget: &AtomicIsize,
+    ) -> Option<(RhsPart, u64)> {
+        let rhs_len = self.length - k - 1;
+        let mut expr: Vec<u8> = vec![NO_CHAR; self.length];
+        expr[k] = b'>';
+        let mut char_counts = [0u8; CHARSET_LEN];
+        let mut bracket_stack: Vec<u8> = vec![NO_CHAR; self.length];
+        let mut no_branches: Vec<Branch> = Vec::new();
+        let mut searched: u64 = 0;
+
+        let mut capture = RhsCapture {
+            start: k + 1,
+            rhs_len,
+            bytes: Vec::new(),
+            values: Vec::new(),
+            min_value: i64::MAX,
+            max_value: i64::MIN,
+            budget,
+            reserved: 0,
+            overflow: false,
+        };
+
+        match branch {
+            None => self.recursive_search(
+                k + 1,
+                &mut expr,
+                Some(b'>'),
+                Some(b'>'),
+                k,
+                Some(i64::MAX),
+                &mut char_counts,
+                FloorContext::new(),
+                &mut bracket_stack,
+                0,
+                &self.prepared,
+                0,
+                0,
+                false,
+                &mut capture,
+                &mut searched,
+                usize::MAX,
+                &mut no_branches,
+            ),
+            Some(branch) => {
+                let depth = branch.prefix.len();
+                expr[..depth].copy_from_slice(&branch.prefix);
+                // Only the RHS characters are real — the LHS slots are still
+                // placeholders — and the capture run never counted the `>`
+                // itself, so mirror that exactly.
+                for &ch in &branch.prefix[k + 1..] {
+                    char_counts[idx_of(ch)] += 1;
+                }
+                let stack_len = branch.bracket_stack.len();
+                bracket_stack[..stack_len].copy_from_slice(&branch.bracket_stack);
+
+                self.recursive_search(
+                    depth,
+                    &mut expr,
+                    branch.prefix.last().copied(),
+                    branch.main_op,
+                    branch.main_op_index,
+                    branch.main_lhs_value,
+                    &mut char_counts,
+                    branch.floor_ctx,
+                    &mut bracket_stack,
+                    stack_len,
+                    &self.prepared,
+                    branch.num_len,
+                    branch.num_value,
+                    branch.num_leading_zero,
+                    &mut capture,
+                    &mut searched,
+                    usize::MAX,
+                    &mut no_branches,
+                );
+            }
+        }
+
+        capture.finish().map(|part| (part, searched))
     }
 
     /// Solve with single-threaded brute force
@@ -1222,6 +3016,100 @@ impl Solver {
             });
             return;
         }
+
+        // Start of a `>` right-hand side, with that subtree already enumerated.
+        if main_op_so_far == Some(b'>') && index == main_op_index + 1 {
+            // Ask the sink whether *any* completion of this left-hand side is
+            // still worth producing. For a full top-N heap this discards the
+            // whole right-hand side subtree — the single largest unit of work
+            // the search ever skips. The expressions still count as searched,
+            // so only the run time changes.
+            if branch_depth == usize::MAX && !sink.may_accept(&expr[..index], self.length - index) {
+                if let Some(leaves) = self.rhs_subtree_leaves(main_op_index) {
+                    *searched_count += leaves;
+                    for b in expr.iter_mut().take(self.length).skip(index) {
+                        *b = NO_CHAR;
+                    }
+                    return;
+                }
+            }
+
+            // Aggregate fast path: a sink that only needs counts (character
+            // statistics) takes the whole right-hand side subtree as a single
+            // lookup instead of walking it once per left-hand side.
+            if branch_depth == usize::MAX && sink.wants_aggregate() {
+                if let Some(Some(index_tbl)) = self.value_indexes().get(main_op_index) {
+                    let lhs_value = main_lhs_value.expect("'>' recorded without an LHS value");
+                    let (count, chars) = index_tbl.query(lhs_value);
+                    if sink.accept_aggregate(&expr[..index], count, &chars) {
+                        *searched_count += self
+                            .rhs_subtree_leaves(main_op_index)
+                            .expect("a value index implies an enumerated subtree");
+                        for b in expr.iter_mut().take(self.length).skip(index) {
+                            *b = NO_CHAR;
+                        }
+                        return;
+                    }
+                }
+            }
+            if let Some(Some(table)) = self.rhs_tables.get(main_op_index) {
+                if branch_depth == usize::MAX {
+                    // Normal search: replay the cached RHS set for this LHS
+                    // instead of walking the identical subtree again.
+                    let lhs_value = main_lhs_value.expect("'>' recorded without an LHS value");
+                    table.replay(lhs_value, expr, index, sink, searched_count);
+                    for b in expr.iter_mut().take(self.length).skip(index) {
+                        *b = NO_CHAR;
+                    }
+                } else {
+                    // Branch collection: cut the branch here rather than
+                    // descending into the RHS. Splitting *inside* the RHS would
+                    // bake partial right-hand sides into the branch prefixes,
+                    // and a resumed branch that starts mid-RHS cannot use the
+                    // table — which is what made deeper partitioning (more
+                    // threads) progressively slower. Cutting at the boundary
+                    // keeps every branch replay-eligible.
+                    branches.push(Branch {
+                        prefix: expr[..index].to_vec(),
+                        main_op: main_op_so_far,
+                        main_op_index,
+                        main_lhs_value,
+                        floor_ctx,
+                        bracket_stack: bracket_stack[..stack_len].to_vec(),
+                        num_len: current_num_len,
+                        num_value: current_num_value,
+                        num_leading_zero: current_num_leading_zero,
+                    });
+                }
+                return;
+            }
+            // Memory-cheap fallback: replay the RHS *grammar* DFA for this LHS
+            // instead of re-walking the identical subtree. Same output order as
+            // the uncached descent; only the per-node grammar checks are
+            // skipped (they are precomputed into the DFA once).
+            if let Some(Some(dfa)) = self.rhs_dfas.get(main_op_index) {
+                if branch_depth == usize::MAX {
+                    let lhs_value = main_lhs_value.expect("'>' recorded without an LHS value");
+                    dfa.replay(lhs_value, expr, index, sink, searched_count);
+                    for b in expr.iter_mut().take(self.length).skip(index) {
+                        *b = NO_CHAR;
+                    }
+                } else {
+                    branches.push(Branch {
+                        prefix: expr[..index].to_vec(),
+                        main_op: main_op_so_far,
+                        main_op_index,
+                        main_lhs_value,
+                        floor_ctx,
+                        bracket_stack: bracket_stack[..stack_len].to_vec(),
+                        num_len: current_num_len,
+                        num_value: current_num_value,
+                        num_leading_zero: current_num_leading_zero,
+                    });
+                }
+                return;
+            }
+        }
         let remaining_slots = self.length - index;
         if !prepared.counts_can_still_succeed(char_counts, remaining_slots) {
             return;
@@ -1272,18 +3160,23 @@ impl Solver {
                 return;
             }
 
-            let main_op = main_op_so_far.expect("main operator missing");
+            // Only `>` terminates here: `=` equations emit their right-hand
+            // side directly (see the `=` fast path) and never reach this point
+            // as a candidate.
+            if main_op_so_far != Some(b'>') {
+                return;
+            }
             let lhs_value = main_lhs_value.expect("main operator value missing");
             let right_side = &expr[main_op_index + 1..];
-            let valid = match main_op {
-                b'=' => false,
-                b'>' => evaluate_expression_solver_bytes(right_side)
-                    .is_some_and(|rv| is_integer(rv) && lhs_value > rv as i64),
-                _ => false,
-            };
-
-            if valid {
-                sink.accept(expr);
+            if let Some(rv) = evaluate_expression_solver_bytes(right_side) {
+                if is_integer(rv) {
+                    let rhs_value = rv as i64;
+                    if lhs_value > rhs_value {
+                        // Hand the value over so an `RhsCapture` need not
+                        // re-evaluate; every other sink drops it.
+                        sink.accept_valued(expr, rhs_value);
+                    }
+                }
             }
             return;
         }

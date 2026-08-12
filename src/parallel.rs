@@ -1,10 +1,10 @@
 //! Multi-core parallel solver using Rayon
 
-use crate::solver::{CountSink, JsonlSink, SolutionSink, Solver, TopNSink};
+use crate::solver::{CountSink, JsonlSink, SolutionSink, Solver, TopNSink, CHARSET_LEN};
 use rayon::prelude::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Live progress of a parallel solve, shared between the Rayon worker threads
 /// (which bump `done` as each prefix branch finishes) and an outside observer
@@ -99,7 +99,11 @@ pub struct ParallelSolver {
 
 impl ParallelSolver {
     pub fn new(solver: Solver, num_threads: Option<usize>) -> Self {
-        let num_threads = num_threads.unwrap_or_else(num_cpus::get);
+        let num_threads = num_threads.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        });
         Self {
             solver,
             num_threads,
@@ -274,6 +278,68 @@ impl ParallelSolver {
         ))
     }
 
+    /// The branch partition this solver would use. Diagnostics only.
+    #[doc(hidden)]
+    pub fn debug_branches(&self) -> Vec<crate::solver::Branch> {
+        self.collect_branches().0
+    }
+
+    /// Count solutions with a purely thread-local sink — no shared writer, no
+    /// allocation. Used to measure raw search throughput apart from the cost of
+    /// delivering solutions. Returns `(found, searched)`.
+    #[doc(hidden)]
+    pub fn solve_tally(&self) -> (u64, u64) {
+        #[derive(Default, Clone, Copy)]
+        struct Tally {
+            count: u64,
+            checksum: u64,
+        }
+        impl SolutionSink for Tally {
+            #[inline]
+            fn accept(&mut self, expr: &[u8]) {
+                self.count += 1;
+                self.checksum = self.checksum.wrapping_add(expr[0] as u64);
+            }
+
+            #[inline]
+            fn wants_aggregate(&self) -> bool {
+                true
+            }
+
+            /// Counting needs no solution, only totals — and the checksum reads
+            /// `expr[0]`, which lives in the shared prefix, so it folds too.
+            #[inline]
+            fn accept_aggregate(
+                &mut self,
+                prefix: &[u8],
+                count: u64,
+                _suffix_char_counts: &[u64; CHARSET_LEN],
+            ) -> bool {
+                self.count += count;
+                self.checksum = self
+                    .checksum
+                    .wrapping_add((prefix[0] as u64).wrapping_mul(count));
+                true
+            }
+        }
+
+        let (branches, eager_results, eager_searched) = self.collect_branches();
+        let (found, searched) = self.run_in_pool(|| {
+            branches
+                .par_iter()
+                .map(|branch| {
+                    let mut sink = Tally::default();
+                    let searched = self.solver.solve_from_prefix_into(branch, &mut sink);
+                    (sink.count, searched)
+                })
+                .reduce(|| (0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1))
+        });
+        (
+            found + eager_results.len() as u64,
+            searched + eager_searched,
+        )
+    }
+
     /// Return the `n` most probable solutions, scored exactly as
     /// `server::compute_recommended` (sum of unique-character probabilities,
     /// plus 50 per global top-5 character). Memory is bounded by `O(threads * n)`
@@ -349,10 +415,20 @@ impl ParallelSolver {
 
             // ---- Pass 2: score every solution, keep the top n. ----
             progress.set_phase(PHASE_SCORING);
-            let mut base_top = TopNSink::new(n, probs, top5);
+
+            // Pruning floor shared by every worker: whatever score the best-off
+            // thread can already guarantee, the others may prune against. This
+            // only skips subtrees that cannot enter the final top-n, so the
+            // result is identical — it just avoids each thread having to climb
+            // to a strong threshold on its own. Seeded from the eagerly
+            // collected solutions so the branches start with a real cutoff.
+            let floor = Arc::new(AtomicU64::new(f64::NEG_INFINITY.to_bits()));
+
+            let mut base_top = TopNSink::new(n, probs, top5).with_shared_floor(Arc::clone(&floor));
             for sol in &eager_results {
                 base_top.accept(sol.as_bytes());
             }
+            base_top.publish_floor_now();
 
             let merged = branches
                 .par_iter()
@@ -360,7 +436,8 @@ impl ParallelSolver {
                     if progress.is_cancelled() {
                         return TopNSink::new(n, probs, top5);
                     }
-                    let mut sink = TopNSink::new(n, probs, top5);
+                    let mut sink =
+                        TopNSink::new(n, probs, top5).with_shared_floor(Arc::clone(&floor));
                     self.solver.solve_from_prefix_into(branch, &mut sink);
                     progress.inc_done();
                     sink

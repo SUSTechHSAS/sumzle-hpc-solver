@@ -7,6 +7,9 @@
 .idea/
 .vscode/
 
+# Local consistency-check golden baselines (recorded locally, not committed)
+.consistency/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
