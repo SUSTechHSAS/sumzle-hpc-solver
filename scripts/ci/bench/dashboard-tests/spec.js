@@ -236,10 +236,11 @@ async function main() {
     expectNoErrors();
   });
 
-  await test("clustered runs spread by run order instead of collapsing on a time axis", async () => {
+  await test("clustered runs stay readable on the commit-order axis (git-log style)", async () => {
     await reset();
-    /* PR #77's 6 runs all sit within one hour — overlaying it with main
-       must keep its curve readable (full-width), not a vertical line. */
+    /* PR #77's 6 runs all sit within one hour — on the shared commit-order
+       axis they occupy 6 consecutive slots (readable curve), instead of
+       collapsing into a vertical line on a real time axis. */
     await clickChip("series", "PR #77");
     assert((await lines().count()) === 2, "2 views: PR #77 + main");
     const spanCheck = await page.evaluate(() => {
@@ -249,9 +250,13 @@ async function main() {
       return { min: Math.min(...xs), max: Math.max(...xs), count: xs.length };
     });
     assert(
-      spanCheck.min < 90 && spanCheck.max > 1140,
-      `PR #77's curve must span the plot width, got ${JSON.stringify(spanCheck)}`,
+      spanCheck.max - spanCheck.min >= 300,
+      `PR #77's clustered curve must stay readable (span >= 300px), got ${JSON.stringify(spanCheck)}`,
     );
+    /* x-axis labels are commit short SHAs, like git log */
+    const labelTexts = await page.locator("#chart .chart-axis-label").allTextContents();
+    const shaLabels = labelTexts.filter((t) => /^[0-9a-f]{7}$/.test(t));
+    assert(shaLabels.length >= 2, `x-axis should label commits with short SHAs, got ${labelTexts.join(",")}`);
     expectNoErrors();
   });
 

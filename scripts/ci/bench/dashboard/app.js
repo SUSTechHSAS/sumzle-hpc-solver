@@ -617,20 +617,19 @@ function renderChart(views) {
     return;
   }
 
-  /* Per-view x: each view's points are spread evenly by run order (sorted by
-     time), so clustered runs stay readable — clustered benchmark runs (e.g. a
-     PR benchmarked 11 times in one afternoon) would otherwise collapse into
-     an unreadable vertical line on a real time axis. The primary view (most
-     points) supplies the x-axis labels and the hover/probe time anchor. */
-  const primaryView = views.reduce((best, view) =>
-    view.points.length > best.points.length ? view : best,
-  );
-  const primarySpan = primaryView.points.length > 1
-    ? primaryView.points[primaryView.points.length - 1].time - primaryView.points[0].time
-    : 0;
-  ctx.primaryView = primaryView;
-  const xOf = (view, index) =>
-    margin.left + (view.points.length === 1 ? plotW / 2 : (index / (view.points.length - 1)) * plotW);
+  /* Shared x-axis: commits in global order, git-log style. Every run is a
+     benchmark of a commit (run.sha); commits are sorted by their earliest run
+     time and each gets one evenly spaced slot, so branches read like git log
+     rows regardless of how clustered their runs are (a PR benchmarked 11
+     times in one afternoon occupies 11 consecutive slots instead of a
+     vertical line). */
+  const axis = buildCommitAxis(ctx.views);
+  ctx.commits = axis.commits;
+  ctx.commitIndex = axis.index;
+  ctx.commitTimes = axis.times;
+  const commitCount = axis.commits.length;
+  const xOf = (point) =>
+    margin.left + (commitCount === 1 ? plotW / 2 : ((axis.index.get(pointCommitKey(point)) ?? 0) / (commitCount - 1)) * plotW);
   /* Single-unit views share one absolute y-scale; mixed units render on a
      normalized 0–100% axis where each view is scaled to its own range. */
   const y = (value, scale) => {
@@ -652,20 +651,21 @@ function renderChart(views) {
     fragment.appendChild(label);
   }
 
-  /* X-axis labels — the primary view's run dates at their x positions, with
-     collision avoidance for dense datasets */
-  const labelSkip = Math.max(1, Math.ceil(primaryView.points.length / 8));
-  primaryView.points.forEach((point, index) => {
-    if (index % labelSkip !== 0 && index !== primaryView.points.length - 1) return;
+  /* X-axis labels — short commit SHAs at their slots, with collision
+     avoidance for dense commit lists */
+  const labelSkip = Math.max(1, Math.ceil(commitCount / 8));
+  axis.commits.forEach((key, index) => {
+    if (index % labelSkip !== 0 && index !== commitCount - 1) return;
     const label = svgEl("text", {
-      x: xOf(primaryView, index),
+      x: margin.left + (commitCount === 1 ? plotW / 2 : (index / (commitCount - 1)) * plotW),
       y: height - 24,
       "text-anchor": "middle",
       "font-size": "12",
       "overflow": "hidden",
     });
     label.classList.add("chart-axis-label");
-    label.textContent = formatTick(point.time, primarySpan);
+    label.textContent = key.slice(0, 7);
+    label.title = key;
     fragment.appendChild(label);
   });
 
@@ -674,7 +674,7 @@ function renderChart(views) {
      switches to the focusable time probe below. */
   const singleView = views.length === 1;
   ctx.views.forEach((view, viewIndex) => {
-    const coords = view.points.map((point, index) => [xOf(view, index), y(point.value, ctx.scales[viewIndex])]);
+    const coords = view.points.map((point) => [xOf(point), y(point.value, ctx.scales[viewIndex])]);
 
     /* Area fill under the curve */
     const areaPathD = coords.length === 1
@@ -697,7 +697,7 @@ function renderChart(views) {
 
     /* Data point dots */
     view.points.forEach((point, index) => {
-      const cx = xOf(view, index);
+      const cx = xOf(point);
       const cy = y(point.value, ctx.scales[viewIndex]);
 
       const attrs = { cx, cy, r: "4", fill: view.color };
@@ -732,10 +732,11 @@ function renderChart(views) {
     });
   });
 
-  /* Keyboard probe for multi-view navigation across the primary view's runs */
+  /* Keyboard probe for multi-view navigation across the shared commit axis */
   if (!singleView) {
-    probeTimes = primaryView.points.map((point) => point.time);
-    const probeX = xOf(primaryView, 0);
+    probeTimes = axis.commits;
+    probeIndex = 0;
+    const probeX = margin.left + (commitCount === 1 ? plotW / 2 : 0);
     probeLine = svgEl("line", {
       x1: probeX,
       x2: probeX,
@@ -744,11 +745,11 @@ function renderChart(views) {
       class: "chart-probe",
       tabindex: "0",
       role: "slider",
-      "aria-label": "Time probe — use arrow keys to compare views at a given run",
+      "aria-label": "Commit probe — use arrow keys to compare views at a given commit",
       "aria-valuemin": "0",
-      "aria-valuemax": String(Math.max(0, probeTimes.length - 1)),
+      "aria-valuemax": String(Math.max(0, commitCount - 1)),
       "aria-valuenow": "0",
-      "aria-valuetext": formatTick(probeTimes[0], primarySpan),
+      "aria-valuetext": probeCommitLabel(axis, 0),
     });
     probeLine.addEventListener("focus", () => {
       showProbeTooltip();
@@ -790,26 +791,52 @@ function renderChart(views) {
   }
 }
 
+function pointCommitKey(point) {
+  return point.run.sha || `${point.series}@${point.generatedAt}`;
+}
+
+/* Unique commits among the visible views, sorted by their earliest run time
+   (commit timestamps are not stored in the history), each with its first-run
+   time for labels. */
+function buildCommitAxis(views) {
+  const firstSeen = new Map();
+  for (const view of views) {
+    for (const point of view.points) {
+      const key = pointCommitKey(point);
+      const prev = firstSeen.get(key);
+      if (prev === undefined || point.time < prev) firstSeen.set(key, point.time);
+    }
+  }
+  const commits = [...firstSeen.keys()].sort((a, b) => firstSeen.get(a) - firstSeen.get(b));
+  return {
+    commits,
+    times: firstSeen,
+    index: new Map(commits.map((key, i) => [key, i])),
+  };
+}
+
+function probeCommitLabel(axis, index) {
+  const key = axis.commits[index];
+  const times = axis.commitTimes || axis.times;
+  const span = axis.commits.length > 1
+    ? times.get(axis.commits[axis.commits.length - 1]) - times.get(axis.commits[0])
+    : 0;
+  return `${key.slice(0, 7)} · ${formatTick(times.get(key) || 0, span)}`;
+}
+
 function moveProbe() {
-  if (!probeLine || !currentCtx || !currentCtx.primaryView) return;
-  const primary = currentCtx.primaryView;
-  const t = probeTimes[probeIndex];
+  if (!probeLine || !currentCtx?.commits?.length) return;
+  const n = currentCtx.commits.length;
   const margin = { top: 24, right: 24, bottom: 64, left: 78 };
   const width = els.chart.clientWidth || 900;
   const height = els.chart.clientHeight || 420;
   const plotW = Math.max(1, width - margin.left - margin.right);
-  const px = margin.left + (primary.points.length === 1 ? plotW / 2 : (probeIndex / (primary.points.length - 1)) * plotW);
+  const px = margin.left + (n === 1 ? plotW / 2 : (probeIndex / (n - 1)) * plotW);
   probeLine.setAttribute("x1", px);
   probeLine.setAttribute("x2", px);
   probeLine.setAttribute("aria-valuenow", String(probeIndex));
-  probeLine.setAttribute("aria-valuetext", formatTick(t, primarySpanOf(primary)));
+  probeLine.setAttribute("aria-valuetext", probeCommitLabel(currentCtx, probeIndex));
   showProbeTooltip();
-}
-
-function primarySpanOf(primary) {
-  return primary.points.length > 1
-    ? primary.points[primary.points.length - 1].time - primary.points[0].time
-    : 0;
 }
 
 /* ── Crosshair + grouped tooltip ── */
@@ -817,11 +844,13 @@ function primarySpanOf(primary) {
 let crosshairRafPending = false;
 let lastCrosshairX = 0;
 
-function nearestPointForView(view, t) {
+function nearestPointForViewAtCommit(view, commitIndex) {
   let best = null;
   let bestDist = Infinity;
   for (const point of view.points) {
-    const dist = Math.abs(point.time - t);
+    const idx = currentCtx.commitIndex.get(pointCommitKey(point));
+    if (idx === undefined) continue;
+    const dist = Math.abs(idx - commitIndex);
     if (dist < bestDist) {
       bestDist = dist;
       best = point;
@@ -830,11 +859,11 @@ function nearestPointForView(view, t) {
   return best;
 }
 
-function tooltipEntriesAt(t) {
+function tooltipEntriesAtCommit(commitIndex) {
   if (!currentCtx) return [];
   const entries = [];
   for (const view of currentCtx.views) {
-    const point = nearestPointForView(view, t);
+    const point = nearestPointForViewAtCommit(view, commitIndex);
     if (!point) continue;
     entries.push({
       color: view.color,
@@ -898,43 +927,51 @@ function showTooltipAt(xClient, yClient, entries, titleText) {
   els.tooltip.style.setProperty("--ty", `${ty}px`);
 }
 
-/* Map an x position inside the SVG to the primary view's run time at that
-   position (run-order axis). */
-function timeAtSvgX(svgX) {
-  if (!currentCtx || !currentCtx.primaryView) return null;
-  const primary = currentCtx.primaryView;
+/* Map an x position inside the SVG to the nearest commit slot on the
+   commit-order axis. */
+function commitAtSvgX(svgX) {
+  if (!currentCtx?.commits?.length) return null;
+  const n = currentCtx.commits.length;
   const margin = { left: 78, right: 24 };
   const width = els.chart.viewBox.baseVal.width || 900;
   const plotW = Math.max(1, width - margin.left - margin.right);
-  if (primary.points.length === 1) return primary.points[0].time;
+  if (n === 1) return 0;
   const frac = Math.min(Math.max(0, (svgX - margin.left) / plotW), 1);
-  return primary.points[Math.round(frac * (primary.points.length - 1))].time;
+  return Math.round(frac * (n - 1));
+}
+
+function commitAxisLabel(index) {
+  if (!currentCtx?.commits) return "";
+  const key = currentCtx.commits[index];
+  const span = currentCtx.commits.length > 1
+    ? currentCtx.commitTimes.get(currentCtx.commits[currentCtx.commits.length - 1]) -
+      currentCtx.commitTimes.get(currentCtx.commits[0])
+    : 0;
+  return `${key.slice(0, 7)} · ${formatTick(currentCtx.commitTimes.get(key) || 0, span)}`;
 }
 
 function showPointerTooltip(event) {
   if (!currentCtx || !currentCtx.views.length) return;
   const rect = els.chart.getBoundingClientRect();
   const svgX = ((event.clientX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-  const t = timeAtSvgX(svgX);
-  if (t == null) return;
-  const primary = currentCtx.primaryView;
-  const entries = tooltipEntriesAt(t);
+  const index = commitAtSvgX(svgX);
+  if (index == null) return;
+  const entries = tooltipEntriesAtCommit(index);
   if (!entries.length) return;
-  showTooltipAt(event.clientX, event.clientY, entries, formatTick(t, primarySpanOf(primary)));
+  showTooltipAt(event.clientX, event.clientY, entries, commitAxisLabel(index));
 }
 
 function showProbeTooltip() {
-  if (!probeTimes.length || !currentCtx?.primaryView) return;
-  const primary = currentCtx.primaryView;
-  const t = probeTimes[probeIndex];
-  const entries = tooltipEntriesAt(t);
+  if (!probeTimes.length || !currentCtx?.commits?.length) return;
+  const n = currentCtx.commits.length;
+  const entries = tooltipEntriesAtCommit(probeIndex);
   if (!entries.length) return;
   const rect = els.chart.getBoundingClientRect();
   const margin = { left: 78, right: 24 };
   const width = els.chart.viewBox.baseVal.width || 900;
   const plotW = Math.max(1, width - margin.left - margin.right);
-  const px = margin.left + (primary.points.length === 1 ? plotW / 2 : (probeIndex / (primary.points.length - 1)) * plotW);
-  showTooltipAt(rect.left + (px / width) * rect.width, rect.top + 40, entries, formatTick(t, primarySpanOf(primary)));
+  const px = margin.left + (n === 1 ? plotW / 2 : (probeIndex / (n - 1)) * plotW);
+  showTooltipAt(rect.left + (px / width) * rect.width, rect.top + 40, entries, commitAxisLabel(probeIndex));
 }
 
 function hideTooltip() {
@@ -969,12 +1006,11 @@ els.chart.addEventListener("touchstart", (event) => {
   event.preventDefault();
   const rect = els.chart.getBoundingClientRect();
   const svgX = ((touch.clientX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-  const t = timeAtSvgX(svgX);
-  if (t == null) return;
-  const primary = currentCtx.primaryView;
-  const entries = tooltipEntriesAt(t);
+  const index = commitAtSvgX(svgX);
+  if (index == null) return;
+  const entries = tooltipEntriesAtCommit(index);
   if (!entries.length) return;
-  showTooltipAt(touch.clientX, touch.clientY, entries, formatTick(t, primarySpanOf(primary)));
+  showTooltipAt(touch.clientX, touch.clientY, entries, commitAxisLabel(index));
   if (crosshairLine) {
     crosshairLine.setAttribute("x1", svgX);
     crosshairLine.setAttribute("x2", svgX);
@@ -1113,7 +1149,7 @@ function render() {
   const bits = [
     `${views.length} view${views.length === 1 ? "" : "s"}`,
     unitText,
-    views.length > 1 ? "x: run order" : "",
+    views.length > 1 ? "x: commit order" : "",
     capped ? "view cap 24 reached" : "",
     hiddenCount ? `${hiddenCount} hidden` : "",
   ].filter(Boolean);
