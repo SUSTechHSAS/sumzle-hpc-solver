@@ -314,9 +314,6 @@ Response: `{"result": "120"}`
 CI benchmark runs publish a structured `benchmark-result.json` artifact. The
 dedicated benchmark dashboard workflow merges those artifacts into GitHub Pages
 history so `main` and PR performance can be inspected as interactive curves.
-The dashboard's filters are multi-select: pick several branches, suites,
-metrics, or parameter sets to overlay them in one chart, and click a legend
-item to show or hide its view.
 
 ### Distributed computing
 
