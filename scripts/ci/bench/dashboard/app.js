@@ -58,6 +58,10 @@ const els = {
   suite: document.getElementById("suite-filter"),
   metric: document.getElementById("metric-filter"),
   case: document.getElementById("case-filter"),
+  seriesValue: document.getElementById("series-filter-value"),
+  suiteValue: document.getElementById("suite-filter-value"),
+  metricValue: document.getElementById("metric-filter-value"),
+  caseValue: document.getElementById("case-filter-value"),
   range: document.getElementById("range-filter"),
   rangeOutput: document.getElementById("range-output"),
   resetFilters: document.getElementById("reset-filters"),
@@ -230,6 +234,56 @@ function refreshOptionLists() {
   renderSelect(els.suite, allSuites(), sel.suites);
   renderSelect(els.metric, validMetrics(), sel.metrics);
   renderSelect(els.case, validCases(), sel.cases);
+  updateFilterSummaries();
+}
+
+/* Keep the collapsed dropdown pills in sync with the current selection. */
+function updateFilterSummaries() {
+  const sel = state.selection;
+  const entries = [
+    [els.seriesValue, sel.series, allSeries()],
+    [els.suiteValue, sel.suites, allSuites()],
+    [els.metricValue, sel.metrics, validMetrics()],
+    [els.caseValue, sel.cases, validCases()],
+  ];
+  for (const [node, selection, valid] of entries) {
+    if (!node) continue;
+    if (!valid.length) {
+      node.textContent = "No data";
+      node.title = "";
+      continue;
+    }
+    if (selection.size <= 1) {
+      const single = [...selection][0] || valid[0];
+      node.textContent = single;
+      node.title = single;
+    } else {
+      node.textContent = `${selection.size} selected`;
+      node.title = [...selection].sort().join(", ");
+    }
+  }
+}
+
+/* Dropdown accordion: one panel open at a time, close on outside click/Escape. */
+function enableMultiselectDropdowns() {
+  const detailsList = [...document.querySelectorAll("details.multiselect")];
+  for (const details of detailsList) {
+    details.addEventListener("toggle", () => {
+      if (!details.open) return;
+      for (const other of detailsList) {
+        if (other !== details) other.open = false;
+      }
+    });
+  }
+  document.addEventListener("click", (event) => {
+    for (const details of detailsList) {
+      if (details.open && !details.contains(event.target)) details.open = false;
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    for (const details of detailsList) details.open = false;
+  });
 }
 
 /* ── Selection persistence (URL + localStorage) ──
@@ -1100,6 +1154,7 @@ async function main() {
   enableToggleSelect(els.suite);
   enableToggleSelect(els.metric);
   enableToggleSelect(els.case);
+  enableMultiselectDropdowns();
 
   els.range.addEventListener("input", () => {
     safeStorage.set(RANGE_STORAGE_KEY, els.range.value);
