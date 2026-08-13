@@ -532,28 +532,46 @@ function svgEl(name, attrs = {}) {
   return node;
 }
 
-/* ── Smooth curve interpolation (Cardinal spline → cubic Bézier) ── */
+/* ── Monotone cubic interpolation (Fritsch–Carlson) ──
+   Unlike a cardinal spline, the curve never overshoots its neighbours and
+   x stays strictly increasing, so irregularly spaced commits (e.g. main's 5
+   commits interleaved with a PR's 11) render without loops or backward
+   swings. Same construction as d3's curveMonotoneX. */
+function monotonePath(pts) {
+  const n = pts.length;
+  if (n < 2) return "";
+  if (n === 2) return `M ${pts[0][0]} ${pts[0][1]} L ${pts[1][0]} ${pts[1][1]}`;
 
-function smoothPath(pts, s = 0.4) {
-  if (pts.length < 2) return "";
-  if (pts.length === 2) return `M ${pts[0][0]} ${pts[0][1]} L ${pts[1][0]} ${pts[1][1]}`;
-
-  let d = `M ${pts[0][0]} ${pts[0][1]}`;
-
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = pts[Math.min(pts.length - 1, i + 2)];
-
-    const cp1x = p1[0] + (s * (p2[0] - p0[0])) / 3;
-    const cp1y = p1[1] + (s * (p2[1] - p0[1])) / 3;
-    const cp2x = p2[0] - (s * (p3[0] - p1[0])) / 3;
-    const cp2y = p2[1] - (s * (p3[1] - p1[1])) / 3;
-
-    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2[0]} ${p2[1]}`;
+  /* Segment slopes */
+  const m = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    const dx = pts[i + 1][0] - pts[i][0];
+    const dy = pts[i + 1][1] - pts[i][1];
+    m.push(dx !== 0 ? dy / dx : 0);
+  }
+  /* Tangents at each point, constrained for monotonicity */
+  const t = new Array(n);
+  t[0] = m[0];
+  t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i += 1) {
+    if (m[i - 1] * m[i] <= 0) {
+      t[i] = 0;
+    } else {
+      t[i] = 2 / (1 / m[i - 1] + 1 / m[i]);
+    }
   }
 
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 0; i < n - 1; i += 1) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const dx = p1[0] - p0[0];
+    const cp1x = p0[0] + dx / 3;
+    const cp1y = p0[1] + (t[i] * dx) / 3;
+    const cp2x = p1[0] - dx / 3;
+    const cp2y = p1[1] - (t[i + 1] * dx) / 3;
+    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p1[0]} ${p1[1]}`;
+  }
   return d;
 }
 
@@ -679,7 +697,7 @@ function renderChart(views) {
     /* Area fill under the curve */
     const areaPathD = coords.length === 1
       ? `M ${coords[0][0]} ${coords[0][1]} L ${coords[0][0]} ${margin.top + plotH} Z`
-      : smoothPath(coords) +
+      : monotonePath(coords) +
         ` L ${coords[coords.length - 1][0]} ${margin.top + plotH} L ${coords[0][0]} ${margin.top + plotH} Z`;
     const area = svgEl("path", { d: areaPathD, "stroke-width": "0" });
     area.classList.add("chart-area");
@@ -687,7 +705,7 @@ function renderChart(views) {
     fragment.appendChild(area);
 
     /* Line path with draw animation */
-    const linePathD = smoothPath(coords);
+    const linePathD = monotonePath(coords);
     if (linePathD) {
       const line = svgEl("path", { d: linePathD, fill: "none", "stroke-width": "2.5" });
       line.classList.add("chart-line");

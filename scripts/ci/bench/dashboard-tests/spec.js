@@ -247,11 +247,18 @@ async function main() {
       const line = document.querySelector("#chart .chart-line");
       const nums = (line.getAttribute("d") || "").match(/-?\d+(\.\d+)?/g).map(Number);
       const xs = nums.filter((_, i) => i % 2 === 0);
-      return { min: Math.min(...xs), max: Math.max(...xs), count: xs.length };
+      return { min: Math.min(...xs), max: Math.max(...xs), count: xs.length, xs };
     });
     assert(
       spanCheck.max - spanCheck.min >= 300,
       `PR #77's clustered curve must stay readable (span >= 300px), got ${JSON.stringify(spanCheck)}`,
+    );
+    /* monotone interpolation: x must never swing backwards (the old cardinal
+       spline produced loops when commits are irregularly spaced) */
+    const sorted = [...spanCheck.xs].sort((a, b) => a - b);
+    assert(
+      spanCheck.xs.every((v, i) => v === sorted[i]),
+      "curve x coordinates must be monotonic (no backward swings)",
     );
     /* x-axis labels are commit short SHAs, like git log */
     const labelTexts = await page.locator("#chart .chart-axis-label").allTextContents();
