@@ -38,6 +38,7 @@ function fixture() {
   const series = [
     { branch: "main" },
     { branch: "feature/bench", pull_request: { number: 10 } },
+    { branch: "hotfix/cluster", pull_request: { number: 77 } },
   ];
   const metrics = [
     { suite: "cli", metric: "time", unit: "ns", params: { length: 3 }, value: 5_000_000 },
@@ -50,9 +51,14 @@ function fixture() {
   series.forEach((s, seriesIndex) => {
     for (let day = 0; day < 6; day += 1) {
       runId += 1;
+      /* PR #77: all runs clustered within one hour — must not collapse into
+         a vertical line on the x axis (run-order spacing keeps them readable). */
+      const runTime = seriesIndex === 2
+        ? Date.parse("2026-06-28T03:00:00Z") + day * 10 * 60000
+        : baseTime + (seriesIndex * 7 + day) * 86400000;
       runs.push({
         schema_version: 1,
-        generated_at: new Date(baseTime + (seriesIndex * 7 + day) * 86400000).toISOString(),
+        generated_at: new Date(runTime).toISOString(),
         sha: `abcdef${day}${seriesIndex}1234567890`,
         branch: s.branch,
         pull_request: s.pull_request || null,
@@ -161,7 +167,7 @@ async function main() {
   await test("page loads with fixture data and no errors", async () => {
     await page.goto(base, { waitUntil: "networkidle" });
     await waitLoaded();
-    assert((await page.textContent("#summary")).includes("12 runs"), "summary should report 12 runs");
+    assert((await page.textContent("#summary")).includes("18 runs"), "summary should report 18 runs");
     expectNoErrors();
   });
 
@@ -227,6 +233,25 @@ async function main() {
     assert((await page.textContent("#chart-subtitle")).includes("1 hidden"), "subtitle should note the hidden view");
     await page.locator("#legend .legend-item button").first().click();
     assert((await lines().count()) === 2, "re-showing the view should restore 2 lines");
+    expectNoErrors();
+  });
+
+  await test("clustered runs spread by run order instead of collapsing on a time axis", async () => {
+    await reset();
+    /* PR #77's 6 runs all sit within one hour — overlaying it with main
+       must keep its curve readable (full-width), not a vertical line. */
+    await clickChip("series", "PR #77");
+    assert((await lines().count()) === 2, "2 views: PR #77 + main");
+    const spanCheck = await page.evaluate(() => {
+      const line = document.querySelector("#chart .chart-line");
+      const nums = (line.getAttribute("d") || "").match(/-?\d+(\.\d+)?/g).map(Number);
+      const xs = nums.filter((_, i) => i % 2 === 0);
+      return { min: Math.min(...xs), max: Math.max(...xs), count: xs.length };
+    });
+    assert(
+      spanCheck.min < 90 && spanCheck.max > 1140,
+      `PR #77's curve must span the plot width, got ${JSON.stringify(spanCheck)}`,
+    );
     expectNoErrors();
   });
 

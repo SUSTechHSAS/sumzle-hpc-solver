@@ -450,15 +450,11 @@ function computeContext(views) {
     views,
     unitUniform,
     unit: unitUniform && views.length ? views[0].unit : "",
-    tMin: 0,
-    tMax: 0,
     absMin: 0,
     absMax: 0,
     scales: views.map((view) => viewScale(view)),
   };
   if (allPoints.length) {
-    ctx.tMin = safeMin(allPoints.map((point) => point.time));
-    ctx.tMax = safeMax(allPoints.map((point) => point.time));
     if (unitUniform) {
       const values = allPoints.map((point) => point.value);
       let min = safeMin(values);
@@ -621,8 +617,20 @@ function renderChart(views) {
     return;
   }
 
-  const span = ctx.tMax - ctx.tMin;
-  const x = (t) => margin.left + (span > 0 ? ((t - ctx.tMin) / span) * plotW : plotW / 2);
+  /* Per-view x: each view's points are spread evenly by run order (sorted by
+     time), so clustered runs stay readable — clustered benchmark runs (e.g. a
+     PR benchmarked 11 times in one afternoon) would otherwise collapse into
+     an unreadable vertical line on a real time axis. The primary view (most
+     points) supplies the x-axis labels and the hover/probe time anchor. */
+  const primaryView = views.reduce((best, view) =>
+    view.points.length > best.points.length ? view : best,
+  );
+  const primarySpan = primaryView.points.length > 1
+    ? primaryView.points[primaryView.points.length - 1].time - primaryView.points[0].time
+    : 0;
+  ctx.primaryView = primaryView;
+  const xOf = (view, index) =>
+    margin.left + (view.points.length === 1 ? plotW / 2 : (index / (view.points.length - 1)) * plotW);
   /* Single-unit views share one absolute y-scale; mixed units render on a
      normalized 0–100% axis where each view is scaled to its own range. */
   const y = (value, scale) => {
@@ -644,28 +652,29 @@ function renderChart(views) {
     fragment.appendChild(label);
   }
 
-  /* X-axis time labels — shared time axis aligns overlapping views */
-  const tickCount = 6;
-  for (let i = 0; i < tickCount; i += 1) {
-    const t = span > 0 ? ctx.tMin + (span * i) / (tickCount - 1) : ctx.tMin;
+  /* X-axis labels — the primary view's run dates at their x positions, with
+     collision avoidance for dense datasets */
+  const labelSkip = Math.max(1, Math.ceil(primaryView.points.length / 8));
+  primaryView.points.forEach((point, index) => {
+    if (index % labelSkip !== 0 && index !== primaryView.points.length - 1) return;
     const label = svgEl("text", {
-      x: x(t),
+      x: xOf(primaryView, index),
       y: height - 24,
       "text-anchor": "middle",
       "font-size": "12",
       "overflow": "hidden",
     });
     label.classList.add("chart-axis-label");
-    label.textContent = formatTick(t, span);
+    label.textContent = formatTick(point.time, primarySpan);
     fragment.appendChild(label);
-  }
+  });
 
   /* One curve per view. With a single view the dots stay keyboard-navigable
      (arrow keys move between points); with several views, keyboard navigation
      switches to the focusable time probe below. */
   const singleView = views.length === 1;
   ctx.views.forEach((view, viewIndex) => {
-    const coords = view.points.map((point) => [x(point.time), y(point.value, ctx.scales[viewIndex])]);
+    const coords = view.points.map((point, index) => [xOf(view, index), y(point.value, ctx.scales[viewIndex])]);
 
     /* Area fill under the curve */
     const areaPathD = coords.length === 1
@@ -688,7 +697,7 @@ function renderChart(views) {
 
     /* Data point dots */
     view.points.forEach((point, index) => {
-      const cx = x(point.time);
+      const cx = xOf(view, index);
       const cy = y(point.value, ctx.scales[viewIndex]);
 
       const attrs = { cx, cy, r: "4", fill: view.color };
@@ -723,10 +732,10 @@ function renderChart(views) {
     });
   });
 
-  /* Keyboard probe for multi-view navigation across the shared time axis */
+  /* Keyboard probe for multi-view navigation across the primary view's runs */
   if (!singleView) {
-    probeTimes = [...new Set(ctx.views.flatMap((view) => view.points.map((point) => point.time)))].sort((a, b) => a - b);
-    const probeX = x(probeTimes[0]);
+    probeTimes = primaryView.points.map((point) => point.time);
+    const probeX = xOf(primaryView, 0);
     probeLine = svgEl("line", {
       x1: probeX,
       x2: probeX,
@@ -735,11 +744,11 @@ function renderChart(views) {
       class: "chart-probe",
       tabindex: "0",
       role: "slider",
-      "aria-label": "Time probe — use arrow keys to compare views at a given time",
+      "aria-label": "Time probe — use arrow keys to compare views at a given run",
       "aria-valuemin": "0",
       "aria-valuemax": String(Math.max(0, probeTimes.length - 1)),
       "aria-valuenow": "0",
-      "aria-valuetext": formatTick(probeTimes[0], span),
+      "aria-valuetext": formatTick(probeTimes[0], primarySpan),
     });
     probeLine.addEventListener("focus", () => {
       showProbeTooltip();
@@ -782,19 +791,25 @@ function renderChart(views) {
 }
 
 function moveProbe() {
-  if (!probeLine || !currentCtx) return;
+  if (!probeLine || !currentCtx || !currentCtx.primaryView) return;
+  const primary = currentCtx.primaryView;
   const t = probeTimes[probeIndex];
   const margin = { top: 24, right: 24, bottom: 64, left: 78 };
   const width = els.chart.clientWidth || 900;
   const height = els.chart.clientHeight || 420;
   const plotW = Math.max(1, width - margin.left - margin.right);
-  const span = currentCtx.tMax - currentCtx.tMin;
-  const px = margin.left + (span > 0 ? ((t - currentCtx.tMin) / span) * plotW : plotW / 2);
+  const px = margin.left + (primary.points.length === 1 ? plotW / 2 : (probeIndex / (primary.points.length - 1)) * plotW);
   probeLine.setAttribute("x1", px);
   probeLine.setAttribute("x2", px);
   probeLine.setAttribute("aria-valuenow", String(probeIndex));
-  probeLine.setAttribute("aria-valuetext", formatTick(t, span));
+  probeLine.setAttribute("aria-valuetext", formatTick(t, primarySpanOf(primary)));
   showProbeTooltip();
+}
+
+function primarySpanOf(primary) {
+  return primary.points.length > 1
+    ? primary.points[primary.points.length - 1].time - primary.points[0].time
+    : 0;
 }
 
 /* ── Crosshair + grouped tooltip ── */
@@ -883,22 +898,34 @@ function showTooltipAt(xClient, yClient, entries, titleText) {
   els.tooltip.style.setProperty("--ty", `${ty}px`);
 }
 
+/* Map an x position inside the SVG to the primary view's run time at that
+   position (run-order axis). */
+function timeAtSvgX(svgX) {
+  if (!currentCtx || !currentCtx.primaryView) return null;
+  const primary = currentCtx.primaryView;
+  const margin = { left: 78, right: 24 };
+  const width = els.chart.viewBox.baseVal.width || 900;
+  const plotW = Math.max(1, width - margin.left - margin.right);
+  if (primary.points.length === 1) return primary.points[0].time;
+  const frac = Math.min(Math.max(0, (svgX - margin.left) / plotW), 1);
+  return primary.points[Math.round(frac * (primary.points.length - 1))].time;
+}
+
 function showPointerTooltip(event) {
   if (!currentCtx || !currentCtx.views.length) return;
   const rect = els.chart.getBoundingClientRect();
   const svgX = ((event.clientX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-  const margin = { left: 78, right: 24 };
-  const width = els.chart.viewBox.baseVal.width || 900;
-  const plotW = Math.max(1, width - margin.left - margin.right);
-  const span = currentCtx.tMax - currentCtx.tMin;
-  const t = span > 0 ? currentCtx.tMin + ((svgX - margin.left) / plotW) * span : currentCtx.tMin;
+  const t = timeAtSvgX(svgX);
+  if (t == null) return;
+  const primary = currentCtx.primaryView;
   const entries = tooltipEntriesAt(t);
   if (!entries.length) return;
-  showTooltipAt(event.clientX, event.clientY, entries, formatTick(t, span));
+  showTooltipAt(event.clientX, event.clientY, entries, formatTick(t, primarySpanOf(primary)));
 }
 
 function showProbeTooltip() {
-  if (!probeTimes.length) return;
+  if (!probeTimes.length || !currentCtx?.primaryView) return;
+  const primary = currentCtx.primaryView;
   const t = probeTimes[probeIndex];
   const entries = tooltipEntriesAt(t);
   if (!entries.length) return;
@@ -906,9 +933,8 @@ function showProbeTooltip() {
   const margin = { left: 78, right: 24 };
   const width = els.chart.viewBox.baseVal.width || 900;
   const plotW = Math.max(1, width - margin.left - margin.right);
-  const span = currentCtx.tMax - currentCtx.tMin;
-  const px = margin.left + (span > 0 ? ((t - currentCtx.tMin) / span) * plotW : plotW / 2);
-  showTooltipAt(rect.left + (px / width) * rect.width, rect.top + 40, entries, formatTick(t, span));
+  const px = margin.left + (primary.points.length === 1 ? plotW / 2 : (probeIndex / (primary.points.length - 1)) * plotW);
+  showTooltipAt(rect.left + (px / width) * rect.width, rect.top + 40, entries, formatTick(t, primarySpanOf(primary)));
 }
 
 function hideTooltip() {
@@ -943,14 +969,12 @@ els.chart.addEventListener("touchstart", (event) => {
   event.preventDefault();
   const rect = els.chart.getBoundingClientRect();
   const svgX = ((touch.clientX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-  const margin = { left: 78, right: 24 };
-  const width = els.chart.viewBox.baseVal.width || 900;
-  const plotW = Math.max(1, width - margin.left - margin.right);
-  const span = currentCtx.tMax - currentCtx.tMin;
-  const t = span > 0 ? currentCtx.tMin + ((svgX - margin.left) / plotW) * span : currentCtx.tMin;
+  const t = timeAtSvgX(svgX);
+  if (t == null) return;
+  const primary = currentCtx.primaryView;
   const entries = tooltipEntriesAt(t);
   if (!entries.length) return;
-  showTooltipAt(touch.clientX, touch.clientY, entries, formatTick(t, span));
+  showTooltipAt(touch.clientX, touch.clientY, entries, formatTick(t, primarySpanOf(primary)));
   if (crosshairLine) {
     crosshairLine.setAttribute("x1", svgX);
     crosshairLine.setAttribute("x2", svgX);
@@ -1089,6 +1113,7 @@ function render() {
   const bits = [
     `${views.length} view${views.length === 1 ? "" : "s"}`,
     unitText,
+    views.length > 1 ? "x: run order" : "",
     capped ? "view cap 24 reached" : "",
     hiddenCount ? `${hiddenCount} hidden` : "",
   ].filter(Boolean);
