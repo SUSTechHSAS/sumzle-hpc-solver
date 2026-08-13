@@ -34,38 +34,22 @@
       </section>
 
       <section class="controls" aria-label="Benchmark filters">
-        <details class="multiselect" id="series-multiselect">
-          <summary>
-            <span class="multiselect-name">Branch / PR</span>
-            <span class="multiselect-value" id="series-filter-value"></span>
-            <span class="multiselect-caret" aria-hidden="true"></span>
-          </summary>
+        <label title="Filter by branch or pull request — select several to overlay them in the chart">
+          Branch / PR
           <select id="series-filter" multiple aria-label="Branches and pull requests"></select>
-        </details>
-        <details class="multiselect" id="suite-multiselect">
-          <summary>
-            <span class="multiselect-name">Benchmark Suite</span>
-            <span class="multiselect-value" id="suite-filter-value"></span>
-            <span class="multiselect-caret" aria-hidden="true"></span>
-          </summary>
+        </label>
+        <label title="Filter by benchmark suite — select several to overlay them in the chart">
+          Benchmark Suite
           <select id="suite-filter" multiple aria-label="Benchmark suites"></select>
-        </details>
-        <details class="multiselect" id="metric-multiselect">
-          <summary>
-            <span class="multiselect-name">Metric Name</span>
-            <span class="multiselect-value" id="metric-filter-value"></span>
-            <span class="multiselect-caret" aria-hidden="true"></span>
-          </summary>
+        </label>
+        <label title="Filter by performance metric — select several to overlay them in the chart">
+          Metric Name
           <select id="metric-filter" multiple aria-label="Performance metrics"></select>
-        </details>
-        <details class="multiselect" id="case-multiselect">
-          <summary>
-            <span class="multiselect-name">Benchmark Parameters</span>
-            <span class="multiselect-value" id="case-filter-value"></span>
-            <span class="multiselect-caret" aria-hidden="true"></span>
-          </summary>
+        </label>
+        <label title="Filter by benchmark parameter configuration — select several to overlay them in the chart">
+          Benchmark Parameters
           <select id="case-filter" multiple aria-label="Benchmark parameter configurations"></select>
-        </details>
+        </label>
         <label title="Adjust the number of recent runs shown per view">
           Recent Runs / View
           <span class="range-row">

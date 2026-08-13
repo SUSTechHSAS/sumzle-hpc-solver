@@ -152,7 +152,7 @@ async function main() {
 
   try {
     await page.goto(`http://127.0.0.1:${port}/`);
-    await page.waitForSelector("#series-filter option", { state: "attached" });
+    await page.waitForSelector("#series-filter option");
 
     /* ── Initial load ── */
     check("dashboard loads with series options", (await page.locator("#series-filter option").count()) === 3);
@@ -162,26 +162,6 @@ async function main() {
       (await page.locator("#legend .legend-item").count()) === 1,
       "defaults: main + cli + first metric/case",
     );
-
-    /* ── Compact filter bar: pills, not giant listboxes ── */
-    const controlsBox = await page.locator(".controls").boundingBox();
-    check("compact filter bar (one row of pills)", controlsBox.height < 140, `height=${Math.round(controlsBox.height)}px`);
-    const summaryBox = await page.locator("#series-multiselect summary").boundingBox();
-    check("filter pill is a single row (~44px)", summaryBox.height >= 40 && summaryBox.height <= 56, `height=${Math.round(summaryBox.height)}px`);
-    check(
-      "filter pill shows current selection",
-      (await page.textContent("#series-filter-value")).trim() === "main",
-      await page.textContent("#series-filter-value"),
-    );
-
-    /* Dropdown behavior: opens on click, closes on Escape/outside click */
-    await page.click("#series-multiselect summary");
-    check("filter panel opens on click", await page.locator("#series-multiselect").evaluate((el) => el.open));
-    await page.keyboard.press("Escape");
-    check("Escape closes filter panel", !(await page.locator("#series-multiselect").evaluate((el) => el.open)));
-    await page.click("#series-multiselect summary");
-    await page.click("#summary");
-    check("outside click closes filter panel", !(await page.locator("#series-multiselect").evaluate((el) => el.open)));
 
     /* ── Click-to-toggle on multi-select (mousedown on an option) ── */
     await page.dispatchEvent('select#series-filter option[value="PR #45"]', "mousedown");
