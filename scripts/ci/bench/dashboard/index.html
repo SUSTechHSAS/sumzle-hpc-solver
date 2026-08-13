@@ -27,36 +27,39 @@
           </div>
           <div class="welcome-text">
             <h2>Benchmark Dashboard</h2>
-            <p>Track performance trends across CI runs. Filter by series, suite, and metric to compare results over time.</p>
+            <p>Track performance trends across CI runs. Toggle branches, suites, metrics, and parameter sets to overlay several views in a single chart and compare them over time.</p>
             <p class="welcome-hint">Data will appear here once CI benchmark runs complete. <a href="https://github.com/SUSTechHSAS/sumzle-hpc-solver">View the repository</a> to learn about setup.</p>
           </div>
         </div>
       </section>
 
       <section class="controls" aria-label="Benchmark filters">
-        <label title="Filter by branch or pull request">
-          Branch / PR
-          <select id="series-filter"></select>
-        </label>
-        <label title="Filter by benchmark suite">
-          Benchmark Suite
-          <select id="suite-filter"></select>
-        </label>
-        <label title="Filter by performance metric">
-          Metric Name
-          <select id="metric-filter"></select>
-        </label>
-        <label title="Filter by benchmark parameter configuration">
-          Benchmark Parameters
-          <select id="case-filter"></select>
-        </label>
-        <label title="Adjust the number of recent runs shown">
-          Recent Runs
+        <div class="filter-group">
+          <span class="filter-label" id="series-label">Branch / PR</span>
+          <div class="chips" id="series-chips" role="group" aria-labelledby="series-label"></div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label" id="suite-label">Benchmark Suite</span>
+          <div class="chips" id="suite-chips" role="group" aria-labelledby="suite-label"></div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label" id="metric-label">Metric Name</span>
+          <div class="chips" id="metric-chips" role="group" aria-labelledby="metric-label"></div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label" id="case-label">Benchmark Parameters</span>
+          <div class="chips" id="case-chips" role="group" aria-labelledby="case-label"></div>
+        </div>
+        <div class="filter-group">
+          <span class="filter-label" id="range-label">Recent Runs / View</span>
           <span class="range-row">
-            <input id="range-filter" type="range" min="2" max="100" value="40" />
-            <output id="range-output">40</output>
+            <input id="range-filter" type="range" min="2" max="100" value="40" aria-labelledby="range-label" />
+            <output id="range-output" for="range-filter">40</output>
           </span>
-        </label>
+        </div>
+        <div class="controls-actions">
+          <button id="reset-filters" type="button" class="reset-btn">Reset filters</button>
+        </div>
       </section>
 
       <section class="chart-panel">
@@ -65,6 +68,7 @@
           <span id="chart-subtitle" class="chart-subtitle"></span>
         </div>
         <svg id="chart" role="group" aria-roledescription="chart" aria-label="Benchmark trend chart — use arrow keys to navigate data points"></svg>
+        <ul id="legend" class="chart-legend" aria-label="Chart views — click an item to show or hide it" hidden></ul>
         <div id="chart-tip" class="chart-tip" hidden>
           <span id="chart-tip-text">Hover data points for details — use arrow keys to navigate the chart</span>
           <button id="chart-tip-dismiss" type="button" class="chart-tip-dismiss" aria-label="Dismiss tip" title="Dismiss">&times;</button>
@@ -84,7 +88,7 @@
             <thead>
               <tr>
                 <th scope="col">Time</th>
-                <th scope="col">Branch / PR</th>
+                <th scope="col">View</th>
                 <th scope="col">Commit</th>
                 <th scope="col">Value</th>
                 <th scope="col">CI Run</th>
@@ -92,7 +96,7 @@
             </thead>
             <tbody id="run-table"></tbody>
           </table>
-          <p id="table-empty" class="empty-state" hidden>No runs match the current filters. Try selecting a different branch, benchmark suite, or metric name.</p>
+          <p id="table-empty" class="empty-state" hidden>No runs match the current filters. Try toggling a different branch, benchmark suite, metric name, or parameter set.</p>
         </div>
       </section>
     </main>
