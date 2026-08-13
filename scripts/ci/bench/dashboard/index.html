@@ -27,39 +27,36 @@
           </div>
           <div class="welcome-text">
             <h2>Benchmark Dashboard</h2>
-            <p>Track performance trends across CI runs. Select multiple branches, suites, metrics, or parameter sets to overlay them in a single chart.</p>
+            <p>Track performance trends across CI runs. Filter by series, suite, and metric to compare results over time.</p>
             <p class="welcome-hint">Data will appear here once CI benchmark runs complete. <a href="https://github.com/SUSTechHSAS/sumzle-hpc-solver">View the repository</a> to learn about setup.</p>
           </div>
         </div>
       </section>
 
       <section class="controls" aria-label="Benchmark filters">
-        <label title="Filter by branch or pull request — select several to overlay them in the chart">
+        <label title="Filter by branch or pull request">
           Branch / PR
-          <select id="series-filter" multiple aria-label="Branches and pull requests"></select>
+          <select id="series-filter"></select>
         </label>
-        <label title="Filter by benchmark suite — select several to overlay them in the chart">
+        <label title="Filter by benchmark suite">
           Benchmark Suite
-          <select id="suite-filter" multiple aria-label="Benchmark suites"></select>
+          <select id="suite-filter"></select>
         </label>
-        <label title="Filter by performance metric — select several to overlay them in the chart">
+        <label title="Filter by performance metric">
           Metric Name
-          <select id="metric-filter" multiple aria-label="Performance metrics"></select>
+          <select id="metric-filter"></select>
         </label>
-        <label title="Filter by benchmark parameter configuration — select several to overlay them in the chart">
+        <label title="Filter by benchmark parameter configuration">
           Benchmark Parameters
-          <select id="case-filter" multiple aria-label="Benchmark parameter configurations"></select>
+          <select id="case-filter"></select>
         </label>
-        <label title="Adjust the number of recent runs shown per view">
-          Recent Runs / View
+        <label title="Adjust the number of recent runs shown">
+          Recent Runs
           <span class="range-row">
             <input id="range-filter" type="range" min="2" max="100" value="40" />
             <output id="range-output">40</output>
           </span>
         </label>
-        <div class="controls-actions">
-          <button id="reset-filters" type="button" class="reset-btn">Reset filters</button>
-        </div>
       </section>
 
       <section class="chart-panel">
@@ -68,7 +65,6 @@
           <span id="chart-subtitle" class="chart-subtitle"></span>
         </div>
         <svg id="chart" role="group" aria-roledescription="chart" aria-label="Benchmark trend chart — use arrow keys to navigate data points"></svg>
-        <ul id="legend" class="chart-legend" aria-label="Chart views — click an item to show or hide it" hidden></ul>
         <div id="chart-tip" class="chart-tip" hidden>
           <span id="chart-tip-text">Hover data points for details — use arrow keys to navigate the chart</span>
           <button id="chart-tip-dismiss" type="button" class="chart-tip-dismiss" aria-label="Dismiss tip" title="Dismiss">&times;</button>
@@ -88,7 +84,6 @@
             <thead>
               <tr>
                 <th scope="col">Time</th>
-                <th scope="col">View</th>
                 <th scope="col">Branch / PR</th>
                 <th scope="col">Commit</th>
                 <th scope="col">Value</th>
@@ -97,7 +92,7 @@
             </thead>
             <tbody id="run-table"></tbody>
           </table>
-          <p id="table-empty" class="empty-state" hidden>No runs match the current filters. Try toggling a different branch, benchmark suite, metric name, or parameter set.</p>
+          <p id="table-empty" class="empty-state" hidden>No runs match the current filters. Try selecting a different branch, benchmark suite, or metric name.</p>
         </div>
       </section>
     </main>
