@@ -314,6 +314,17 @@ Response: `{"result": "120"}`
 CI benchmark runs publish a structured `benchmark-result.json` artifact. The
 dedicated benchmark dashboard workflow merges those artifacts into GitHub Pages
 history so `main` and PR performance can be inspected as interactive curves.
+The dashboard's filters are toggle chips: pick several branches, suites,
+metrics, or parameter sets to overlay them in one chart, and click a legend
+item to show or hide its view. Selections persist in the URL, so shared links
+restore the exact overlay. Changing one filter never resets the others.
+
+The dashboard has a Playwright end-to-end suite covering filter preservation,
+multi-view overlay, and persistence:
+
+```bash
+node scripts/ci/bench/dashboard-tests/spec.js
+```
 
 ### Distributed computing
 

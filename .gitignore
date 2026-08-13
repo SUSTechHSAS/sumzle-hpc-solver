@@ -29,3 +29,6 @@ src-tauri/gen/
 *.jks
 keystore.properties
 
+
+# Local preview & test artifacts (never committed)
+.cache/

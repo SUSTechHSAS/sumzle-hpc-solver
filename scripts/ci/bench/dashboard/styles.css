@@ -150,9 +150,8 @@ main {
 /* ── Controls ── */
 
 .controls {
-  display: grid;
-  /* Content-driven columns: auto-fill wraps naturally at ~160px boundary */
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: var(--sp-3);
   padding: var(--sp-4);
   border-bottom: 1px solid var(--border);
@@ -160,13 +159,97 @@ main {
   contain: content;
 }
 
-label {
-  display: grid;
-  gap: var(--sp-2);
+.filter-group {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+
+.filter-label {
+  flex-shrink: 0;
+  min-width: 13ch;
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0;
+  padding-top: var(--sp-1);
+}
+
+/* Toggle chips: click to select several values per dimension */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  align-items: center;
+}
+
+.chip {
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chip[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: oklch(1 0 0);
+  font-weight: 600;
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.controls-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.reset-btn {
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+
+.reset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reset-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Range input: inline with output */
@@ -175,6 +258,8 @@ label {
   align-items: center;
   gap: var(--sp-2);
   min-height: 44px;
+  flex: 1;
+  min-width: 0;
 }
 
 .range-row input[type="range"] {
@@ -191,7 +276,6 @@ label {
   text-align: right;
 }
 
-select,
 input {
   width: 100%;
   min-height: 44px;
@@ -205,12 +289,10 @@ input {
               box-shadow var(--dur-fast) var(--ease-out);
 }
 
-select:hover,
 input:hover {
   border-color: var(--muted);
 }
 
-select:focus-visible,
 input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -218,7 +300,6 @@ input:focus-visible {
   box-shadow: 0 0 0 3px var(--shadow-focus);
 }
 
-select:disabled,
 input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -293,6 +374,19 @@ input:disabled {
   opacity: 1;
 }
 
+/* Keyboard time probe (multi-view navigation) */
+#chart .chart-probe {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 3;
+  pointer-events: none;
+}
+
+#chart .chart-probe:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* Data points */
 #chart circle[data-point] {
   cursor: pointer;
@@ -321,12 +415,6 @@ input:disabled {
 #chart circle[data-point]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-/* Invisible hit area for touch */
-#chart .chart-hit {
-  fill: transparent;
-  cursor: pointer;
 }
 
 /* ── Tooltip ── */
@@ -387,6 +475,105 @@ input:disabled {
   font-size: 0.75rem;
   color: var(--muted-secondary);
   margin-top: var(--sp-1);
+}
+
+/* Grouped tooltip: one row per overlaid view at the hovered time */
+.tooltip-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.tooltip-row + .tooltip-row {
+  margin-top: var(--sp-1);
+}
+
+.tooltip-swatch {
+  flex-shrink: 0;
+  align-self: center;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.tooltip-row-label {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tooltip-row-value {
+  flex-shrink: 0;
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Chart legend (click to show/hide a view) ── */
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legend-item {
+  margin: 0;
+  padding: 0;
+}
+
+.legend-item button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  max-width: 100%;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              opacity var(--dur-fast) var(--ease-out);
+}
+
+.legend-item button:hover {
+  border-color: var(--muted);
+}
+
+.legend-item button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.legend-item button.is-hidden {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.legend-swatch {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.legend-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Chart header / subtitle ── */
@@ -461,6 +648,16 @@ th {
   font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0;
+}
+
+/* View column: color swatch + short label */
+.table-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: var(--sp-2);
+  vertical-align: -1px;
 }
 
 /* Row entrance animation */
@@ -658,11 +855,19 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   #chart .chart-line {
     stroke: LinkText;
   }
+  #chart .chart-probe {
+    stroke: LinkText;
+  }
   #chart .chart-grid-line {
     stroke: CanvasText;
   }
   #tooltip {
     border: 2px solid CanvasText;
+  }
+  .chip,
+  .reset-btn,
+  .legend-item button {
+    border: 1px solid ButtonText;
   }
 }
 
@@ -843,6 +1048,16 @@ h1 {
   gap: var(--sp-1);
 }
 
+.filter-group {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-1);
+}
+
+.controls-actions {
+  justify-content: flex-start;
+}
+
 @media (min-width: 480px) {
   header {
     flex-direction: row;
@@ -873,22 +1088,21 @@ h1 {
     gap: var(--sp-6);
   }
 
-  .controls {
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  .filter-group {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--sp-3);
   }
 }
 
 /* Pointer-device enhancements */
 @media (pointer: coarse) {
-  /* Larger hit areas and dot sizes for touch-primary devices */
+  /* Larger dot sizes for touch-primary devices */
   #chart circle[data-point] {
     r: 5;
   }
   #chart circle[data-point]:focus-visible {
     r: 7;
-  }
-  #chart .chart-hit {
-    r: 28;
   }
   /* Ensure table cells have adequate padding for touch */
   th,
