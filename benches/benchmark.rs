@@ -323,6 +323,86 @@ fn bench_factorial_enumeration(c: &mut Criterion) {
     group.finish();
 }
 
+/// Top-N and streaming at the lengths where the RHS value index matters.
+///
+/// These are the memory-bounded modes — the ones that have to work at large
+/// lengths — so they get their own benchmarks rather than being inferred from
+/// the full in-memory solve. Each length is measured both with the index and
+/// with it disabled (`memory_budget = 0`, the previous engine), so the
+/// dashboard shows the speedup directly and any regression in either path is
+/// visible.
+fn bench_bounded_memory_modes(c: &mut Criterion) {
+    use sumzle_solver::solver::DEFAULT_MEMORY_BUDGET;
+
+    let mut group = c.benchmark_group("top_n");
+    // Length 8 is ~14M expressions; keep the sample count low so the suite
+    // stays a sensible length in CI.
+    group.sample_size(10);
+    for length in [6usize, 7, 8] {
+        for (label, budget) in [("indexed", DEFAULT_MEMORY_BUDGET), ("recursive", 0)] {
+            group.bench_with_input(
+                BenchmarkId::new(label, length),
+                &(length, budget),
+                |b, &(len, budget)| {
+                    let gk = empty_gk(len);
+                    b.iter(|| {
+                        let solver = Solver::with_memory_budget(len, gk.clone(), budget);
+                        ParallelSolver::new(solver, Some(2)).solve_top_n(black_box(10))
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("streaming");
+    group.sample_size(10);
+    for length in [6usize, 7] {
+        for (label, budget) in [("indexed", DEFAULT_MEMORY_BUDGET), ("recursive", 0)] {
+            group.bench_with_input(
+                BenchmarkId::new(label, length),
+                &(length, budget),
+                |b, &(len, budget)| {
+                    let gk = empty_gk(len);
+                    let never = std::sync::atomic::AtomicBool::new(false);
+                    b.iter(|| {
+                        let solver = Solver::with_memory_budget(len, gk.clone(), budget);
+                        ParallelSolver::new(solver, Some(2))
+                            .solve_to_writer(std::io::sink(), &never)
+                            .unwrap()
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+/// Cost of building the RHS value index on its own.
+///
+/// The index is built once per solve, so it is pure overhead for a solve that
+/// would have been fast anyway; tracking it separately keeps that trade-off
+/// visible rather than hidden inside the end-to-end numbers.
+fn bench_rhs_index_build(c: &mut Criterion) {
+    use sumzle_solver::solver::DEFAULT_MEMORY_BUDGET;
+
+    let mut group = c.benchmark_group("rhs_index_build");
+    group.sample_size(10);
+    for length in [6usize, 7, 8] {
+        group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
+            let gk = empty_gk(len);
+            b.iter(|| {
+                Solver::with_memory_budget(
+                    black_box(len),
+                    gk.clone(),
+                    black_box(DEFAULT_MEMORY_BUDGET),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sequential_solve,
@@ -334,6 +414,8 @@ criterion_group!(
     bench_char_probability,
     bench_recommended_solution,
     bench_factorial_enumeration,
+    bench_bounded_memory_modes,
+    bench_rhs_index_build,
 );
 
 criterion_main!(benches);

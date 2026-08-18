@@ -44,6 +44,24 @@ enum Commands {
         /// score). Keeps memory bounded regardless of total solution count.
         #[arg(long)]
         top: Option<usize>,
+        /// Cap, in MiB, on the right-hand-side value index that accelerates
+        /// the `>` operator. The index is an optional accelerator: whatever
+        /// does not fit falls back to the plain recursive search, so this is a
+        /// hard ceiling on the solver's length-dependent memory, not a
+        /// requirement. `0` disables indexing entirely.
+        #[arg(long, default_value_t = sumzle_solver::solver::DEFAULT_MEMORY_BUDGET / (1024 * 1024))]
+        memory_budget_mb: usize,
+        /// Give up after this many seconds and return the best ranking found
+        /// so far (top-N only). The search space grows exponentially with
+        /// length, so past a point no exhaustive search finishes; this trades
+        /// exactness for an answer. Results from a search that hit the limit
+        /// are marked approximate. Unset = search to completion.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+        /// Give up after examining this many expressions (top-N only). Like
+        /// `--timeout-secs` but measured in work rather than time.
+        #[arg(long)]
+        max_searched: Option<u64>,
     },
     /// Run as distributed coordinator
     Coordinate {
@@ -201,6 +219,9 @@ fn main() -> Result<()> {
             format,
             output,
             top,
+            memory_budget_mb,
+            timeout_secs,
+            max_searched,
         } => {
             let input_str = match input {
                 Some(path) => std::fs::read_to_string(path)?,
@@ -214,7 +235,11 @@ fn main() -> Result<()> {
 
             let cli_input: CliInput = serde_json::from_str(&input_str)?;
             let (length, gk) = build_solver_input(&cli_input)?;
-            let solver = Solver::new(length, gk);
+            let solver = Solver::with_memory_budget(
+                length,
+                gk,
+                memory_budget_mb.saturating_mul(1024 * 1024),
+            );
             let num_threads = if threads == 0 {
                 num_cpus::get()
             } else {
@@ -229,7 +254,22 @@ fn main() -> Result<()> {
             if let Some(n) = top {
                 // Top-N: bounded memory, deterministic order (score desc, expr asc).
                 let parallel_solver = ParallelSolver::new(solver, Some(num_threads));
-                let (scored, searched_count) = parallel_solver.solve_top_n(n);
+                let limit = match (timeout_secs, max_searched) {
+                    (Some(secs), _) => sumzle_solver::limit::SearchLimit::with_timeout(
+                        std::time::Duration::from_secs(secs),
+                    ),
+                    (None, Some(max)) => sumzle_solver::limit::SearchLimit::with_max_searched(max),
+                    (None, None) => sumzle_solver::limit::SearchLimit::unlimited(),
+                };
+                let (scored, _counts, searched_count, complete) = parallel_solver
+                    .solve_top_n_limited(n, &sumzle_solver::parallel::Progress::new(), &limit);
+                if !complete {
+                    eprintln!(
+                        "warning: search stopped at its limit after {searched_count} expressions; \
+                         results are APPROXIMATE (the best ranking found so far, not necessarily \
+                         the true top {n})"
+                    );
+                }
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 let speed = (searched_count * 1000).checked_div(elapsed_ms).unwrap_or(0);
 
