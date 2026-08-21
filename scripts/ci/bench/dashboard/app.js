@@ -31,8 +31,12 @@ const PALETTE = [
 ];
 
 const MAX_VIEWS = 24;
+const END_LABEL_MAX_VIEWS = 8;
 const SELECTION_STORAGE_KEY = "bench-dash-selection-v2";
 const RANGE_STORAGE_KEY = "bench-dash-range-v2";
+/* Keep in sync with the inline bootstrap script in index.html. */
+const THEME_STORAGE_KEY = "bench-dash-theme-v1";
+const THEME_MODES = ["auto", "light", "dark"];
 
 const state = {
   history: { runs: [] },
@@ -87,6 +91,9 @@ const els = {
   table: document.getElementById("run-table"),
   tableEmpty: document.getElementById("table-empty"),
   rangeContext: document.getElementById("range-context"),
+  viewStats: document.getElementById("view-stats"),
+  themeToggle: document.getElementById("theme-toggle"),
+  copyLink: document.getElementById("copy-link"),
 };
 
 /* ── Helpers ── */
@@ -130,6 +137,7 @@ function buildPoints() {
         caseName: caseName(metric),
         value,
         unit: metric.unit,
+        lowerIsBetter: Boolean(metric.lower_is_better),
         generatedAt: run.generated_at || "",
         time: pointTime(run),
       });
@@ -409,6 +417,7 @@ function buildViews() {
             metric,
             caseName: caseValue,
             unit: points[0].unit,
+            lowerIsBetter: points[0].lowerIsBetter,
             points,
             color: PALETTE[views.length % PALETTE.length],
           });
@@ -484,7 +493,61 @@ function formatValue(value, unit) {
     if (value >= 1e6) return `${(value / 1e6).toFixed(1)} ms`;
     if (value >= 1e3) return `${(value / 1e3).toFixed(1)} \u00b5s`;
   }
-  return `${Number.isInteger(value) ? value : value.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+  /* Bare numbers read better for counts; the chart subtitle names the unit. */
+  const num = Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return unit && unit !== "count" ? `${num} ${unit}` : num;
+}
+
+/* ── Trend helpers (lower_is_better aware) ──
+   The history marks whether going up is good for each metric; without that,
+   a green/red delta would be meaningless for latencies vs throughput. */
+
+function pctChange(from, to) {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from === 0) return null;
+  return ((to - from) / Math.abs(from)) * 100;
+}
+
+/* "good" means the change improves the metric, per lower_is_better. */
+function classifyDelta(pct, lowerIsBetter) {
+  if (pct === null || Math.abs(pct) < 0.5) return "flat";
+  const increased = pct > 0;
+  return (lowerIsBetter ? !increased : increased) ? "good" : "bad";
+}
+
+function formatDelta(pct) {
+  if (pct === null) return null;
+  const abs = Math.abs(pct);
+  const digits = abs >= 10 ? 1 : 2;
+  const sign = pct > 0 ? "+" : pct < 0 ? "-" : "\u00b1";
+  return `${sign}${abs.toFixed(digits)}%`;
+}
+
+/* Arrow follows the value direction; the color carries the good/bad verdict,
+   so a latency increase reads an up arrow with a red +33.7%, not a
+   contradictory down arrow. */
+const ARROW_UP = "\u25b2";
+const ARROW_DOWN = "\u25bc";
+const ARROW_FLAT = "\u2192";
+
+function directionArrow(pct) {
+  if (pct === null || Math.abs(pct) < 0.5) return ARROW_FLAT;
+  return pct > 0 ? ARROW_UP : ARROW_DOWN;
+}
+
+/* Compact local time for table rows; the full ISO string stays in title. */
+function formatDateTime(iso) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return iso || "";
+  const d = new Date(t);
+  const pad = (v) => String(v).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* Commit permalink from the run's repository field, when well-formed. */
+function repoCommitUrl(repository, sha) {
+  if (!repository || !sha || !/^[\w.-]+\/[\w.-]+$/.test(repository)) return "";
+  const url = `https://github.com/${repository}/commit/${sha}`;
+  return isSafeUrl(url) ? url : "";
 }
 
 function formatTick(t, spanMs) {
@@ -750,6 +813,23 @@ function renderChart(views) {
     });
   });
 
+  /* End-of-line value labels: identify each curve at its latest point without
+     hovering. Skipped when many views are visible so labels stay legible. */
+  const endLabels = [];
+  if (views.length && views.length <= END_LABEL_MAX_VIEWS) {
+    ctx.views.forEach((view, viewIndex) => {
+      const last = view.points[view.points.length - 1];
+      const cx = xOf(last);
+      const cy = y(last.value, ctx.scales[viewIndex]);
+      const text = svgEl("text", { x: cx + 8, y: cy + 4, "text-anchor": "start" });
+      text.classList.add("chart-end-label");
+      text.style.fill = view.color;
+      text.textContent = formatValue(last.value, last.unit);
+      fragment.appendChild(text);
+      endLabels.push({ node: text, cy });
+    });
+  }
+
   /* Keyboard probe for multi-view navigation across the shared commit axis */
   if (!singleView) {
     probeTimes = axis.commits;
@@ -798,6 +878,28 @@ function renderChart(views) {
   }
 
   svg.appendChild(fragment);
+
+  /* Post-append: measure end labels now that they are in the DOM — clamp them
+     inside the plot and de-overlap vertically (curves can finish close). */
+  if (endLabels.length) {
+    const minY = margin.top + 6;
+    const maxY = margin.top + plotH - 2;
+    let prevLabelY = -Infinity;
+    endLabels.sort((a, b) => a.cy - b.cy);
+    for (const item of endLabels) {
+      let ly = Math.max(minY, Math.min(maxY, item.cy));
+      if (ly - prevLabelY < 13) ly = prevLabelY + 13;
+      prevLabelY = Math.min(ly, maxY);
+      item.node.setAttribute("y", ly + 4);
+    }
+    for (const item of endLabels) {
+      const textWidth = item.node.getComputedTextLength();
+      const maxX = width - margin.right;
+      if (item.node.x.baseVal[0].value + textWidth > maxX) {
+        item.node.setAttribute("x", Math.max(margin.left, maxX - textWidth));
+      }
+    }
+  }
 
   /* Post-append: line draw animation requires elements in DOM for getTotalLength() */
   if (!prefersReducedMotionNow()) {
@@ -862,18 +964,20 @@ function moveProbe() {
 let crosshairRafPending = false;
 let lastCrosshairX = 0;
 
-function nearestPointForViewAtCommit(view, commitIndex) {
-  let best = null;
+/* Nearest visible point of a view to a commit slot — returns its index so the
+   tooltip can also report the change vs the previous run. */
+function nearestPointIndexForViewAtCommit(view, commitIndex) {
+  let best = -1;
   let bestDist = Infinity;
-  for (const point of view.points) {
+  view.points.forEach((point, index) => {
     const idx = currentCtx.commitIndex.get(pointCommitKey(point));
-    if (idx === undefined) continue;
+    if (idx === undefined) return;
     const dist = Math.abs(idx - commitIndex);
     if (dist < bestDist) {
       bestDist = dist;
-      best = point;
+      best = index;
     }
-  }
+  });
   return best;
 }
 
@@ -881,8 +985,10 @@ function tooltipEntriesAtCommit(commitIndex) {
   if (!currentCtx) return [];
   const entries = [];
   for (const view of currentCtx.views) {
-    const point = nearestPointForViewAtCommit(view, commitIndex);
-    if (!point) continue;
+    const index = nearestPointIndexForViewAtCommit(view, commitIndex);
+    if (index < 0) continue;
+    const point = view.points[index];
+    const prev = index > 0 ? view.points[index - 1] : null;
     entries.push({
       color: view.color,
       label: shortViewLabel(view),
@@ -890,6 +996,8 @@ function tooltipEntriesAtCommit(commitIndex) {
       unit: point.unit,
       sha: (point.run.sha || "").slice(0, 7),
       generatedAt: point.generatedAt,
+      deltaPct: prev ? pctChange(prev.value, point.value) : null,
+      lowerIsBetter: view.lowerIsBetter,
     });
   }
   return entries;
@@ -930,6 +1038,15 @@ function showTooltipAt(xClient, yClient, entries, titleText) {
     value.className = "tooltip-row-value";
     value.textContent = entry.value;
     row.appendChild(value);
+
+    if (entry.deltaPct !== null && entry.deltaPct !== undefined) {
+      const verdict = classifyDelta(entry.deltaPct, entry.lowerIsBetter);
+      const delta = document.createElement("span");
+      delta.className = "tooltip-row-delta trend-" + verdict;
+      delta.textContent = directionArrow(entry.deltaPct) + " " + formatDelta(entry.deltaPct);
+      delta.title = formatDelta(entry.deltaPct) + " vs previous run";
+      row.appendChild(delta);
+    }
 
     els.tooltip.appendChild(row);
   }
@@ -1087,58 +1204,177 @@ els.legend.addEventListener("click", (event) => {
   hideTooltip();
 });
 
+/* ── View stat cards ──
+   One card per overlaid view: the latest value plus the change vs the
+   previous run, colored by whether it improves the metric (lower_is_better).
+   This turns the chart's right edge into an at-a-glance scoreboard. */
+
+function renderViewStats(views) {
+  const container = els.viewStats;
+  if (!container) return;
+  container.replaceChildren();
+  if (!views.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const fragment = document.createDocumentFragment();
+  for (const view of views) {
+    const points = view.points;
+    const latest = points[points.length - 1];
+    const prev = points.length > 1 ? points[points.length - 2] : null;
+    const pct = prev ? pctChange(prev.value, latest.value) : null;
+    const verdict = classifyDelta(pct, view.lowerIsBetter);
+    const overallPct = pctChange(points[0].value, latest.value);
+
+    const card = document.createElement("div");
+    card.className = "stat-card";
+
+    const label = document.createElement("span");
+    label.className = "stat-label";
+    const swatch = document.createElement("span");
+    swatch.className = "stat-swatch";
+    swatch.style.background = view.color;
+    label.appendChild(swatch);
+    const name = document.createElement("span");
+    name.className = "stat-name";
+    name.textContent = shortViewLabel(view);
+    name.title = shortViewLabel(view);
+    label.appendChild(name);
+    card.appendChild(label);
+
+    const valueRow = document.createElement("span");
+    valueRow.className = "stat-value-row";
+    const value = document.createElement("span");
+    value.className = "stat-value";
+    value.textContent = formatValue(latest.value, latest.unit);
+    valueRow.appendChild(value);
+
+    const delta = document.createElement("span");
+    delta.className = "stat-delta trend-" + verdict;
+    if (pct === null) {
+      delta.textContent = points.length > 1 ? "\u2014" : "first run";
+      delta.title = "No previous run to compare with";
+    } else {
+      const arrow = document.createElement("span");
+      arrow.setAttribute("aria-hidden", "true");
+      arrow.textContent = directionArrow(pct) + " ";
+      delta.appendChild(arrow);
+      delta.appendChild(document.createTextNode(formatDelta(pct)));
+      const direction = verdict === "good" ? "improvement" : verdict === "bad" ? "regression" : "flat";
+      const overall = overallPct === null ? "" : " \u00b7 " + formatDelta(overallPct) + " since first run";
+      delta.title = formatDelta(pct) + " vs previous run (" + direction + " for " +
+        (view.lowerIsBetter ? "lower-is-better" : "higher-is-better") + " metric)" + overall;
+    }
+    valueRow.appendChild(delta);
+    card.appendChild(valueRow);
+
+    fragment.appendChild(card);
+  }
+  container.appendChild(fragment);
+}
+
 /* ── Table ── */
 
 function renderTable(views) {
   els.table.replaceChildren();
-  const points = views
-    .flatMap((view) => view.points.map((point) => ({ point, view })))
+  /* view.points are chronological (sorted in buildViews), so index i-1 is the
+     previous run of the same view — the baseline for the Δ column. */
+  const rows = views
+    .flatMap((view) =>
+      view.points.map((point, pointIndex) => ({
+        point,
+        view,
+        prev: pointIndex > 0 ? view.points[pointIndex - 1] : null,
+      })),
+    )
     .sort((a, b) => b.point.time - a.point.time);
-  if (!points.length) {
+  if (!rows.length) {
     els.tableEmpty.hidden = false;
     return;
   }
   els.tableEmpty.hidden = true;
   const fragment = document.createDocumentFragment();
-  points.forEach(({ point, view }, index) => {
+  rows.forEach(({ point, view, prev }, index) => {
     const tr = document.createElement("tr");
     const runUrl = point.run.run?.url || "";
-    const cells = [
-      point.generatedAt,
-      view, /* rendered specially below */
-      (point.run.sha || "").slice(0, 7),
-      formatValue(point.value, point.unit),
-      runUrl,
-    ];
-    cells.forEach((cell, cellIndex) => {
-      const td = document.createElement("td");
-      if (cellIndex === 1) {
-        const swatch = document.createElement("span");
-        swatch.className = "table-swatch";
-        swatch.style.background = view.color;
-        td.appendChild(swatch);
-        const label = document.createElement("span");
-        label.textContent = shortViewLabel(view);
-        label.title = shortViewLabel(view);
-        td.appendChild(label);
-      } else if (cellIndex !== 4 && typeof cell === "string" && cell) {
-        td.setAttribute("dir", "auto");
-        td.textContent = cell;
-      } else if (cellIndex === 4 && cell && isSafeUrl(cell)) {
-        const a = document.createElement("a");
-        a.href = cell;
-        a.target = "_blank";
-        a.rel = "noopener";
-        a.textContent = "View Run";
-        td.appendChild(a);
-      } else if (cellIndex === 4 && !cell) {
-        td.textContent = "\u2014";
-        td.style.color = "var(--muted)";
-      } else {
-        td.textContent = cell;
-      }
-      tr.appendChild(td);
-    });
+
+    /* Time: compact local timestamp, full ISO on hover */
+    let td = document.createElement("td");
+    td.textContent = formatDateTime(point.generatedAt);
+    td.title = point.generatedAt || "";
+    tr.appendChild(td);
+
+    /* View: color swatch + short label */
+    td = document.createElement("td");
+    const swatch = document.createElement("span");
+    swatch.className = "table-swatch";
+    swatch.style.background = view.color;
+    td.appendChild(swatch);
+    const label = document.createElement("span");
+    label.textContent = shortViewLabel(view);
+    label.title = shortViewLabel(view);
+    td.appendChild(label);
+    tr.appendChild(td);
+
+    /* Commit: short SHA, permalinks to the commit when repository is known */
+    td = document.createElement("td");
+    const sha = (point.run.sha || "").slice(0, 7);
+    const commitUrl = repoCommitUrl(point.run.repository, point.run.sha);
+    if (sha && commitUrl) {
+      const a = document.createElement("a");
+      a.href = commitUrl;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = sha;
+      a.title = point.run.sha;
+      td.appendChild(a);
+    } else {
+      td.setAttribute("dir", "auto");
+      td.textContent = sha || "\u2014";
+    }
+    tr.appendChild(td);
+
+    /* Value */
+    td = document.createElement("td");
+    td.setAttribute("dir", "auto");
+    td.textContent = formatValue(point.value, point.unit);
+    tr.appendChild(td);
+
+    /* Δ vs previous run of this view, judged by lower_is_better */
+    td = document.createElement("td");
+    const pct = prev ? pctChange(prev.value, point.value) : null;
+    const verdict = classifyDelta(pct, view.lowerIsBetter);
+    if (pct === null) {
+      td.textContent = "\u2014";
+      td.classList.add("trend-flat");
+      td.title = "No previous run of this view in range";
+    } else {
+      const direction = verdict === "good" ? "improvement" : verdict === "bad" ? "regression" : "flat";
+      td.classList.add("trend-" + verdict);
+      td.textContent = directionArrow(pct) + " " + formatDelta(pct);
+      td.title =
+        formatDelta(pct) + " vs previous run: " + formatValue(prev.value, prev.unit) +
+        " \u2192 " + formatValue(point.value, point.unit) +
+        " (" + direction + " for " + (view.lowerIsBetter ? "lower-is-better" : "higher-is-better") + " metric)";
+    }
+    tr.appendChild(td);
+
+    /* CI Run link */
+    td = document.createElement("td");
+    if (runUrl && isSafeUrl(runUrl)) {
+      const a = document.createElement("a");
+      a.href = runUrl;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "View Run";
+      td.appendChild(a);
+    } else {
+      td.textContent = "\u2014";
+      td.style.color = "var(--muted)";
+    }
+    tr.appendChild(td);
+
     if (!prefersReducedMotionNow()) {
       tr.style.animationDelay = `${Math.min(index * 20, 400)}ms`;
     }
@@ -1174,6 +1410,7 @@ function render() {
   els.chartSubtitle.textContent = bits.join(" · ");
 
   renderChart(views);
+  renderViewStats(views);
   renderLegend(allViews);
 
   /* Range context: rows shown across views */
@@ -1199,6 +1436,48 @@ function throttledRender() {
     rafPending = false;
     render();
   });
+}
+
+/* ── Theme toggle (auto / light / dark, persisted per browser) ── */
+
+function applyThemeMode(mode) {
+  const root = document.documentElement;
+  if (mode === "auto") {
+    root.removeAttribute("data-theme");
+  } else {
+    root.setAttribute("data-theme", mode);
+  }
+  if (els.themeToggle) {
+    els.themeToggle.dataset.mode = mode;
+    const label = "Theme: " + mode + (mode === "auto" ? " (follow system)" : "");
+    els.themeToggle.setAttribute("aria-label", label);
+    els.themeToggle.title = label;
+  }
+  safeStorage.set(THEME_STORAGE_KEY, mode);
+}
+
+/* ── Share the current selection: copy the URL (filters live in the query) ── */
+
+async function copyCurrentUrl() {
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    return true;
+  } catch {
+    /* Fallback for denied clipboard permission or older browsers */
+    try {
+      const helper = document.createElement("textarea");
+      helper.value = window.location.href;
+      helper.setAttribute("readonly", "");
+      helper.className = "sr-only";
+      document.body.appendChild(helper);
+      helper.select();
+      const ok = document.execCommand("copy");
+      helper.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
 }
 
 /* ── Bootstrap ── */
@@ -1282,6 +1561,31 @@ async function main() {
     initSelection();
     render();
   });
+
+  /* Theme toggle: auto → light → dark → auto, persisted per browser */
+  if (els.themeToggle) {
+    const storedTheme = safeStorage.get(THEME_STORAGE_KEY);
+    applyThemeMode(THEME_MODES.includes(storedTheme) ? storedTheme : "auto");
+    els.themeToggle.addEventListener("click", () => {
+      const current = els.themeToggle.dataset.mode || "auto";
+      const next = THEME_MODES[(THEME_MODES.indexOf(current) + 1) % THEME_MODES.length];
+      applyThemeMode(next);
+    });
+  }
+
+  /* Copy a permalink to the current filter selection */
+  if (els.copyLink) {
+    els.copyLink.addEventListener("click", async () => {
+      if (await copyCurrentUrl()) {
+        els.copyLink.classList.add("is-copied");
+        els.copyLink.textContent = "Link copied ✓";
+        setTimeout(() => {
+          els.copyLink.textContent = "Copy link";
+          els.copyLink.classList.remove("is-copied");
+        }, 1600);
+      }
+    });
+  }
 
   /* Dismiss chart tip and persist preference */
   if (els.chartTipDismiss) {

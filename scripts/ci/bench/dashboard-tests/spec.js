@@ -9,6 +9,8 @@
  *   - multiple views overlay in one chart with distinct colors (#46)
  *   - legend show/hide, mixed-unit normalization, URL round-trip,
  *     reset button, keyboard probe, empty state, mobile layout
+ *   - view stat cards, per-run delta column, end-of-line labels,
+ *     manual theme toggle, copy-link button
  *   - no console or page errors
  *
  * Usage:
@@ -332,6 +334,80 @@ async function main() {
     assert(await page.locator("#chart .chart-empty-text").isVisible(), "chart empty state visible");
     assert(await page.locator("#table-empty").isVisible(), "table empty state visible");
     await reset();
+    expectNoErrors();
+  });
+
+  await test("view stats summarize latest value and delta per view", async () => {
+    await reset();
+    assert(!(await page.locator("#view-stats").isHidden()), "stats strip visible with data");
+    assert((await page.locator("#view-stats .stat-card").count()) === 1, "one card for the single view");
+    const value = await page.locator("#view-stats .stat-value").textContent();
+    assert(/[\d.]/.test(value), `stat value should be numeric: ${value}`);
+    const delta = await page.locator("#view-stats .stat-delta").textContent();
+    assert(delta.trim().length > 0, "delta text present");
+    expectNoErrors();
+  });
+
+  await test("table has a delta column, em dash on the oldest run", async () => {
+    await reset();
+    const firstRow = await page.locator("#run-table tr").first().locator("td").allTextContents();
+    assert(firstRow.length === 6, `expected 6 columns, got ${firstRow.length}`);
+    assert(
+      firstRow[4].includes("%") || firstRow[4].trim() === "\u2014",
+      `delta cell should be a percentage or em dash, got: ${firstRow[4]}`,
+    );
+    const lastRow = await page.locator("#run-table tr").last().locator("td").allTextContents();
+    assert(lastRow[4].trim() === "\u2014", "oldest run in range has no previous run to compare");
+    expectNoErrors();
+  });
+
+  await test("end-of-line labels annotate each visible curve", async () => {
+    await reset();
+    assert((await page.locator("#chart .chart-end-label").count()) === 1, "one end label for a single view");
+    await clickChip("series", "PR #10");
+    assert((await page.locator("#chart .chart-end-label").count()) === 2, "one end label per view");
+    await reset();
+    expectNoErrors();
+  });
+
+  await test("theme toggle cycles modes and persists across reload", async () => {
+    await page.goto(base, { waitUntil: "networkidle" });
+    await waitLoaded();
+    const btn = page.locator("#theme-toggle");
+    assert((await btn.getAttribute("data-mode")) === "auto", "starts in auto mode");
+    await btn.click();
+    assert(
+      (await page.evaluate(() => document.documentElement.getAttribute("data-theme"))) === "light",
+      "light applied after first click",
+    );
+    await btn.click();
+    assert(
+      (await page.evaluate(() => document.documentElement.getAttribute("data-theme"))) === "dark",
+      "dark applied after second click",
+    );
+    await page.reload({ waitUntil: "networkidle" });
+    await waitLoaded();
+    assert(
+      (await page.evaluate(() => document.documentElement.getAttribute("data-theme"))) === "dark",
+      "manual theme persists across reload",
+    );
+    await btn.click();
+    assert(
+      (await page.evaluate(() => document.documentElement.hasAttribute("data-theme"))) === false,
+      "auto mode clears the attribute",
+    );
+    await page.goto(base, { waitUntil: "networkidle" });
+    await waitLoaded();
+    expectNoErrors();
+  });
+
+  await test("copy link button confirms the copy", async () => {
+    await reset();
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+    const btn = page.locator("#copy-link");
+    await btn.click();
+    await page.waitForFunction(() => document.querySelector("#copy-link")?.textContent.includes("copied"), null, { timeout: 3000 });
+    await page.waitForFunction(() => document.querySelector("#copy-link")?.textContent === "Copy link", null, { timeout: 5000 });
     expectNoErrors();
   });
 
