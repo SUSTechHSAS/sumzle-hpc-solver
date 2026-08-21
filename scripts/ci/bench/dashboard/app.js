@@ -385,6 +385,24 @@ function shortViewLabel(view) {
   return `${view.series} · ${view.suite} / ${view.metric} · ${view.caseName}`;
 }
 
+/* Distill pass: when several overlaid views share dimensions, repeating
+   "topn / speed · length=9" on every card, pill, and row is noise the
+   filters already state. Labels show only what varies between the visible
+   views; the full identity stays one hover away via the title attribute.
+   A lone view keeps its full label — there it identifies, not repeats. */
+function viewLabelParts(views) {
+  const varies = (key) => new Set(views.map((view) => view[key])).size > 1;
+  return { suite: varies("suite"), metric: varies("metric"), caseName: varies("caseName") };
+}
+
+function distinctViewLabel(view, parts) {
+  const bits = [view.series];
+  if (parts.suite) bits.push(view.suite);
+  if (parts.metric) bits.push(view.metric);
+  if (parts.caseName) bits.push(view.caseName);
+  return bits.join(" · ");
+}
+
 function buildViews() {
   const sel = state.selection;
   const recent = Math.max(1, Number(els.range.value) || 40);
@@ -496,6 +514,21 @@ function formatValue(value, unit) {
   /* Bare numbers read better for counts; the chart subtitle names the unit. */
   const num = Number.isInteger(value) ? String(value) : value.toFixed(2);
   return unit && unit !== "count" ? `${num} ${unit}` : num;
+}
+
+/* Compact axis ticks (impeccable distill pass): the chart subtitle names the
+   unit exactly once; repeating it on every gridline is noise and overflows
+   the margin. Time values keep their human prefix because it carries the
+   magnitude ("29.4 µs" cannot be a bare number). */
+const compactNumber = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumSignificantDigits: 3,
+});
+
+function yTickLabel(value, unit) {
+  if (!Number.isFinite(value)) return "";
+  if (unit === "ns") return formatValue(value, unit);
+  return compactNumber.format(value);
 }
 
 /* ── Trend helpers (lower_is_better aware) ──
@@ -645,6 +678,9 @@ let probeLine = null;
 let probeTimes = [];
 let probeIndex = 0;
 let currentCtx = null;
+/* Geometry of the last render, shared by probe movement and pointer
+   hit-testing so they always agree with what was drawn. */
+let chartGeometry = { top: 24, right: 24, bottom: 64, left: 78, width: 900 };
 
 function renderChart(views) {
   const svg = els.chart;
@@ -659,11 +695,32 @@ function renderChart(views) {
   const height = svg.clientHeight || 420;
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
 
-  const margin = { top: 24, right: 24, bottom: 64, left: 78 };
+  const fragment = document.createDocumentFragment();
+
+  const ctx = computeContext(views);
+  currentCtx = ctx;
+
+  /* Tick labels are measured before layout so the left margin always fits
+     the widest one (impeccable polish: no clipped axis text, ever). */
+  const tickLabels = [];
+  for (let i = 0; i <= 4; i += 1) {
+    tickLabels.push(
+      ctx.unitUniform
+        ? yTickLabel(ctx.absMax - ((ctx.absMax - ctx.absMin) / 4) * i, ctx.unit)
+        : `${100 - i * 25}%`,
+    );
+  }
+  const longestTick = tickLabels.reduce((a, b) => (b.length > a.length ? b : a), "");
+  const margin = {
+    top: 24,
+    right: 24,
+    bottom: 64,
+    left: Math.min(120, Math.max(56, 18 + longestTick.length * 6.8)),
+  };
+  chartGeometry = { ...margin, width };
+
   const plotW = Math.max(1, width - margin.left - margin.right);
   const plotH = Math.max(1, height - margin.top - margin.bottom);
-
-  const fragment = document.createDocumentFragment();
 
   crosshairLine = svgEl("line", {
     x1: 0,
@@ -673,9 +730,6 @@ function renderChart(views) {
     class: "chart-crosshair",
   });
   fragment.appendChild(crosshairLine);
-
-  const ctx = computeContext(views);
-  currentCtx = ctx;
 
   if (!views.length) {
     const emptyRect = svgEl("rect", {
@@ -726,9 +780,7 @@ function renderChart(views) {
     fragment.appendChild(gridLine);
     const label = svgEl("text", { x: margin.left - 12, y: gy + 4, "text-anchor": "end", "font-size": "12" });
     label.classList.add("chart-axis-label");
-    label.textContent = ctx.unitUniform
-      ? formatValue(ctx.absMax - ((ctx.absMax - ctx.absMin) / 4) * i, ctx.unit)
-      : `${100 - i * 25}%`;
+    label.textContent = tickLabels[i];
     fragment.appendChild(label);
   }
 
@@ -947,7 +999,7 @@ function probeCommitLabel(axis, index) {
 function moveProbe() {
   if (!probeLine || !currentCtx?.commits?.length) return;
   const n = currentCtx.commits.length;
-  const margin = { top: 24, right: 24, bottom: 64, left: 78 };
+  const margin = chartGeometry;
   const width = els.chart.clientWidth || 900;
   const height = els.chart.clientHeight || 420;
   const plotW = Math.max(1, width - margin.left - margin.right);
@@ -1067,7 +1119,7 @@ function showTooltipAt(xClient, yClient, entries, titleText) {
 function commitAtSvgX(svgX) {
   if (!currentCtx?.commits?.length) return null;
   const n = currentCtx.commits.length;
-  const margin = { left: 78, right: 24 };
+  const margin = chartGeometry;
   const width = els.chart.viewBox.baseVal.width || 900;
   const plotW = Math.max(1, width - margin.left - margin.right);
   if (n === 1) return 0;
@@ -1102,7 +1154,7 @@ function showProbeTooltip() {
   const entries = tooltipEntriesAtCommit(probeIndex);
   if (!entries.length) return;
   const rect = els.chart.getBoundingClientRect();
-  const margin = { left: 78, right: 24 };
+  const margin = chartGeometry;
   const width = els.chart.viewBox.baseVal.width || 900;
   const plotW = Math.max(1, width - margin.left - margin.right);
   const px = margin.left + (n === 1 ? plotW / 2 : (probeIndex / (n - 1)) * plotW);
@@ -1163,6 +1215,7 @@ function renderLegend(allViews) {
     return;
   }
   legend.hidden = false;
+  const parts = viewLabelParts(allViews);
   const fragment = document.createDocumentFragment();
   for (const view of allViews) {
     const item = document.createElement("li");
@@ -1181,7 +1234,7 @@ function renderLegend(allViews) {
 
     const label = document.createElement("span");
     label.className = "legend-label";
-    label.textContent = shortViewLabel(view);
+    label.textContent = distinctViewLabel(view, parts);
     label.title = shortViewLabel(view);
     button.appendChild(label);
 
@@ -1218,6 +1271,7 @@ function renderViewStats(views) {
     return;
   }
   container.hidden = false;
+  const parts = views.length > 1 ? viewLabelParts(views) : null;
   const fragment = document.createDocumentFragment();
   for (const view of views) {
     const points = view.points;
@@ -1238,7 +1292,7 @@ function renderViewStats(views) {
     label.appendChild(swatch);
     const name = document.createElement("span");
     name.className = "stat-name";
-    name.textContent = shortViewLabel(view);
+    name.textContent = parts ? distinctViewLabel(view, parts) : shortViewLabel(view);
     name.title = shortViewLabel(view);
     label.appendChild(name);
     card.appendChild(label);
@@ -1294,6 +1348,7 @@ function renderTable(views) {
     return;
   }
   els.tableEmpty.hidden = true;
+  const labelParts = viewLabelParts(views);
   const fragment = document.createDocumentFragment();
   rows.forEach(({ point, view, prev }, index) => {
     const tr = document.createElement("tr");
@@ -1312,7 +1367,7 @@ function renderTable(views) {
     swatch.style.background = view.color;
     td.appendChild(swatch);
     const label = document.createElement("span");
-    label.textContent = shortViewLabel(view);
+    label.textContent = distinctViewLabel(view, labelParts);
     label.title = shortViewLabel(view);
     td.appendChild(label);
     tr.appendChild(td);

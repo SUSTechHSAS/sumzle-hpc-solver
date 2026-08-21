@@ -370,6 +370,22 @@ async function main() {
     expectNoErrors();
   });
 
+  await test("y-axis ticks stay compact and never clip outside the panel", async () => {
+    await reset();
+    const texts = await page.locator("#chart .chart-axis-label").allTextContents();
+    const yTicks = texts.filter((t) => !/^[0-9a-f]{7}$/.test(t));
+    assert(yTicks.length === 5, `expected 5 y ticks, got ${yTicks.length}`);
+    assert(yTicks.every((t) => t.length <= 8), `ticks should be compact: ${yTicks.join(", ")}`);
+    const inside = await page.evaluate(() => {
+      const panel = document.querySelector(".chart-panel").getBoundingClientRect();
+      return [...document.querySelectorAll("#chart .chart-axis-label")]
+        .filter((el) => !/^[0-9a-f]{7}$/.test(el.textContent))
+        .every((el) => el.getBoundingClientRect().left >= panel.left);
+    });
+    assert(inside, "y tick labels must not overflow the panel's left edge");
+    expectNoErrors();
+  });
+
   await test("theme toggle cycles modes and persists across reload", async () => {
     await page.goto(base, { waitUntil: "networkidle" });
     await waitLoaded();
