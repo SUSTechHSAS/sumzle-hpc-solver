@@ -414,7 +414,6 @@ input:disabled {
 #chart .chart-crosshair {
   stroke: var(--chart-grid);
   stroke-width: 1;
-  stroke-dasharray: 4 4;
   pointer-events: none;
   opacity: 0;
   transition: opacity var(--dur-fast) var(--ease-out);
@@ -424,12 +423,19 @@ input:disabled {
   opacity: 1;
 }
 
-/* Keyboard time probe (multi-view navigation) */
+/* Keyboard time probe (multi-view navigation).
+   Invisible at rest — a stray accent line on the chart reads as a bug;
+   it materializes only while a keyboard user is actually probing. */
 #chart .chart-probe {
   stroke: var(--accent);
   stroke-width: 1.5;
-  stroke-dasharray: 6 3;
   pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+#chart .chart-probe:focus-visible {
+  opacity: 1;
 }
 
 #chart .chart-probe:focus-visible {
@@ -472,7 +478,7 @@ input:disabled {
 #tooltip {
   position: absolute;
   z-index: var(--z-tooltip);
-  max-width: 320px;
+  max-width: 380px;
   padding: var(--sp-3) var(--sp-4);
   border: 1px solid var(--border);
   border-top: 1px solid var(--accent);
@@ -596,18 +602,20 @@ input:disabled {
   padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--bg);
+  background: transparent;
   color: var(--ink);
   font: inherit;
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
   transition: border-color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
               opacity var(--dur-fast) var(--ease-out);
 }
 
 .legend-item button:hover {
   border-color: var(--muted);
+  background: var(--panel);
 }
 
 .legend-item button:focus-visible {
@@ -986,63 +994,6 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   margin-top: var(--sp-2);
 }
 
-/* ── Chart interaction tip ── */
-
-.chart-tip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  margin-top: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--sp-2);
-  background: var(--bg);
-  color: var(--muted);
-  font-size: 0.75rem;
-  line-height: 1.4;
-  animation: tip-in var(--dur-normal) var(--ease-out) both;
-}
-
-@keyframes tip-in {
-  from {
-    opacity: 0;
-    transform: translateY(var(--sp-1));
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.chart-tip-dismiss {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: var(--sp-2);
-  background: transparent;
-  color: var(--muted);
-  font-size: 1.125rem;
-  line-height: 1;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-
-.chart-tip-dismiss:hover {
-  background: var(--border);
-  color: var(--ink);
-}
-
-.chart-tip-dismiss:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
-  outline-offset: 2px;
-}
-
 /* ── Retry button (error recovery) ── */
 
 .retry-btn {
@@ -1160,19 +1111,16 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 
 .view-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
-  gap: var(--sp-2);
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--sp-2) var(--sp-6);
   margin-bottom: var(--sp-3);
 }
 
 .stat-card {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--sp-2);
-  background: var(--bg);
+  gap: 2px;
+  padding: 0;
   min-width: 0;
 }
 
@@ -1403,10 +1351,6 @@ h1 {
 
   #tooltip {
     transition: none;
-  }
-
-  .chart-tip {
-    animation: none;
   }
 
   tbody tr {

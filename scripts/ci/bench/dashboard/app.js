@@ -1,8 +1,3 @@
-/* ── Touch/device detection for contextual copy ── */
-if (!window.matchMedia("(hover: hover)").matches) {
-  const tipText = document.getElementById("chart-tip-text");
-  if (tipText) tipText.textContent = "Tap data points for details — use arrow keys to navigate the chart";
-}
 
 const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 const prefersReducedMotionNow = () => prefersReducedMotion.matches;
@@ -85,8 +80,6 @@ const els = {
   chartSubtitle: document.getElementById("chart-subtitle"),
   tooltip: document.getElementById("tooltip"),
   chartStatus: document.getElementById("chart-status"),
-  chartTip: document.getElementById("chart-tip"),
-  chartTipDismiss: document.getElementById("chart-tip-dismiss"),
   legend: document.getElementById("legend"),
   table: document.getElementById("run-table"),
   tableEmpty: document.getElementById("table-empty"),
@@ -1588,10 +1581,6 @@ async function main() {
     els.summary.appendChild(s2);
     els.summary.appendChild(document.createTextNode(" metrics. Toggle filter chips to overlay views; use the recent-run slider to zoom."));
 
-    /* Show chart interaction tip on first visit (dismissed per browser) */
-    if (els.chartTip && !safeStorage.get("bench-tip-dismissed")) {
-      els.chartTip.hidden = false;
-    }
   }
   els.summary.classList.remove("summary-error");
   els.summary.classList.add("summary-loaded");
@@ -1642,13 +1631,6 @@ async function main() {
     });
   }
 
-  /* Dismiss chart tip and persist preference */
-  if (els.chartTipDismiss) {
-    els.chartTipDismiss.addEventListener("click", () => {
-      if (els.chartTip) els.chartTip.hidden = true;
-      safeStorage.set("bench-tip-dismissed", "1");
-    });
-  }
 
   let resizeTimeout;
   window.addEventListener("resize", () => {
