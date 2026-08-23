@@ -400,6 +400,10 @@ async function main() {
     await page.waitForTimeout(200);
     visible = await page.evaluate(() => document.getElementById("tooltip").hasAttribute("data-visible"));
     assert(visible, "snapping tooltip appears when inspecting near a dot");
+    const activeRows = await page.locator(".tooltip-row.is-active").count();
+    assert(activeRows === 1, `the snapped dot's row should be highlighted, got ${activeRows}`);
+    const deltaInTooltip = await page.locator("#tooltip .tooltip-row-delta").count();
+    assert(deltaInTooltip === 0, "tooltip rows stay minimal - deltas live in the table and stat cards");
     expectNoErrors();
   });
 

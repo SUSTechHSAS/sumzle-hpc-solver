@@ -846,6 +846,7 @@ function renderChart(views) {
         x: cx,
         y: cy,
         commitIndex: ctx.commitIndex.get(pointCommitKey(point)),
+        viewKey: view.key,
         el: circle,
       });
       if (!prefersReducedMotionNow()) {
@@ -936,6 +937,11 @@ function renderChart(views) {
   }
 
   svg.appendChild(fragment);
+
+  /* Guides belong above the data: a crosshair buried under the area fills
+     reads as missing, which defeats the whole snap affordance. */
+  svg.appendChild(crosshairLine);
+  if (probeLine) svg.appendChild(probeLine);
 
   /* Post-append: measure end labels now that they are in the DOM — clamp them
      inside the plot and de-overlap vertically (curves can finish close). */
@@ -1038,6 +1044,10 @@ function nearestPointIndexForViewAtCommit(view, commitIndex) {
   return best;
 }
 
+/* One row per view at a commit: swatch, identity, value — same content the
+   deployed dashboard shows. Run-over-run deltas live in the stat cards and
+   the table's Δ column; piling them onto every row here was noise, and
+   rows without a previous run made the list inconsistent. */
 function tooltipEntriesAtCommit(commitIndex) {
   if (!currentCtx) return [];
   const entries = [];
@@ -1045,22 +1055,20 @@ function tooltipEntriesAtCommit(commitIndex) {
     const index = nearestPointIndexForViewAtCommit(view, commitIndex);
     if (index < 0) continue;
     const point = view.points[index];
-    const prev = index > 0 ? view.points[index - 1] : null;
     entries.push({
+      viewKey: view.key,
       color: view.color,
       label: shortViewLabel(view),
       value: formatValue(point.value, point.unit),
       unit: point.unit,
       sha: (point.run.sha || "").slice(0, 7),
       generatedAt: point.generatedAt,
-      deltaPct: prev ? pctChange(prev.value, point.value) : null,
-      lowerIsBetter: view.lowerIsBetter,
     });
   }
   return entries;
 }
 
-function showTooltipAt(xClient, yClient, entries, titleText) {
+function showTooltipAt(xClient, yClient, entries, titleText, activeViewKey) {
   const rect = els.chart.parentElement.getBoundingClientRect();
   let tx = xClient - rect.left + 18;
   let ty = yClient - rect.top + 18;
@@ -1078,6 +1086,7 @@ function showTooltipAt(xClient, yClient, entries, titleText) {
   for (const entry of entries) {
     const row = document.createElement("div");
     row.className = "tooltip-row";
+    if (activeViewKey && entry.viewKey === activeViewKey) row.classList.add("is-active");
     row.title = `${entry.sha} · ${entry.generatedAt}`;
 
     const swatch = document.createElement("span");
@@ -1095,15 +1104,6 @@ function showTooltipAt(xClient, yClient, entries, titleText) {
     value.className = "tooltip-row-value";
     value.textContent = entry.value;
     row.appendChild(value);
-
-    if (entry.deltaPct !== null && entry.deltaPct !== undefined) {
-      const verdict = classifyDelta(entry.deltaPct, entry.lowerIsBetter);
-      const delta = document.createElement("span");
-      delta.className = "tooltip-row-delta trend-" + verdict;
-      delta.textContent = directionArrow(entry.deltaPct) + " " + formatDelta(entry.deltaPct);
-      delta.title = formatDelta(entry.deltaPct) + " vs previous run";
-      row.appendChild(delta);
-    }
 
     els.tooltip.appendChild(row);
   }
@@ -1197,7 +1197,7 @@ function inspectAt(clientX, clientY) {
   const vbH = els.chart.viewBox.baseVal.height || 420;
   const cx = rect.left + (dot.x / vbW) * rect.width;
   const cy = rect.top + (dot.y / vbH) * rect.height;
-  showTooltipAt(cx, cy, entries, commitAxisLabel(dot.commitIndex));
+  showTooltipAt(cx, cy, entries, commitAxisLabel(dot.commitIndex), dot.viewKey);
 }
 
 function showProbeTooltip() {

@@ -412,7 +412,7 @@ input:disabled {
 
 /* Crosshair guide */
 #chart .chart-crosshair {
-  stroke: var(--chart-grid);
+  stroke: var(--muted-secondary);
   stroke-width: 1;
   pointer-events: none;
   opacity: 0;
@@ -568,6 +568,16 @@ input:disabled {
   color: var(--ink);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* The row for the dot you snapped to reads first */
+.tooltip-row.is-active .tooltip-row-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.tooltip-row.is-active .tooltip-swatch {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .tooltip-row-delta {
