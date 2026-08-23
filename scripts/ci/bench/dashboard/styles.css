@@ -463,8 +463,9 @@ input:disabled {
 }
 
 #chart circle[data-point]:hover,
-#chart circle[data-point]:focus-visible {
-  r: 6;
+#chart circle[data-point]:focus-visible,
+#chart circle[data-point].nearest {
+  r: 6.5;
   filter: drop-shadow(0 0 4px var(--shadow-dot));
 }
 
@@ -479,9 +480,8 @@ input:disabled {
   position: absolute;
   z-index: var(--z-tooltip);
   max-width: 380px;
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--border);
-  border-top: 1px solid var(--accent);
   border-radius: 12px;
   background: var(--panel);
   box-shadow: 0 4px 16px var(--shadow-tooltip);
@@ -538,12 +538,12 @@ input:disabled {
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
-  font-size: 0.8125rem;
-  line-height: 1.5;
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 .tooltip-row + .tooltip-row {
-  margin-top: var(--sp-1);
+  margin-top: 2px;
 }
 
 .tooltip-swatch {

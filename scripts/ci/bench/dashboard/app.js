@@ -674,6 +674,11 @@ let currentCtx = null;
 /* Geometry of the last render, shared by probe movement and pointer
    hit-testing so they always agree with what was drawn. */
 let chartGeometry = { top: 24, right: 24, bottom: 64, left: 78, width: 900 };
+/* Plotted dots of the last render. Pointer inspection snaps to these:
+   away from real data the chart stays completely quiet. */
+let chartDots = [];
+let nearestDotEl = null;
+const DOT_SNAP_RADIUS = 48;
 
 function renderChart(views) {
   const svg = els.chart;
@@ -683,6 +688,8 @@ function renderChart(views) {
   probeTimes = [];
   probeIndex = 0;
   currentCtx = null;
+  chartDots = [];
+  nearestDotEl = null;
 
   const width = svg.clientWidth || 900;
   const height = svg.clientHeight || 420;
@@ -835,6 +842,12 @@ function renderChart(views) {
         attrs["data-point"] = index;
       }
       const circle = svgEl("circle", attrs);
+      chartDots.push({
+        x: cx,
+        y: cy,
+        commitIndex: ctx.commitIndex.get(pointCommitKey(point)),
+        el: circle,
+      });
       if (!prefersReducedMotionNow()) {
         circle.style.animationDelay = `${Math.min(index * 25, 600)}ms`;
       }
@@ -1007,7 +1020,6 @@ function moveProbe() {
 /* ── Crosshair + grouped tooltip ── */
 
 let crosshairRafPending = false;
-let lastCrosshairX = 0;
 
 /* Nearest visible point of a view to a commit slot — returns its index so the
    tooltip can also report the change vs the previous run. */
@@ -1130,15 +1142,62 @@ function commitAxisLabel(index) {
   return `${key.slice(0, 7)} · ${formatTick(currentCtx.commitTimes.get(key) || 0, span)}`;
 }
 
-function showPointerTooltip(event) {
-  if (!currentCtx || !currentCtx.views.length) return;
+function svgPointFromEvent(clientX, clientY) {
   const rect = els.chart.getBoundingClientRect();
-  const svgX = ((event.clientX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-  const index = commitAtSvgX(svgX);
-  if (index == null) return;
-  const entries = tooltipEntriesAtCommit(index);
+  const vbW = els.chart.viewBox.baseVal.width || 900;
+  const vbH = els.chart.viewBox.baseVal.height || 420;
+  return {
+    x: ((clientX - rect.left) / rect.width) * vbW,
+    y: ((clientY - rect.top) / rect.height) * vbH,
+  };
+}
+
+function nearestDotTo(svgX, svgY) {
+  let best = null;
+  let bestDist = DOT_SNAP_RADIUS * DOT_SNAP_RADIUS;
+  for (const dot of chartDots) {
+    const dx = dot.x - svgX;
+    const dy = dot.y - svgY;
+    const dist = dx * dx + dy * dy;
+    if (dist <= bestDist) {
+      bestDist = dist;
+      best = dot;
+    }
+  }
+  return best;
+}
+
+function setNearestDot(dot) {
+  const next = dot ? dot.el : null;
+  if (next === nearestDotEl) return;
+  if (nearestDotEl) nearestDotEl.classList.remove("nearest");
+  nearestDotEl = next;
+  if (nearestDotEl) nearestDotEl.classList.add("nearest");
+}
+
+function inspectAt(clientX, clientY) {
+  if (!currentCtx || !chartDots.length) return;
+  const p = svgPointFromEvent(clientX, clientY);
+  const dot = nearestDotTo(p.x, p.y);
+  setNearestDot(dot);
+  if (!dot) {
+    if (crosshairLine) crosshairLine.classList.remove("visible");
+    hideTooltip();
+    return;
+  }
+  if (crosshairLine) {
+    crosshairLine.setAttribute("x1", dot.x);
+    crosshairLine.setAttribute("x2", dot.x);
+    crosshairLine.classList.add("visible");
+  }
+  const entries = tooltipEntriesAtCommit(dot.commitIndex);
   if (!entries.length) return;
-  showTooltipAt(event.clientX, event.clientY, entries, commitAxisLabel(index));
+  const rect = els.chart.getBoundingClientRect();
+  const vbW = els.chart.viewBox.baseVal.width || 900;
+  const vbH = els.chart.viewBox.baseVal.height || 420;
+  const cx = rect.left + (dot.x / vbW) * rect.width;
+  const cy = rect.top + (dot.y / vbH) * rect.height;
+  showTooltipAt(cx, cy, entries, commitAxisLabel(dot.commitIndex));
 }
 
 function showProbeTooltip() {
@@ -1159,43 +1218,25 @@ function hideTooltip() {
 }
 
 els.chart.addEventListener("mousemove", (event) => {
-  if (!crosshairLine) return;
-  lastCrosshairX = event.clientX;
   if (crosshairRafPending) return;
   crosshairRafPending = true;
   requestAnimationFrame(() => {
     crosshairRafPending = false;
-    const rect = els.chart.getBoundingClientRect();
-    const svgX = ((lastCrosshairX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-    crosshairLine.setAttribute("x1", svgX);
-    crosshairLine.setAttribute("x2", svgX);
-    crosshairLine.classList.add("visible");
-    showPointerTooltip({ clientX: lastCrosshairX, clientY: rect.top + rect.height / 2 });
+    inspectAt(event.clientX, event.clientY);
   });
 });
 
 els.chart.addEventListener("mouseleave", () => {
   if (crosshairLine) crosshairLine.classList.remove("visible");
+  setNearestDot(null);
   hideTooltip();
 });
 
 els.chart.addEventListener("touchstart", (event) => {
-  if (!currentCtx || !currentCtx.views.length) return;
   const touch = event.touches[0];
   if (!touch) return;
   event.preventDefault();
-  const rect = els.chart.getBoundingClientRect();
-  const svgX = ((touch.clientX - rect.left) / rect.width) * (els.chart.viewBox.baseVal.width || 900);
-  const index = commitAtSvgX(svgX);
-  if (index == null) return;
-  const entries = tooltipEntriesAtCommit(index);
-  if (!entries.length) return;
-  showTooltipAt(touch.clientX, touch.clientY, entries, commitAxisLabel(index));
-  if (crosshairLine) {
-    crosshairLine.setAttribute("x1", svgX);
-    crosshairLine.setAttribute("x2", svgX);
-    crosshairLine.classList.add("visible");
-  }
+  inspectAt(touch.clientX, touch.clientY);
 }, { passive: false });
 
 /* ── Legend (click to show/hide a view) ── */

@@ -370,6 +370,39 @@ async function main() {
     expectNoErrors();
   });
 
+  await test("tooltip appears only near data points", async () => {
+    await reset();
+    const spot = await page.evaluate(() => {
+      const dots = [...document.querySelectorAll("#chart circle[data-point]")].map((el) => ({
+        x: el.cx.baseVal.value,
+        y: el.cy.baseVal.value,
+      }));
+      const first = dots[0];
+      for (let d = 60; d <= 240; d += 10) {
+        const tx = first.x + d;
+        const ty = Math.max(30, first.y - d);
+        const clear = dots.every((p) => Math.hypot(p.x - tx, p.y - ty) > 48);
+        if (clear) return { x: tx, y: ty };
+      }
+      return null;
+    });
+    assert(spot, "found a spot far from every data point");
+    const box = await page.locator("#chart").boundingBox();
+    const vb = await page.evaluate(() => ({
+      w: document.getElementById("chart").viewBox.baseVal.width,
+      h: document.getElementById("chart").viewBox.baseVal.height,
+    }));
+    await page.mouse.move(box.x + (spot.x / vb.w) * box.width, box.y + (spot.y / vb.h) * box.height);
+    await page.waitForTimeout(200);
+    let visible = await page.evaluate(() => document.getElementById("tooltip").hasAttribute("data-visible"));
+    assert(!visible, "chart must stay quiet away from data points");
+    await page.locator("#chart circle[data-point]").first().hover();
+    await page.waitForTimeout(200);
+    visible = await page.evaluate(() => document.getElementById("tooltip").hasAttribute("data-visible"));
+    assert(visible, "snapping tooltip appears when inspecting near a dot");
+    expectNoErrors();
+  });
+
   await test("y-axis ticks stay compact and never clip outside the panel", async () => {
     await reset();
     const texts = await page.locator("#chart .chart-axis-label").allTextContents();
