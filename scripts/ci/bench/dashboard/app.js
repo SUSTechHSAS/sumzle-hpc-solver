@@ -1027,43 +1027,30 @@ function moveProbe() {
 
 let crosshairRafPending = false;
 
-/* Nearest visible point of a view to a commit slot — returns its index so the
-   tooltip can also report the change vs the previous run. */
-function nearestPointIndexForViewAtCommit(view, commitIndex) {
-  let best = -1;
-  let bestDist = Infinity;
-  view.points.forEach((point, index) => {
-    const idx = currentCtx.commitIndex.get(pointCommitKey(point));
-    if (idx === undefined) return;
-    const dist = Math.abs(idx - commitIndex);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = index;
-    }
-  });
-  return best;
-}
 
-/* One row per view at a commit: swatch, identity, value — same content the
-   deployed dashboard shows. Run-over-run deltas live in the stat cards and
-   the table's Δ column; piling them onto every row here was noise, and
-   rows without a previous run made the list inconsistent. */
+/* One row per RUN actually measured at this commit — exact sha match.
+   On a commit-order axis a commit belongs to one branch; pulling every other
+   view's nearest point from wherever its curve happens to pass was a
+   fabricated comparison (hovering a main dot listed PR values measured at
+   other commits). Re-benchmarks of the same sha group here naturally. */
 function tooltipEntriesAtCommit(commitIndex) {
-  if (!currentCtx) return [];
+  if (!currentCtx || !currentCtx.commits?.length) return [];
+  const key = currentCtx.commits[commitIndex];
+  if (!key) return [];
   const entries = [];
   for (const view of currentCtx.views) {
-    const index = nearestPointIndexForViewAtCommit(view, commitIndex);
-    if (index < 0) continue;
-    const point = view.points[index];
-    entries.push({
-      viewKey: view.key,
-      color: view.color,
-      label: shortViewLabel(view),
-      value: formatValue(point.value, point.unit),
-      unit: point.unit,
-      sha: (point.run.sha || "").slice(0, 7),
-      generatedAt: point.generatedAt,
-    });
+    for (const point of view.points) {
+      if (pointCommitKey(point) !== key) continue;
+      entries.push({
+        viewKey: view.key,
+        color: view.color,
+        label: shortViewLabel(view),
+        value: formatValue(point.value, point.unit),
+        unit: point.unit,
+        sha: (point.run.sha || "").slice(0, 7),
+        generatedAt: point.generatedAt,
+      });
+    }
   }
   return entries;
 }

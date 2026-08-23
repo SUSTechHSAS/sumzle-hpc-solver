@@ -279,15 +279,23 @@ async function main() {
     expectNoErrors();
   });
 
-  await test("keyboard probe compares all views at a time", async () => {
+  await test("keyboard probe lists only runs measured at each commit", async () => {
     await reset();
     await clickChip("series", "PR #10");
     assert((await lines().count()) === 2, "precondition: 2 views");
-    await page.locator("#chart .chart-probe").focus();
-    assert((await page.locator(".tooltip-row").count()) === 2, "tooltip should list every view");
-    await page.keyboard.press("ArrowRight");
-    await page.keyboard.press("ArrowRight");
-    assert((await page.locator(".tooltip-row").count()) === 2, "tooltip follows the probe");
+    const probe = page.locator("#chart .chart-probe");
+    await probe.focus();
+    /* The first commit belongs to main alone - listing PR #10's value from
+       its own later commits here would be a fabricated comparison. */
+    let rows = await page.locator(".tooltip-row").allTextContents();
+    assert(rows.length === 1, `slot 0 lists only its own run, got ${rows.length}: ${rows}`);
+    assert(rows[0].includes("main"), `slot 0 row is main, got ${rows[0]}`);
+    await probe.press("End");
+    rows = await page.locator(".tooltip-row").allTextContents();
+    assert(
+      rows.length === 1 && rows[0].includes("PR #10"),
+      `the last commit belongs to PR #10, got ${JSON.stringify(rows)}`,
+    );
     await page.keyboard.press("Escape");
     expectNoErrors();
   });
