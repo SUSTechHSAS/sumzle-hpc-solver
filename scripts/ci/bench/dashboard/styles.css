@@ -25,6 +25,7 @@
   /* ── Colors (OKLCH for perceptual uniformity, neutrals tinted toward brand hue) ── */
   --bg: oklch(0.975 0.005 250);
   --panel: oklch(1 0 0);
+  --surface-raised: oklch(0.985 0.004 250);
   --ink: oklch(0.22 0.015 250);
   --muted: oklch(0.52 0.01 250);
   --muted-secondary: oklch(0.62 0.008 250);
@@ -42,13 +43,21 @@
   --shadow-dot: oklch(0.46 0.12 340 / 0.4);
   --shadow-focus: oklch(0.49 0.12 175 / 0.12);
   --shadow-thumb: oklch(0 0 0 / 0.15);
+  /* Trend verdicts: an improvement (respecting lower_is_better) vs a regression */
+  --trend-good: oklch(0.5 0.13 150);
+  --trend-bad: oklch(0.52 0.17 25);
   --z-tooltip: 10;
 }
 
+/* Manual theme override (header toggle). The dark palette is declared twice:
+   once for system preference and once for the explicit attribute. Keep the
+   two blocks in sync. [data-theme] blocks must stay after the media query. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: oklch(0.15 0.01 260);
     --panel: oklch(0.2 0.015 260);
+    --surface-raised: oklch(0.235 0.018 260);
     --ink: oklch(0.9 0.005 250);
     --muted: oklch(0.62 0.01 250);
     --muted-secondary: oklch(0.55 0.008 250);
@@ -66,7 +75,39 @@
     --shadow-dot: oklch(0.72 0.1 340 / 0.4);
     --shadow-focus: oklch(0.72 0.14 175 / 0.15);
     --shadow-thumb: oklch(1 0 0 / 0.1);
+    --trend-good: oklch(0.75 0.13 150);
+    --trend-bad: oklch(0.7 0.15 25);
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: oklch(0.15 0.01 260);
+  --panel: oklch(0.2 0.015 260);
+  --surface-raised: oklch(0.235 0.018 260);
+  --ink: oklch(0.9 0.005 250);
+  --muted: oklch(0.62 0.01 250);
+  --muted-secondary: oklch(0.55 0.008 250);
+  --border: oklch(0.3 0.015 260);
+  --accent: oklch(0.72 0.14 175);
+  --accent-2: oklch(0.72 0.1 340);
+  --grid: oklch(0.25 0.012 260);
+  --error: oklch(0.68 0.18 25);
+  --chart-line: oklch(0.72 0.14 175);
+  --chart-dot: oklch(0.72 0.1 340);
+  --chart-label: oklch(0.62 0.01 250);
+  --chart-grid: oklch(0.25 0.012 260);
+  --chart-area-opacity: 0.1;
+  --shadow-tooltip: oklch(0 0 0 / 0.35);
+  --shadow-dot: oklch(0.72 0.1 340 / 0.4);
+  --shadow-focus: oklch(0.72 0.14 175 / 0.15);
+  --shadow-thumb: oklch(1 0 0 / 0.1);
+  --trend-good: oklch(0.75 0.13 150);
+  --trend-bad: oklch(0.7 0.15 25);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 * {
@@ -88,13 +129,19 @@ body {
 /* ── Header ── */
 
 header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--sp-6);
-  padding: var(--sp-6) clamp(var(--sp-4), 4vw, var(--sp-12));
-  border-bottom: 1px solid var(--accent);
-  background: var(--panel);
+  padding: var(--sp-4) clamp(var(--sp-4), 4vw, var(--sp-12));
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 5%, transparent);
 }
 
 h1,
@@ -131,7 +178,7 @@ a:hover {
 }
 
 a:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
   outline-offset: 2px;
   border-radius: 2px;
 }
@@ -154,8 +201,10 @@ main {
   flex-direction: column;
   gap: var(--sp-3);
   padding: var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 5%, transparent);
   contain: content;
 }
 
@@ -206,8 +255,8 @@ main {
 }
 
 .chip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
 }
 
 .chip[aria-pressed="true"] {
@@ -248,8 +297,8 @@ main {
 }
 
 .reset-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
 }
 
 /* Range input: inline with output */
@@ -294,8 +343,8 @@ input:hover {
 }
 
 input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--shadow-focus);
 }
@@ -312,8 +361,9 @@ input:disabled {
   position: relative;
   padding: var(--sp-4);
   border: 1px solid var(--border);
-  border-radius: var(--sp-2);
-  background: var(--panel);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 7%, transparent);
   contain: content;
 }
 
@@ -362,9 +412,8 @@ input:disabled {
 
 /* Crosshair guide */
 #chart .chart-crosshair {
-  stroke: var(--chart-grid);
+  stroke: var(--muted-secondary);
   stroke-width: 1;
-  stroke-dasharray: 4 4;
   pointer-events: none;
   opacity: 0;
   transition: opacity var(--dur-fast) var(--ease-out);
@@ -374,16 +423,23 @@ input:disabled {
   opacity: 1;
 }
 
-/* Keyboard time probe (multi-view navigation) */
+/* Keyboard time probe (multi-view navigation).
+   Invisible at rest — a stray accent line on the chart reads as a bug;
+   it materializes only while a keyboard user is actually probing. */
 #chart .chart-probe {
   stroke: var(--accent);
   stroke-width: 1.5;
-  stroke-dasharray: 6 3;
   pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 
 #chart .chart-probe:focus-visible {
-  outline: 2px solid var(--accent);
+  opacity: 1;
+}
+
+#chart .chart-probe:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
   outline-offset: 2px;
 }
 
@@ -407,13 +463,14 @@ input:disabled {
 }
 
 #chart circle[data-point]:hover,
-#chart circle[data-point]:focus-visible {
-  r: 6;
+#chart circle[data-point]:focus-visible,
+#chart circle[data-point].nearest {
+  r: 6.5;
   filter: drop-shadow(0 0 4px var(--shadow-dot));
 }
 
 #chart circle[data-point]:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
   outline-offset: 2px;
 }
 
@@ -422,11 +479,10 @@ input:disabled {
 #tooltip {
   position: absolute;
   z-index: var(--z-tooltip);
-  max-width: 320px;
-  padding: var(--sp-3) var(--sp-4);
+  max-width: 380px;
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--border);
-  border-top: 1px solid var(--accent);
-  border-radius: var(--sp-2);
+  border-radius: 12px;
   background: var(--panel);
   box-shadow: 0 4px 16px var(--shadow-tooltip);
   pointer-events: none;
@@ -482,12 +538,12 @@ input:disabled {
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
-  font-size: 0.8125rem;
-  line-height: 1.5;
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 .tooltip-row + .tooltip-row {
-  margin-top: var(--sp-1);
+  margin-top: 2px;
 }
 
 .tooltip-swatch {
@@ -510,6 +566,23 @@ input:disabled {
 .tooltip-row-value {
   flex-shrink: 0;
   color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The row for the dot you snapped to reads first */
+.tooltip-row.is-active .tooltip-row-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.tooltip-row.is-active .tooltip-swatch {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.tooltip-row-delta {
+  flex-shrink: 0;
+  font-size: 0.75rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -539,23 +612,25 @@ input:disabled {
   padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--bg);
+  background: transparent;
   color: var(--ink);
   font: inherit;
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
   transition: border-color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
               opacity var(--dur-fast) var(--ease-out);
 }
 
 .legend-item button:hover {
   border-color: var(--muted);
+  background: var(--panel);
 }
 
 .legend-item button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
 }
 
 .legend-item button.is-hidden {
@@ -641,6 +716,12 @@ td:nth-child(3) {
 td:nth-child(4) {
   /* Value: may be wide with units */
   max-width: 18ch;
+}
+
+td:nth-child(5) {
+  /* Δ vs prev: arrow + percentage, never wraps */
+  max-width: 10ch;
+  white-space: nowrap;
 }
 
 th {
@@ -760,22 +841,28 @@ tbody tr {
 #repo-link {
   display: inline-flex;
   align-items: center;
-  padding: var(--sp-3) var(--sp-4);
-  min-height: 44px;
+  padding: 0 var(--sp-4);
+  min-height: 42px;
   border: 1px solid var(--border);
-  border-radius: var(--sp-2);
-  font-size: 0.75rem;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  font-size: 0.8125rem;
   font-weight: 600;
   color: var(--muted);
   white-space: nowrap;
-  transition: border-color var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
+  transition: border-color 160ms ease,
+              background-color 160ms ease,
+              color 160ms ease,
+              transform 160ms ease;
 }
 
 #repo-link:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  color: var(--ink);
   text-decoration: none;
+  transform: translateY(-1px);
 }
 
 /* ── Range slider custom styling ── */
@@ -814,12 +901,12 @@ input[type="range"]::-moz-range-thumb {
 }
 
 input[type="range"]:focus-visible::-webkit-slider-thumb {
-  outline: 2px solid var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
   outline-offset: 2px;
 }
 
 input[type="range"]:focus-visible::-moz-range-thumb {
-  outline: 2px solid var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
   outline-offset: 2px;
 }
 
@@ -866,8 +953,14 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   }
   .chip,
   .reset-btn,
-  .legend-item button {
+  .copy-btn,
+  .theme-btn,
+  .legend-item button,
+  .stat-card {
     border: 1px solid ButtonText;
+  }
+  #chart .chart-end-label {
+    stroke: Canvas;
   }
 }
 
@@ -876,8 +969,9 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 .welcome {
   padding: var(--sp-8) var(--sp-4);
   border: 1px solid var(--border);
-  border-radius: var(--sp-2);
-  background: var(--panel);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 7%, transparent);
 }
 
 .welcome-content {
@@ -910,63 +1004,6 @@ input[type="range"]:focus-visible::-moz-range-thumb {
   margin-top: var(--sp-2);
 }
 
-/* ── Chart interaction tip ── */
-
-.chart-tip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  margin-top: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--sp-2);
-  background: var(--bg);
-  color: var(--muted);
-  font-size: 0.75rem;
-  line-height: 1.4;
-  animation: tip-in var(--dur-normal) var(--ease-out) both;
-}
-
-@keyframes tip-in {
-  from {
-    opacity: 0;
-    transform: translateY(var(--sp-1));
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.chart-tip-dismiss {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: var(--sp-2);
-  background: transparent;
-  color: var(--muted);
-  font-size: 1.125rem;
-  line-height: 1;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-
-.chart-tip-dismiss:hover {
-  background: var(--border);
-  color: var(--ink);
-}
-
-.chart-tip-dismiss:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 /* ── Retry button (error recovery) ── */
 
 .retry-btn {
@@ -987,8 +1024,185 @@ input[type="range"]:focus-visible::-moz-range-thumb {
 }
 
 .retry-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
+}
+
+/* ── Header actions: theme toggle + repo link ──
+   One quiet control family: a circular icon button beside a pill link,
+   both on a raised surface with a soft hover lift. */
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.theme-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent);
+  cursor: pointer;
+  transition: border-color 160ms ease,
+              background-color 160ms ease,
+              color 160ms ease,
+              transform 160ms ease;
+}
+
+.theme-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  transform: translateY(-1px);
+}
+
+.theme-btn:active {
+  transform: translateY(0);
+}
+
+.theme-btn:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
+}
+
+/* Only the icon for the active mode is shown */
+.theme-btn svg {
+  display: none;
+  width: 20px;
+  height: 20px;
+}
+
+.theme-btn[data-mode="auto"] svg[data-icon="auto"],
+.theme-btn[data-mode="light"] svg[data-icon="light"],
+.theme-btn[data-mode="dark"] svg[data-icon="dark"] {
+  display: block;
+}
+/* ── Copy link button ── */
+
+.copy-btn {
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+
+.copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.copy-btn:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  outline-offset: 2px;
+}
+
+.copy-btn.is-copied {
+  border-color: var(--trend-good);
+  color: var(--trend-good);
+}
+
+/* ── View stat cards (latest value + trend per overlaid view) ── */
+
+.view-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--sp-2) var(--sp-6);
+  margin-bottom: var(--sp-3);
+}
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  min-width: 0;
+}
+
+.stat-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.3;
+  min-width: 0;
+}
+
+.stat-swatch {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.stat-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.stat-value {
+  color: var(--ink);
+  font-size: 1.125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.stat-delta {
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.trend-good {
+  color: var(--trend-good);
+}
+
+.trend-bad {
+  color: var(--trend-bad);
+}
+
+.trend-flat {
+  color: var(--muted-secondary);
+  font-weight: 500;
+}
+
+/* ── End-of-line value labels on the chart ── */
+
+#chart .chart-end-label {
+  font-weight: 600;
+  font-size: 11px;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── SVG chart empty state ── */
@@ -1147,10 +1361,6 @@ h1 {
 
   #tooltip {
     transition: none;
-  }
-
-  .chart-tip {
-    animation: none;
   }
 
   tbody tr {

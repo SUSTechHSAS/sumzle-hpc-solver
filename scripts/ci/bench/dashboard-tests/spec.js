@@ -9,6 +9,8 @@
  *   - multiple views overlay in one chart with distinct colors (#46)
  *   - legend show/hide, mixed-unit normalization, URL round-trip,
  *     reset button, keyboard probe, empty state, mobile layout
+ *   - view stat cards, per-run delta column, end-of-line labels,
+ *     manual theme toggle, copy-link button
  *   - no console or page errors
  *
  * Usage:
@@ -277,15 +279,23 @@ async function main() {
     expectNoErrors();
   });
 
-  await test("keyboard probe compares all views at a time", async () => {
+  await test("keyboard probe lists only runs measured at each commit", async () => {
     await reset();
     await clickChip("series", "PR #10");
     assert((await lines().count()) === 2, "precondition: 2 views");
-    await page.locator("#chart .chart-probe").focus();
-    assert((await page.locator(".tooltip-row").count()) === 2, "tooltip should list every view");
-    await page.keyboard.press("ArrowRight");
-    await page.keyboard.press("ArrowRight");
-    assert((await page.locator(".tooltip-row").count()) === 2, "tooltip follows the probe");
+    const probe = page.locator("#chart .chart-probe");
+    await probe.focus();
+    /* The first commit belongs to main alone - listing PR #10's value from
+       its own later commits here would be a fabricated comparison. */
+    let rows = await page.locator(".tooltip-row").allTextContents();
+    assert(rows.length === 1, `slot 0 lists only its own run, got ${rows.length}: ${rows}`);
+    assert(rows[0].includes("main"), `slot 0 row is main, got ${rows[0]}`);
+    await probe.press("End");
+    rows = await page.locator(".tooltip-row").allTextContents();
+    assert(
+      rows.length === 1 && rows[0].includes("PR #10"),
+      `the last commit belongs to PR #10, got ${JSON.stringify(rows)}`,
+    );
     await page.keyboard.press("Escape");
     expectNoErrors();
   });
@@ -332,6 +342,133 @@ async function main() {
     assert(await page.locator("#chart .chart-empty-text").isVisible(), "chart empty state visible");
     assert(await page.locator("#table-empty").isVisible(), "table empty state visible");
     await reset();
+    expectNoErrors();
+  });
+
+  await test("view stats summarize latest value and delta per view", async () => {
+    await reset();
+    assert(!(await page.locator("#view-stats").isHidden()), "stats strip visible with data");
+    assert((await page.locator("#view-stats .stat-card").count()) === 1, "one card for the single view");
+    const value = await page.locator("#view-stats .stat-value").textContent();
+    assert(/[\d.]/.test(value), `stat value should be numeric: ${value}`);
+    const delta = await page.locator("#view-stats .stat-delta").textContent();
+    assert(delta.trim().length > 0, "delta text present");
+    expectNoErrors();
+  });
+
+  await test("table has a delta column, em dash on the oldest run", async () => {
+    await reset();
+    const firstRow = await page.locator("#run-table tr").first().locator("td").allTextContents();
+    assert(firstRow.length === 6, `expected 6 columns, got ${firstRow.length}`);
+    assert(
+      firstRow[4].includes("%") || firstRow[4].trim() === "\u2014",
+      `delta cell should be a percentage or em dash, got: ${firstRow[4]}`,
+    );
+    const lastRow = await page.locator("#run-table tr").last().locator("td").allTextContents();
+    assert(lastRow[4].trim() === "\u2014", "oldest run in range has no previous run to compare");
+    expectNoErrors();
+  });
+
+  await test("end-of-line labels annotate each visible curve", async () => {
+    await reset();
+    assert((await page.locator("#chart .chart-end-label").count()) === 1, "one end label for a single view");
+    await clickChip("series", "PR #10");
+    assert((await page.locator("#chart .chart-end-label").count()) === 2, "one end label per view");
+    await reset();
+    expectNoErrors();
+  });
+
+  await test("tooltip appears only near data points", async () => {
+    await reset();
+    const spot = await page.evaluate(() => {
+      const dots = [...document.querySelectorAll("#chart circle[data-point]")].map((el) => ({
+        x: el.cx.baseVal.value,
+        y: el.cy.baseVal.value,
+      }));
+      const first = dots[0];
+      for (let d = 60; d <= 240; d += 10) {
+        const tx = first.x + d;
+        const ty = Math.max(30, first.y - d);
+        const clear = dots.every((p) => Math.hypot(p.x - tx, p.y - ty) > 48);
+        if (clear) return { x: tx, y: ty };
+      }
+      return null;
+    });
+    assert(spot, "found a spot far from every data point");
+    const box = await page.locator("#chart").boundingBox();
+    const vb = await page.evaluate(() => ({
+      w: document.getElementById("chart").viewBox.baseVal.width,
+      h: document.getElementById("chart").viewBox.baseVal.height,
+    }));
+    await page.mouse.move(box.x + (spot.x / vb.w) * box.width, box.y + (spot.y / vb.h) * box.height);
+    await page.waitForTimeout(200);
+    let visible = await page.evaluate(() => document.getElementById("tooltip").hasAttribute("data-visible"));
+    assert(!visible, "chart must stay quiet away from data points");
+    await page.locator("#chart circle[data-point]").first().hover();
+    await page.waitForTimeout(200);
+    visible = await page.evaluate(() => document.getElementById("tooltip").hasAttribute("data-visible"));
+    assert(visible, "snapping tooltip appears when inspecting near a dot");
+    const activeRows = await page.locator(".tooltip-row.is-active").count();
+    assert(activeRows === 1, `the snapped dot's row should be highlighted, got ${activeRows}`);
+    const deltaInTooltip = await page.locator("#tooltip .tooltip-row-delta").count();
+    assert(deltaInTooltip === 0, "tooltip rows stay minimal - deltas live in the table and stat cards");
+    expectNoErrors();
+  });
+
+  await test("y-axis ticks stay compact and never clip outside the panel", async () => {
+    await reset();
+    const texts = await page.locator("#chart .chart-axis-label").allTextContents();
+    const yTicks = texts.filter((t) => !/^[0-9a-f]{7}$/.test(t));
+    assert(yTicks.length === 5, `expected 5 y ticks, got ${yTicks.length}`);
+    assert(yTicks.every((t) => t.length <= 8), `ticks should be compact: ${yTicks.join(", ")}`);
+    const inside = await page.evaluate(() => {
+      const panel = document.querySelector(".chart-panel").getBoundingClientRect();
+      return [...document.querySelectorAll("#chart .chart-axis-label")]
+        .filter((el) => !/^[0-9a-f]{7}$/.test(el.textContent))
+        .every((el) => el.getBoundingClientRect().left >= panel.left);
+    });
+    assert(inside, "y tick labels must not overflow the panel's left edge");
+    expectNoErrors();
+  });
+
+  await test("theme toggle cycles modes and persists across reload", async () => {
+    await page.goto(base, { waitUntil: "networkidle" });
+    await waitLoaded();
+    const btn = page.locator("#theme-toggle");
+    assert((await btn.getAttribute("data-mode")) === "auto", "starts in auto mode");
+    await btn.click();
+    assert(
+      (await page.evaluate(() => document.documentElement.getAttribute("data-theme"))) === "light",
+      "light applied after first click",
+    );
+    await btn.click();
+    assert(
+      (await page.evaluate(() => document.documentElement.getAttribute("data-theme"))) === "dark",
+      "dark applied after second click",
+    );
+    await page.reload({ waitUntil: "networkidle" });
+    await waitLoaded();
+    assert(
+      (await page.evaluate(() => document.documentElement.getAttribute("data-theme"))) === "dark",
+      "manual theme persists across reload",
+    );
+    await btn.click();
+    assert(
+      (await page.evaluate(() => document.documentElement.hasAttribute("data-theme"))) === false,
+      "auto mode clears the attribute",
+    );
+    await page.goto(base, { waitUntil: "networkidle" });
+    await waitLoaded();
+    expectNoErrors();
+  });
+
+  await test("copy link button confirms the copy", async () => {
+    await reset();
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+    const btn = page.locator("#copy-link");
+    await btn.click();
+    await page.waitForFunction(() => document.querySelector("#copy-link")?.textContent.includes("copied"), null, { timeout: 3000 });
+    await page.waitForFunction(() => document.querySelector("#copy-link")?.textContent === "Copy link", null, { timeout: 5000 });
     expectNoErrors();
   });
 
